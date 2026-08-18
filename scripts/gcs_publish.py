@@ -21,7 +21,12 @@ _client = None
 def client() -> storage.Client:
     global _client
     if _client is None:
-        _client = storage.Client()
+        try:
+            _client = storage.Client()
+        except Exception:
+            # No credentials (local dry runs): the CI bucket is public-read,
+            # so baseline fetches still work; writes will fail loudly.
+            _client = storage.Client.create_anonymous_client()
     return _client
 
 
