@@ -7,30 +7,34 @@ FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
 ARG PYTHON_VERSION=3.12
 ARG TORCH_CHANNEL=https://download.pytorch.org/whl/cu128
 
+# All python/pip below resolve to this venv, including the handler's runtime
+# `pip install -r requirements.txt` when a commit changes requirements.
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     COMFY_ROOT=/comfyui \
     EXTRA_MODEL_PATHS=/comfy-config/extra_model_paths.yaml \
-    BAKED_REQ_HASH_FILE=/comfy-config/requirements.sha256
+    BAKED_REQ_HASH_FILE=/comfy-config/requirements.sha256 \
+    VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git curl ca-certificates \
-        python${PYTHON_VERSION} python${PYTHON_VERSION}-venv python3-pip \
+        python${PYTHON_VERSION} python${PYTHON_VERSION}-venv \
     && rm -rf /var/lib/apt/lists/* \
-    && ln -sf /usr/bin/python${PYTHON_VERSION} /usr/local/bin/python \
-    && python -m pip install --break-system-packages --upgrade pip
+    && python${PYTHON_VERSION} -m venv /opt/venv \
+    && pip install --upgrade pip
 
 # Torch first (large, cache-friendly), pinned to the CUDA channel above.
-RUN pip install --break-system-packages torch torchvision torchaudio --index-url ${TORCH_CHANNEL}
+RUN pip install torch torchvision torchaudio --index-url ${TORCH_CHANNEL}
 
 # Pre-clone ComfyUI and install its requirements; per-request checkout only
 # re-runs pip when the target commit's requirements.txt hash differs.
 RUN git clone --depth 50 https://github.com/Comfy-Org/ComfyUI ${COMFY_ROOT} \
-    && pip install --break-system-packages -r ${COMFY_ROOT}/requirements.txt \
+    && pip install -r ${COMFY_ROOT}/requirements.txt \
     && mkdir -p /comfy-config \
     && sha256sum ${COMFY_ROOT}/requirements.txt | cut -d' ' -f1 > ${BAKED_REQ_HASH_FILE}
 
-RUN pip install --break-system-packages runpod pynvml
+RUN pip install runpod pynvml
 
 COPY docker/extra_model_paths.yaml /comfy-config/extra_model_paths.yaml
 COPY src/ /worker/src/
