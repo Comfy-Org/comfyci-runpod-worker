@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+regression-work/
+golden-work/
+.venv/
+*.log

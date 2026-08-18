@@ -1,0 +1,50 @@
+# Generate golden baselines at a release tag (two runs per workflow: outputs +
+# determinism noise floor), then optionally bless them as the active baseline.
+# Recommended flow: run with bless=false, inspect on ci.comfy.org, re-run with
+# bless_only=true.
+name: Golden baselines
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: ComfyUI release tag (or branch) to generate goldens from
+        required: true
+      workflows:
+        description: csv of workflow ids, or 'all'
+        default: all
+      bless:
+        description: bless immediately after generating
+        type: boolean
+        default: false
+      bless_only:
+        description: skip generation; just point current.json at ref
+        type: boolean
+        default: false
+
+jobs:
+  golden:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r scripts/requirements.txt
+      - name: Write GCS credentials
+        run: |
+          echo "$GCS_SERVICE_ACCOUNT_JSON" > "$RUNNER_TEMP/gcs-sa.json"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/gcs-sa.json" >> "$GITHUB_ENV"
+        env:
+          GCS_SERVICE_ACCOUNT_JSON: ${{ secrets.GCS_SERVICE_ACCOUNT_JSON }}
+      - name: Generate / bless goldens
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          RUNPOD_ENDPOINT_ID: ${{ secrets.RUNPOD_ENDPOINT_ID }}
+          GCS_BUCKET: ${{ secrets.GCS_BUCKET }}
+        run: |
+          python scripts/golden_baseline.py \
+            --ref "${{ inputs.ref }}" \
+            --workflows "${{ inputs.workflows }}" \
+            --bucket "$GCS_BUCKET" \
+            ${{ inputs.bless && '--bless' || '' }} \
+            ${{ inputs.bless_only && '--bless-only' || '' }}

@@ -1,0 +1,14 @@
+comfyci:
+    base_path: /runpod-volume/models
+    checkpoints: checkpoints
+    clip: clip
+    text_encoders: text_encoders
+    clip_vision: clip_vision
+    configs: configs
+    controlnet: controlnet
+    diffusion_models: diffusion_models
+    unet: unet
+    embeddings: embeddings
+    loras: loras
+    upscale_models: upscale_models
+    vae: vae

@@ -1,0 +1,52 @@
+name: ComfyCI RunPod Regression
+description: >
+  Run the curated workflow manifest for a ComfyUI commit on RunPod serverless
+  GPUs, compare outputs against golden + previous-run baselines, and publish
+  results to GCS for ci.comfy.org.
+inputs:
+  comfy-commit:
+    description: ComfyUI commit sha to test
+    required: true
+  branch:
+    description: Branch name for GCS pathing and the previous-run pointer
+    required: true
+  gcs-bucket:
+    description: GCS bucket that holds regression results
+    required: true
+  workflows:
+    description: csv of workflow ids to run, or 'all' (enabled ones)
+    required: false
+    default: all
+  repo-url:
+    description: ComfyUI repo url override (forks / PR testing)
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Check out worker repo (manifest + scripts)
+      uses: actions/checkout@v4
+      with:
+        repository: comfy-org/comfyci-runpod-worker
+        path: comfyci-runpod-worker
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Install dependencies
+      shell: bash
+      run: pip install -r comfyci-runpod-worker/scripts/requirements.txt
+    - name: Write GCS credentials
+      shell: bash
+      run: |
+        echo "$GCS_SERVICE_ACCOUNT_JSON" > "$RUNNER_TEMP/gcs-sa.json"
+        echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/gcs-sa.json" >> "$GITHUB_ENV"
+    - name: Run regression suite
+      shell: bash
+      run: |
+        python comfyci-runpod-worker/scripts/run_regression.py \
+          --commit "${{ inputs.comfy-commit }}" \
+          --branch "${{ inputs.branch }}" \
+          --bucket "${{ inputs.gcs-bucket }}" \
+          --workflows "${{ inputs.workflows }}" \
+          ${{ inputs.repo-url != '' && format('--repo-url {0}', inputs.repo-url) || '' }}
