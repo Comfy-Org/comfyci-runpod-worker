@@ -2,7 +2,9 @@
 # request time (src/checkout.py), so this image only bakes the environment.
 # Models are NOT baked either — they live on the RunPod network volume,
 # wired in via /comfy-config/extra_model_paths.yaml.
-FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
+# Plain Ubuntu base: torch's cu128 wheels bundle the CUDA runtime, and the
+# GPU driver comes from the RunPod host, so a CUDA base image is dead weight.
+FROM ubuntu:24.04
 
 ARG PYTHON_VERSION=3.12
 ARG TORCH_CHANNEL=https://download.pytorch.org/whl/cu128
