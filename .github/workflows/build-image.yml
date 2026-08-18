@@ -1,29 +1,38 @@
-# Build and push the worker image. NOTE: a torch/CUDA change in this image
-# shifts the determinism noise floor — regenerate and re-bless goldens
+# Build and push the worker image to GHCR (no registry secrets needed — uses
+# the workflow's GITHUB_TOKEN). NOTE: a torch/CUDA change in this image shifts
+# the determinism noise floor — regenerate and re-bless goldens
 # (golden-baseline.yml) after any such rebuild.
 name: Build worker image
 on:
   push:
     branches: [main]
-    paths: [Dockerfile, 'src/**', 'docker/**']
+    paths:
+      - Dockerfile
+      - 'src/**'
+      - 'docker/**'
+      - '.github/workflows/build-image.yml'
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: |
-            comfyorg/comfyci-runpod-worker:latest
-            comfyorg/comfyci-runpod-worker:${{ github.sha }}
+            ghcr.io/comfy-org/comfyci-runpod-worker:latest
+            ghcr.io/comfy-org/comfyci-runpod-worker:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

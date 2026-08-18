@@ -61,15 +61,18 @@ defaults loosened to 3× the golden's own re-run noise floor
 
 ## One-time infrastructure setup
 
-1. **Docker image**: `build-image.yml` pushes `comfyorg/comfyci-runpod-worker`
-   (needs `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` secrets).
+1. **Docker image**: `build-image.yml` pushes
+   `ghcr.io/comfy-org/comfyci-runpod-worker` using the built-in
+   `GITHUB_TOKEN` (no registry secrets). After the first build, make the
+   package public (repo → Packages → package settings → Change visibility)
+   so RunPod can pull it without credentials.
 2. **RunPod**: create a Network Volume (≥250 GB, datacenter with 4090
    availability), then a serverless endpoint from the image with the volume
    attached, GPU type `RTX 4090`, max workers 3, idle timeout ~60s. Optionally
    set `HF_TOKEN` as an endpoint env var for gated models.
 3. **Repo secrets** (this repo): `RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID`,
-   `GCS_SERVICE_ACCOUNT_JSON` (write access to the CI bucket), `GCS_BUCKET`,
-   `HF_TOKEN`, `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`.
+   `GCS_SERVICE_ACCOUNT_JSON` (write access to the CI bucket), `GCS_BUCKET`
+   (`comfy-ci-results`), `HF_TOKEN`.
 4. **Seed the volume**: run `sync-models.yml` (workflow_dispatch).
 5. **First goldens**: run **Golden baselines** with the latest release tag and
    `bless: true`.
