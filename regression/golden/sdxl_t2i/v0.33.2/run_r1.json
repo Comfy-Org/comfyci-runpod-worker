@@ -1,0 +1,32 @@
+{
+  "status": "ok",
+  "error": null,
+  "comfy_version": "0.33.2",
+  "torch_version": "2.11.0+cu128",
+  "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+  "vram_peak_mb": 13642.2,
+  "validation": {
+    "filled_defaults": [],
+    "missing_nodes": [],
+    "ok": true,
+    "stripped_inputs": []
+  },
+  "timings": {
+    "checkout_s": 1.2,
+    "pip_s": 4.32,
+    "prompt_exec_s": 40.64,
+    "server_start_s": 6.22
+  },
+  "commit_checked_out": "7cee3ceb1a35503172e0dfb8dbdbdedee2aba8aa",
+  "runpod_job_id": "1e1e21b7-d2e2-4c0e-ac0b-860cf5614fb1-e1",
+  "attempt": 1,
+  "delay_s": 6933,
+  "execution_ms": 54217,
+  "outputs": [
+    {
+      "filename": "sdxl_t2i_00001_.png",
+      "bytes": 1591494,
+      "sha256": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260"
+    }
+  ]
+}
