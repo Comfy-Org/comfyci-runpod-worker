@@ -48,11 +48,24 @@ class RunPodClient:
 
 
 def _poll(client: RunPodClient, job_id: str, exec_timeout_s: float) -> dict:
-    """Poll until COMPLETED/FAILED. Returns RunPod's status body; raises TimeoutError."""
+    """Poll until COMPLETED/FAILED. Returns RunPod's status body; raises TimeoutError.
+
+    Transient network failures (runner DNS blips etc.) are tolerated for up to
+    ~5 minutes before giving up — the job keeps running server-side either way.
+    """
     t0 = time.monotonic()
     deadline = t0 + exec_timeout_s + COLD_START_ALLOWANCE_S
+    net_errors = 0
     while time.monotonic() < deadline:
-        st = client.status(job_id)
+        try:
+            st = client.status(job_id)
+            net_errors = 0
+        except requests.RequestException:
+            net_errors += 1
+            if net_errors > 30:
+                raise
+            time.sleep(POLL_INTERVAL_S)
+            continue
         state = st.get("status")
         if state in ("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"):
             return st
