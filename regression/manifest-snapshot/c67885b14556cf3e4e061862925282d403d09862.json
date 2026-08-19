@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "defaults": {
+    "gpu_type": "NVIDIA GeForce RTX 4090",
+    "timeout_s": 600,
+    "comfy_flags": [],
+    "thresholds": {
+      "max_mean_mse": 2.0,
+      "min_mean_psnr_db": 45.0,
+      "max_pct_pixels_changed": 1.0
+    }
+  },
+  "workflows": {
+    "sdxl_t2i": {
+      "enabled": true,
+      "workflow_path": "manifest/workflows/sdxl_t2i_api.json",
+      "seed_overrides": {
+        "3": {
+          "seed": 123456789
+        }
+      },
+      "models": [
+        {
+          "name": "sd_xl_base_1.0.safetensors",
+          "url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors",
+          "directory": "checkpoints"
+        }
+      ],
+      "gpu_type": null,
+      "timeout_s": null,
+      "thresholds": null,
+      "golden_tag": null
+    }
+  }
+}
