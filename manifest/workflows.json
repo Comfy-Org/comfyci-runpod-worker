@@ -28,62 +28,6 @@
       "timeout_s": null,
       "thresholds": null,
       "golden_tag": null
-    },
-    "flux_dev_t2i": {
-      "enabled": false,
-      "workflow_path": "manifest/workflows/flux_dev_t2i_api.json",
-      "seed_overrides": {
-        "16": { "noise_seed": 987654321 }
-      },
-      "models": [
-        {
-          "name": "flux1-dev.safetensors",
-          "url": "https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors",
-          "directory": "diffusion_models"
-        },
-        {
-          "name": "clip_l.safetensors",
-          "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors",
-          "directory": "text_encoders"
-        },
-        {
-          "name": "t5xxl_fp16.safetensors",
-          "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp16.safetensors",
-          "directory": "text_encoders"
-        },
-        {
-          "name": "ae.safetensors",
-          "url": "https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors",
-          "directory": "vae"
-        }
-      ],
-      "gpu_type": null,
-      "timeout_s": 900,
-      "thresholds": null,
-      "golden_tag": null
-    },
-    "ltxv_t2v": {
-      "enabled": false,
-      "workflow_path": "manifest/workflows/ltxv_t2v_api.json",
-      "seed_overrides": {
-        "72": { "noise_seed": 497797676867141 }
-      },
-      "models": [
-        {
-          "name": "ltx-video-2b-v0.9.5.safetensors",
-          "url": "https://huggingface.co/Lightricks/LTX-Video/resolve/main/ltx-video-2b-v0.9.5.safetensors",
-          "directory": "checkpoints"
-        },
-        {
-          "name": "t5xxl_fp16.safetensors",
-          "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp16.safetensors",
-          "directory": "text_encoders"
-        }
-      ],
-      "gpu_type": null,
-      "timeout_s": 1200,
-      "thresholds": null,
-      "golden_tag": null
     }
   }
 }
