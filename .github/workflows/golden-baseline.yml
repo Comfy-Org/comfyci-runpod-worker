@@ -21,6 +21,9 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: write
+
 jobs:
   golden:
     runs-on: ubuntu-latest
@@ -30,21 +33,16 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r scripts/requirements.txt
-      - name: Write GCS credentials
-        run: |
-          echo "$GCS_SERVICE_ACCOUNT_JSON" > "$RUNNER_TEMP/gcs-sa.json"
-          echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/gcs-sa.json" >> "$GITHUB_ENV"
-        env:
-          GCS_SERVICE_ACCOUNT_JSON: ${{ secrets.GCS_SERVICE_ACCOUNT_JSON }}
       - name: Generate / bless goldens
         env:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
           RUNPOD_ENDPOINT_ID: ${{ secrets.RUNPOD_ENDPOINT_ID }}
-          GCS_BUCKET: ${{ secrets.GCS_BUCKET }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python scripts/golden_baseline.py \
             --ref "${{ inputs.ref }}" \
             --workflows "${{ inputs.workflows }}" \
-            --bucket "$GCS_BUCKET" \
+            --workdir "$RUNNER_TEMP/golden-work" \
+            --results-workdir "$RUNNER_TEMP/results-checkout" \
             ${{ inputs.bless && '--bless' || '' }} \
             ${{ inputs.bless_only && '--bless-only' || '' }}

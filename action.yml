@@ -2,17 +2,25 @@ name: ComfyCI RunPod Regression
 description: >
   Run the curated workflow manifest for a ComfyUI commit on RunPod serverless
   GPUs, compare outputs against golden + previous-run baselines, and publish
-  results to GCS for ci.comfy.org.
+  results for ci.comfy.org.
 inputs:
   comfy-commit:
     description: ComfyUI commit sha to test
     required: true
   branch:
-    description: Branch name for GCS pathing and the previous-run pointer
+    description: Branch name for results pathing and the previous-run pointer
     required: true
+  storage:
+    description: >
+      Results backend: 'gcs' (needs GCS_SERVICE_ACCOUNT_JSON env + gcs-bucket)
+      or 'github' (needs a GITHUB_TOKEN env that can push to the results repo —
+      note the default workflow token cannot push across repos).
+    required: false
+    default: gcs
   gcs-bucket:
-    description: GCS bucket that holds regression results
-    required: true
+    description: GCS bucket that holds regression results (gcs storage only)
+    required: false
+    default: ''
   workflows:
     description: csv of workflow ids to run, or 'all' (enabled ones)
     required: false
@@ -37,6 +45,7 @@ runs:
       shell: bash
       run: pip install -r comfyci-runpod-worker/scripts/requirements.txt
     - name: Write GCS credentials
+      if: inputs.storage == 'gcs'
       shell: bash
       run: |
         echo "$GCS_SERVICE_ACCOUNT_JSON" > "$RUNNER_TEMP/gcs-sa.json"
@@ -47,6 +56,8 @@ runs:
         python comfyci-runpod-worker/scripts/run_regression.py \
           --commit "${{ inputs.comfy-commit }}" \
           --branch "${{ inputs.branch }}" \
-          --bucket "${{ inputs.gcs-bucket }}" \
+          --storage "${{ inputs.storage }}" \
           --workflows "${{ inputs.workflows }}" \
+          --results-workdir "$RUNNER_TEMP/results-checkout" \
+          ${{ inputs.gcs-bucket != '' && format('--bucket {0}', inputs.gcs-bucket) || '' }} \
           ${{ inputs.repo-url != '' && format('--repo-url {0}', inputs.repo-url) || '' }}

@@ -2,13 +2,13 @@
 
 Runs each selected workflow TWICE on RunPod at the tag's commit: r1 becomes the
 golden outputs, r2-vs-r1 is the determinism noise floor that default regression
-thresholds derive from. Results land under golden/<wf>/<tag>/ in GCS; blessing
-(--bless) flips golden/<wf>/current.json, which is what CI runs compare against.
-Generate first, inspect on the dashboard, then bless.
+thresholds derive from. Results land under golden/<wf>/<tag>/ in storage;
+blessing (--bless) flips golden/<wf>/current.json, which is what CI runs
+compare against. Generate first, inspect on the dashboard, then bless.
 
 Usage:
-  python golden_baseline.py --ref v0.3.50 --bucket <bucket> [--workflows all] [--bless]
-  python golden_baseline.py --ref v0.3.50 --bucket <bucket> --bless-only
+  python golden_baseline.py --ref v0.3.50 [--workflows all] [--bless]
+  python golden_baseline.py --ref v0.3.50 --bless-only
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 import compare
-import gcs_publish as gcs
+import storage
 from run_regression import apply_seed_overrides, entry_value, load_manifest
 from submit_and_poll import RunPodClient, run_workflow_job
 
@@ -50,14 +50,14 @@ def main():
     ap.add_argument("--manifest", default=str(HERE.parent / "manifest" / "workflows.json"))
     ap.add_argument("--ref", required=True, help="release tag (or branch) to build goldens from")
     ap.add_argument("--repo-url", default=DEFAULT_REPO)
-    ap.add_argument("--bucket", required=True)
-    ap.add_argument("--prefix", default="regression")
     ap.add_argument("--workdir", default="./golden-work")
     ap.add_argument("--workflows", default="all")
     ap.add_argument("--bless", action="store_true", help="also flip current.json after generating")
     ap.add_argument("--bless-only", action="store_true", help="no runs; just point current.json at --ref")
     ap.add_argument("--blessed-by", default=os.environ.get("GITHUB_ACTOR", "manual"))
+    storage.add_storage_args(ap)
     args = ap.parse_args()
+    store = storage.from_args(args)
 
     manifest_path = Path(args.manifest).resolve()
     repo_root = manifest_path.parent.parent
@@ -70,10 +70,11 @@ def main():
 
     if args.bless_only:
         for wf_id in selected:
-            gcs.upload_json(args.bucket, f"{args.prefix}/golden/{wf_id}/current.json",
-                            {"tag": args.ref, "blessed_by": args.blessed_by,
-                             "blessed_ts": int(time.time())})
+            store.upload_json(f"{args.prefix}/golden/{wf_id}/current.json",
+                              {"tag": args.ref, "blessed_by": args.blessed_by,
+                               "blessed_ts": int(time.time())})
             print(f"[{wf_id}] blessed golden {args.ref}")
+        store.finalize(f"bless golden {args.ref} ({', '.join(sorted(selected))})")
         return 0
 
     commit = resolve_ref(args.repo_url, args.ref)
@@ -110,25 +111,26 @@ def main():
               f"{'identical' if noise_floor.get('identical') else json.dumps(noise_floor)[:200]}")
 
         base = f"{args.prefix}/golden/{wf_id}/{args.ref}"
-        gcs.upload_dir(args.bucket, f"{base}/outputs", Path(runs[1]["outputs_dir"]))
-        gcs.upload_json(args.bucket, f"{base}/run_r1.json",
-                        {k: v for k, v in runs[1].items() if k != "outputs_dir"})
-        gcs.upload_json(args.bucket, f"{base}/run_r2.json",
-                        {k: v for k, v in runs[2].items() if k != "outputs_dir"})
-        gcs.upload_json(args.bucket, f"{base}/noise_floor.json", noise_floor)
-        gcs.upload_json(args.bucket, f"{base}/blessed.json",
-                        {"tag": args.ref, "commit": commit,
-                         "gpu_name": runs[1].get("gpu_name"),
-                         "torch_version": runs[1].get("torch_version"),
-                         "generated_by": args.blessed_by, "generated_ts": int(time.time())})
+        store.upload_dir(f"{base}/outputs", Path(runs[1]["outputs_dir"]))
+        store.upload_json(f"{base}/run_r1.json",
+                          {k: v for k, v in runs[1].items() if k != "outputs_dir"})
+        store.upload_json(f"{base}/run_r2.json",
+                          {k: v for k, v in runs[2].items() if k != "outputs_dir"})
+        store.upload_json(f"{base}/noise_floor.json", noise_floor)
+        store.upload_json(f"{base}/blessed.json",
+                          {"tag": args.ref, "commit": commit,
+                           "gpu_name": runs[1].get("gpu_name"),
+                           "torch_version": runs[1].get("torch_version"),
+                           "generated_by": args.blessed_by, "generated_ts": int(time.time())})
         print(f"[{wf_id}] golden uploaded to {base}/")
 
         if args.bless:
-            gcs.upload_json(args.bucket, f"{args.prefix}/golden/{wf_id}/current.json",
-                            {"tag": args.ref, "blessed_by": args.blessed_by,
-                             "blessed_ts": int(time.time())})
+            store.upload_json(f"{args.prefix}/golden/{wf_id}/current.json",
+                              {"tag": args.ref, "blessed_by": args.blessed_by,
+                               "blessed_ts": int(time.time())})
             print(f"[{wf_id}] blessed golden {args.ref}")
 
+    store.finalize(f"golden {args.ref} ({', '.join(sorted(selected))})")
     return 1 if failed else 0
 
 

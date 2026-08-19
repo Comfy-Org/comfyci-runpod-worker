@@ -4,8 +4,9 @@ GPU regression testing for [ComfyUI](https://github.com/Comfy-Org/ComfyUI) on
 [RunPod serverless](https://docs.runpod.io/serverless/overview), feeding
 [ci.comfy.org](https://ci.comfy.org/).
 
-On every push to ComfyUI master, a parallel CI job runs the curated workflows
-in [`manifest/workflows.json`](manifest/workflows.json) on a RunPod serverless
+For every new commit on ComfyUI master, the [GPU regression](.github/workflows/regression.yml)
+workflow runs the curated workflows in
+[`manifest/workflows.json`](manifest/workflows.json) on a RunPod serverless
 endpoint **at that exact commit** (the worker checks the commit out at request
 time), then compares the fixed-seed outputs against two baselines:
 
@@ -13,8 +14,23 @@ time), then compares the fixed-seed outputs against two baselines:
 - **previous** — the last completed run on the same branch
 
 Metrics (per frame): MSE, PSNR mean/min, max abs channel diff, % pixels
-changed, plus diff heatmaps and side-by-side strips. Everything is published to
-GCS under `regression/` where the dashboard reads it.
+changed, plus diff heatmaps and side-by-side strips. Everything is published
+under `regression/` where the dashboard reads it.
+
+## Results storage
+
+Two interchangeable backends behind one path layout (`scripts/storage.py`,
+pick with `--storage` / `REGRESSION_STORAGE`):
+
+- **github** (current default): results live on this repo's orphan `results`
+  branch; the dashboard reads them from
+  `https://raw.githubusercontent.com/Comfy-Org/comfyci-runpod-worker/results/regression/`.
+  Zero extra secrets — the scheduled workflow pushes with its own
+  `GITHUB_TOKEN`. Fine at current volume; migrate before the run rate or the
+  workflow set grows much (git history only accumulates).
+- **gcs**: `gs://comfy-ci-results/regression/` — the long-term home once a
+  `GCS_SERVICE_ACCOUNT_JSON` with write access exists. Switching is an env
+  change here plus `NEXT_PUBLIC_REGRESSION_BASE` on the dashboard.
 
 ## Layout
 
@@ -22,9 +38,10 @@ GCS under `regression/` where the dashboard reads it.
 |---|---|
 | `Dockerfile`, `docker/` | Worker image: CUDA + torch + pre-cloned ComfyUI. Commit under test is checked out per request. |
 | `src/` | RunPod handler (`handler.py`), commit checkout, workflow runner, volume model sync |
-| `manifest/workflows.json` | Single source of truth: workflows, models, seeds, thresholds |
-| `scripts/` | Orchestration run on the (CPU) CI runner: submit/poll, compare, GCS publish, golden generation |
-| `action.yml` | Composite action consumed by ComfyUI's `test-ci.yml` |
+| `manifest/workflows.json` | Single source of truth: workflows, models, seeds, thresholds (staged workflow JSONs not yet in the manifest live in `manifest/workflows/`) |
+| `scripts/` | Orchestration run on the (CPU) CI runner: submit/poll, compare, publish, golden generation |
+| `.github/workflows/regression.yml` | Scheduled poller that tests each new master commit (interim, until the core CI job below) |
+| `action.yml` | Composite action for ComfyUI's `test-ci.yml` (GCS phase) |
 
 ## Adding a workflow
 
@@ -70,15 +87,17 @@ defaults loosened to 3× the golden's own re-run noise floor
    availability), then a serverless endpoint from the image with the volume
    attached, GPU type `RTX 4090`, max workers 3, idle timeout ~60s. Optionally
    set `HF_TOKEN` as an endpoint env var for gated models.
-3. **Repo secrets** (this repo): `RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID`,
-   `GCS_SERVICE_ACCOUNT_JSON` (write access to the CI bucket), `GCS_BUCKET`
-   (`comfy-ci-results`), `HF_TOKEN`.
+3. **Repo secrets** (this repo): `RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID`, and
+   optionally `HF_TOKEN` (gated models). For the GCS phase, additionally
+   `GCS_SERVICE_ACCOUNT_JSON` (write access to the CI bucket) and `GCS_BUCKET`
+   (`comfy-ci-results`).
 4. **Seed the volume**: run `sync-models.yml` (workflow_dispatch).
 5. **First goldens**: run **Golden baselines** with the latest release tag and
    `bless: true`.
-6. **Wire into core CI**: add the job below to ComfyUI's
+6. Done — `regression.yml` now tests each new master commit on its own.
+7. **(GCS phase) Wire into core CI**: add the job below to ComfyUI's
    `.github/workflows/test-ci.yml` plus the `RUNPOD_API_KEY` /
-   `RUNPOD_ENDPOINT_ID` secrets there:
+   `RUNPOD_ENDPOINT_ID` secrets there, and retire the scheduled poller:
 
 ```yaml
   gpu-regression:
@@ -96,10 +115,12 @@ defaults loosened to 3× the golden's own re-run noise floor
           GCS_SERVICE_ACCOUNT_JSON: ${{ secrets.GCS_SERVICE_ACCOUNT_JSON }}
 ```
 
-## GCS layout
+## Results layout
+
+Identical on both backends (branch root or bucket root):
 
 ```
-gs://<bucket>/regression/
+regression/
   runs/<branch>/<commit>/<workflow_id>/{outputs/, run.json, comparison.json, figures/}
   runs/<branch>/<commit>/summary.json      # per-commit rollup (dashboard entrypoint)
   latest/<branch>.json                     # previous-run pointer, written last
@@ -112,5 +133,5 @@ gs://<bucket>/regression/
 
 - Goldens are valid **per GPU type and per worker image torch/CUDA**: after
   changing either, regenerate and re-bless (`blessed.json` records both).
-- Local dry run without touching GCS:
-  `python scripts/run_regression.py --commit <sha> --branch test --bucket x --skip-publish`
+- Local dry run without publishing anything:
+  `python scripts/run_regression.py --commit <sha> --branch test --skip-publish`

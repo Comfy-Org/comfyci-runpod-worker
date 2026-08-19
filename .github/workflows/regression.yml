@@ -1,0 +1,65 @@
+# Interim scheduler: poll ComfyUI master and run the GPU regression suite for
+# each new commit, publishing results to this repo's `results` branch (read by
+# ci.comfy.org via raw.githubusercontent.com). Once GCS credentials exist this
+# moves into ComfyUI's own test-ci.yml as a per-push job (see action.yml).
+name: GPU regression
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: ComfyUI commit sha (empty = master HEAD)
+        default: ''
+      workflows:
+        description: csv of workflow ids, or 'all'
+        default: all
+
+concurrency:
+  group: gpu-regression
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r scripts/requirements.txt
+      - name: Resolve target commit and skip if already tested
+        id: target
+        run: |
+          COMMIT="${{ inputs.commit }}"
+          if [ -z "$COMMIT" ]; then
+            COMMIT=$(git ls-remote https://github.com/Comfy-Org/ComfyUI refs/heads/master | cut -f1)
+          fi
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          # Read the last-tested pointer straight from the results branch
+          # (raw.githubusercontent.com caches for ~5 min; git does not).
+          LAST=""
+          if git fetch --depth 1 origin results 2>/dev/null; then
+            LAST=$(git show FETCH_HEAD:regression/latest/master.json 2>/dev/null \
+                   | python3 -c 'import json,sys; print(json.load(sys.stdin).get("commit",""))' || true)
+          fi
+          if [ -z "${{ inputs.commit }}" ] && [ "$COMMIT" = "$LAST" ]; then
+            echo "master HEAD $COMMIT already tested; skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Run regression suite
+        if: steps.target.outputs.skip != 'true'
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          RUNPOD_ENDPOINT_ID: ${{ secrets.RUNPOD_ENDPOINT_ID }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/run_regression.py \
+            --commit "${{ steps.target.outputs.commit }}" \
+            --branch master \
+            --workflows "${{ inputs.workflows || 'all' }}" \
+            --workdir "$RUNNER_TEMP/regression-work" \
+            --results-workdir "$RUNNER_TEMP/results-checkout"

@@ -1,5 +1,6 @@
 """CI driver: run the manifest's workflows on RunPod for one ComfyUI commit,
-compare against golden + previous-run baselines, publish everything to GCS.
+compare against golden + previous-run baselines, publish everything to storage
+(a GitHub results branch by default; GCS once credentials exist — see storage.py).
 
 Exit code: 1 iff any enabled workflow's verdict is "fail" or "execution_error".
 Infrastructure problems and missing baselines are GitHub warnings, never
@@ -7,8 +8,9 @@ failures, so RunPod flakiness cannot block core merges.
 
 Usage (CI):
   python run_regression.py --commit $GITHUB_SHA --branch master \
-      --bucket $GCS_BUCKET [--manifest ../manifest/workflows.json] [--workflows all]
-Env: RUNPOD_API_KEY, RUNPOD_ENDPOINT_ID, GOOGLE_APPLICATION_CREDENTIALS
+      [--manifest ../manifest/workflows.json] [--workflows all]
+Env: RUNPOD_API_KEY, RUNPOD_ENDPOINT_ID; GITHUB_TOKEN to push results in
+Actions (github storage) or GOOGLE_APPLICATION_CREDENTIALS (gcs storage).
 """
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ import time
 from pathlib import Path
 
 import compare
-import gcs_publish as gcs
+import storage
 from submit_and_poll import INFRA_STATUSES, RunPodClient, run_workflow_job
 
 HERE = Path(__file__).resolve().parent
@@ -84,7 +86,8 @@ def metrics_pass(metrics: dict, th: dict) -> bool:
     return True
 
 
-def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: Path) -> dict:
+def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: Path,
+                     store: storage.Storage) -> dict:
     workdir = Path(args.workdir) / wf_id
     workdir.mkdir(parents=True, exist_ok=True)
 
@@ -118,15 +121,14 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
         outputs_dir = Path(run_rec["outputs_dir"])
         figures_dir = workdir / "figures"
 
-        golden_ptr = gcs.golden_current(args.bucket, args.prefix, wf_id)
+        golden_ptr = store.golden_current(wf_id)
         if golden_ptr and golden_ptr.get("tag"):
             tag = golden_ptr["tag"]
             comparison["golden_tag"] = tag
             golden_dir = workdir / "_golden"
-            n = gcs.fetch_golden_outputs(args.bucket, args.prefix, wf_id, tag, golden_dir)
+            n = store.fetch_golden_outputs(wf_id, tag, golden_dir)
             if n:
-                noise_floor = gcs.download_json(
-                    args.bucket, f"{args.prefix}/golden/{wf_id}/{tag}/noise_floor.json")
+                noise_floor = store.noise_floor(wf_id, tag)
                 th = derive_thresholds(entry, defaults, noise_floor)
                 comparison["thresholds_used"] = th
                 comparison["vs_golden"] = compare.compare_with_figures(
@@ -138,12 +140,12 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
         else:
             comparison["verdict"] = "no_baseline"
 
-        latest = gcs.latest_pointer(args.bucket, args.prefix, args.branch)
+        latest = store.latest_pointer(args.branch)
         if latest and latest.get("commit") and latest["commit"] != args.commit:
             prev = latest["commit"]
             comparison["previous_commit"] = prev
             prev_dir = workdir / "_previous"
-            n = gcs.fetch_run_outputs(args.bucket, args.prefix, args.branch, prev, wf_id, prev_dir)
+            n = store.fetch_run_outputs(args.branch, prev, wf_id, prev_dir)
             if n:
                 comparison["vs_previous"] = compare.compare_with_figures(
                     prev_dir, outputs_dir, figures_dir, "prev", prev[:8], args.commit[:8])
@@ -158,8 +160,7 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
             import shutil
             shutil.rmtree(d)
     if not args.skip_publish:
-        gcs.publish_workflow_run(args.bucket, args.prefix, args.branch, args.commit,
-                                 wf_id, publish_dir)
+        store.publish_workflow_run(args.branch, args.commit, wf_id, publish_dir)
     return {"workflow_id": wf_id, "worker_status": status, "verdict": comparison["verdict"],
             "vs_golden": comparison["vs_golden"], "vs_previous": comparison["vs_previous"],
             "thresholds_used": comparison["thresholds_used"],
@@ -174,12 +175,12 @@ def main():
     ap.add_argument("--commit", required=True)
     ap.add_argument("--branch", required=True)
     ap.add_argument("--repo-url", default=None)
-    ap.add_argument("--bucket", required=True)
-    ap.add_argument("--prefix", default="regression")
     ap.add_argument("--workdir", default="./regression-work")
     ap.add_argument("--workflows", default="all", help="csv of workflow ids, or 'all'")
-    ap.add_argument("--skip-publish", action="store_true", help="local dry run, no GCS writes")
+    ap.add_argument("--skip-publish", action="store_true", help="local dry run, no writes")
+    storage.add_storage_args(ap)
     args = ap.parse_args()
+    store = storage.from_args(args)
 
     manifest_path = Path(args.manifest).resolve()
     repo_root = manifest_path.parent.parent
@@ -196,11 +197,12 @@ def main():
         return 0
 
     if not args.skip_publish:
-        gcs.snapshot_manifest(args.bucket, args.prefix, args.commit, manifest)
+        store.snapshot_manifest(args.commit, manifest)
 
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(selected)) as pool:
-        futs = {pool.submit(process_workflow, wf_id, entry, defaults, args, repo_root): wf_id
+        futs = {pool.submit(process_workflow, wf_id, entry, defaults, args, repo_root,
+                            store): wf_id
                 for wf_id, entry in selected.items()}
         for fut in concurrent.futures.as_completed(futs):
             wf_id = futs[fut]
@@ -219,13 +221,14 @@ def main():
                "overall": overall, "workflows": {r["workflow_id"]: r for r in results}}
 
     if not args.skip_publish:
-        gcs.publish_summary(args.bucket, args.prefix, args.branch, args.commit, summary)
+        store.publish_summary(args.branch, args.commit, summary)
         # Advance the previous-run pointer only for fully comparable runs: a commit
         # where every workflow at least produced outputs.
         if all(r["verdict"] in ("pass", "fail", "no_baseline") for r in results):
-            gcs.update_latest(args.bucket, args.prefix, args.branch,
-                              {"commit": args.commit, "run_ts": summary["run_ts"],
-                               "workflows": sorted(verdicts)})
+            store.update_latest(args.branch,
+                                {"commit": args.commit, "run_ts": summary["run_ts"],
+                                 "workflows": sorted(verdicts)})
+        store.finalize(f"regression {args.branch}@{args.commit[:8]}: {overall}")
 
     for r in results:
         v = r["verdict"]
