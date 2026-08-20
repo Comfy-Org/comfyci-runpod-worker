@@ -30,7 +30,7 @@
       "golden_tag": null
     },
     "flux_dev_t2i": {
-      "enabled": false,
+      "enabled": true,
       "workflow_path": "manifest/workflows/flux_dev_t2i_api.json",
       "seed_overrides": {
         "16": { "noise_seed": 987654321 }
