@@ -1,0 +1,12 @@
+{
+  "frames_compared": 1,
+  "frame_count_ref": 1,
+  "frame_count_cand": 1,
+  "identical": true,
+  "mean_mse": 0.0,
+  "mean_psnr_db": null,
+  "min_psnr_db": null,
+  "max_abs_diff": 0,
+  "mean_pct_pixels_changed": 0.0,
+  "worst_frame_index": 0
+}
