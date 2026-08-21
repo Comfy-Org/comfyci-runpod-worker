@@ -12,16 +12,16 @@
     "stripped_inputs": []
   },
   "timings": {
-    "checkout_s": 1.19,
-    "pip_s": 1.9,
-    "prompt_exec_s": 37.72,
-    "server_start_s": 6.23
+    "checkout_s": 0,
+    "pip_s": 0.5,
+    "prompt_exec_s": 40.58,
+    "server_start_s": 4.41
   },
   "commit_checked_out": "76135e557da1ec7dcb270160f01e597565e3e003",
-  "runpod_job_id": "2b964058-0cc5-4448-9ed4-6c06347e5ada-u1",
+  "runpod_job_id": "abc7051f-1681-4dbd-9b92-8d3dbe905f99-u1",
   "attempt": 1,
-  "delay_s": 22555,
-  "execution_ms": 48710,
+  "delay_s": 155501,
+  "execution_ms": 47381,
   "outputs": [
     {
       "filename": "sdxl_t2i_00001_.png",
