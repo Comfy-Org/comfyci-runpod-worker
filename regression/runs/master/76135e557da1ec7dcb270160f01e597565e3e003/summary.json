@@ -1,0 +1,94 @@
+{
+  "branch": "master",
+  "commit": "76135e557da1ec7dcb270160f01e597565e3e003",
+  "run_ts": 1787271673,
+  "overall": "pass",
+  "workflows": {
+    "flux_dev_t2i": {
+      "workflow_id": "flux_dev_t2i",
+      "worker_status": "ok",
+      "verdict": "pass",
+      "vs_golden": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "vs_previous": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "thresholds_used": {
+        "max_mean_mse": 2.0,
+        "min_mean_psnr_db": 45.0,
+        "max_pct_pixels_changed": 1.0
+      },
+      "golden_tag": "v0.33.2",
+      "previous_commit": "dcbcf8c2e10ba618ad38cc6eebfe54b099fec11a",
+      "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+      "timings": {
+        "checkout_s": 1.92,
+        "pip_s": 2.04,
+        "prompt_exec_s": 122,
+        "server_start_s": 7.22
+      }
+    },
+    "sdxl_t2i": {
+      "workflow_id": "sdxl_t2i",
+      "worker_status": "ok",
+      "verdict": "pass",
+      "vs_golden": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "vs_previous": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "thresholds_used": {
+        "max_mean_mse": 2.0,
+        "min_mean_psnr_db": 45.0,
+        "max_pct_pixels_changed": 1.0
+      },
+      "golden_tag": "v0.33.2",
+      "previous_commit": "dcbcf8c2e10ba618ad38cc6eebfe54b099fec11a",
+      "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+      "timings": {
+        "checkout_s": 1.19,
+        "pip_s": 1.9,
+        "prompt_exec_s": 37.72,
+        "server_start_s": 6.23
+      }
+    }
+  }
+}
