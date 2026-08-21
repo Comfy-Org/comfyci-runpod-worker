@@ -125,8 +125,9 @@ def run_workflow_job(client: RunPodClient, workflow_id: str, workflow_json: dict
             continue
         out = st.get("output") or {}
         record = {k: out.get(k) for k in
-                  ("status", "error", "comfy_version", "torch_version", "gpu_name",
-                   "vram_peak_mb", "validation", "timings", "commit_checked_out")}
+                  ("status", "error", "comfy_version", "torch_version", "python_version",
+                   "gpu_name", "vram_peak_mb", "rss_peak_mb", "validation", "timings",
+                   "commit_checked_out")}
         record["runpod_job_id"] = job_id
         record["attempt"] = attempt
         record["delay_s"] = st.get("delayTime")
