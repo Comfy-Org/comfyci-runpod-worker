@@ -60,8 +60,10 @@ def _run(job_input: dict) -> dict:
 
     out["comfy_version"] = rec.get("comfy_version")
     out["torch_version"] = rec.get("torch_version")
+    out["python_version"] = rec.get("python_version")
     out["gpu_name"] = rec.get("gpu_name")
     out["vram_peak_mb"] = rec.get("vram_peak_mb")
+    out["rss_peak_mb"] = rec.get("rss_peak_mb")
     out["validation"] = rec.get("validation")
     out["timings"]["server_start_s"] = rec.get("server_start_s")
     out["timings"]["prompt_exec_s"] = rec.get("prompt_exec_s")

@@ -159,6 +159,17 @@ def read_vram_peak_mb() -> float | None:
         return None
 
 
+def read_rss_peak_mb(pid: int) -> float | None:
+    """Kernel-tracked resident-set high-water mark (VmHWM), so no sampling loop."""
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+            if line.startswith("VmHWM:"):
+                return round(int(line.split()[1]) / 1024, 1)
+    except Exception:
+        pass
+    return None
+
+
 def collect_outputs(output_dir: Path) -> list[dict]:
     out = []
     for p in sorted(output_dir.rglob("*")):
@@ -192,6 +203,7 @@ def execute(workflow: dict, timeout_s: float = 600, extra_flags: list[str] | Non
             sysinfo = stats.get("system", {})
             record["comfy_version"] = sysinfo.get("comfyui_version")
             record["torch_version"] = sysinfo.get("pytorch_version")
+            record["python_version"] = sysinfo.get("python_version")
             devices = stats.get("devices", [])
             if devices:
                 record["gpu_name"] = devices[0].get("name")
@@ -215,6 +227,7 @@ def execute(workflow: dict, timeout_s: float = 600, extra_flags: list[str] | Non
                 "traceback": (err.get("traceback") or [])[-10:],
             })
         record["vram_peak_mb"] = read_vram_peak_mb()
+        record["rss_peak_mb"] = read_rss_peak_mb(proc.pid)
     finally:
         kill_comfy(proc)
         try:

@@ -166,7 +166,12 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
             "thresholds_used": comparison["thresholds_used"],
             "golden_tag": comparison["golden_tag"],
             "previous_commit": comparison["previous_commit"],
-            "gpu_name": run_rec.get("gpu_name"), "timings": run_rec.get("timings")}
+            "gpu_name": run_rec.get("gpu_name"), "timings": run_rec.get("timings"),
+            "vram_peak_mb": run_rec.get("vram_peak_mb"),
+            "rss_peak_mb": run_rec.get("rss_peak_mb"),
+            "comfy_version": run_rec.get("comfy_version"),
+            "torch_version": run_rec.get("torch_version"),
+            "python_version": run_rec.get("python_version")}
 
 
 def main():
