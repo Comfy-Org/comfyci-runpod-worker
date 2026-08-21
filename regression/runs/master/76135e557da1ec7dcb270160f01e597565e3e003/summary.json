@@ -1,7 +1,7 @@
 {
   "branch": "master",
   "commit": "76135e557da1ec7dcb270160f01e597565e3e003",
-  "run_ts": 1787313391,
+  "run_ts": 1787313736,
   "overall": "pass",
   "workflows": {
     "flux_dev_t2i": {
@@ -30,12 +30,12 @@
       "previous_commit": null,
       "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
       "timings": {
-        "checkout_s": 3.08,
-        "pip_s": 4.87,
-        "prompt_exec_s": 118.06,
-        "server_start_s": 11.23
+        "checkout_s": 0,
+        "pip_s": 0.49,
+        "prompt_exec_s": 115.98,
+        "server_start_s": 4.21
       },
-      "vram_peak_mb": 21931.6,
+      "vram_peak_mb": 22059.6,
       "rss_peak_mb": null,
       "comfy_version": "0.33.0",
       "torch_version": "2.11.0+cu128",
@@ -69,7 +69,7 @@
       "timings": {
         "checkout_s": 0,
         "pip_s": 0.5,
-        "prompt_exec_s": 40.58,
+        "prompt_exec_s": 37.24,
         "server_start_s": 4.41
       },
       "vram_peak_mb": 8159.6,

@@ -14,14 +14,14 @@
   "timings": {
     "checkout_s": 0,
     "pip_s": 0.5,
-    "prompt_exec_s": 40.58,
+    "prompt_exec_s": 37.24,
     "server_start_s": 4.41
   },
   "commit_checked_out": "76135e557da1ec7dcb270160f01e597565e3e003",
-  "runpod_job_id": "abc7051f-1681-4dbd-9b92-8d3dbe905f99-u1",
+  "runpod_job_id": "41a7c328-cc91-45db-869a-d3e9499d0cc2-u2",
   "attempt": 1,
-  "delay_s": 155501,
-  "execution_ms": 47381,
+  "delay_s": 902,
+  "execution_ms": 43873,
   "outputs": [
     {
       "filename": "sdxl_t2i_00001_.png",
