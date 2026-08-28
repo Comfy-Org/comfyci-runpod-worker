@@ -1,0 +1,35 @@
+{
+  "status": "ok",
+  "error": null,
+  "comfy_version": "0.34.0",
+  "torch_version": "2.11.0+cu128",
+  "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+  "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+  "vram_peak_mb": 21954.8,
+  "rss_peak_mb": 34433.9,
+  "validation": {
+    "filled_defaults": [],
+    "missing_nodes": [],
+    "ok": true,
+    "stripped_inputs": []
+  },
+  "timings": {
+    "checkout_s": 1.49,
+    "pip_s": 5.31,
+    "prompt_exec_s": 130.86,
+    "server_start_s": 11.28
+  },
+  "commit_checked_out": "0a33ed6c28f926d14536235771c222f9e6d1026b",
+  "runpod_job_id": "88ed694c-f589-4390-b2ea-1df001166da0-u1",
+  "attempt": 1,
+  "delay_s": 9670,
+  "execution_ms": 159300,
+  "outputs": [
+    {
+      "filename": "flux_dev_t2i_00001_.png",
+      "bytes": 1649672,
+      "sha256": "0b3532285816b7438ef7deee2bc3ece742154f5b54501a847f8d80607abac237"
+    }
+  ],
+  "outputs_dir": "/home/runner/work/_temp/regression-work/flux_dev_t2i/outputs"
+}
