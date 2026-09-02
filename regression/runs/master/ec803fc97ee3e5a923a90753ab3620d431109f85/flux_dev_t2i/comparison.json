@@ -1,8 +1,34 @@
 {
-  "verdict": "infra_error",
-  "vs_golden": null,
-  "vs_previous": null,
-  "thresholds_used": null,
-  "golden_tag": null,
-  "previous_commit": null
+  "verdict": "pass",
+  "vs_golden": {
+    "frames_compared": 1,
+    "frame_count_ref": 1,
+    "frame_count_cand": 1,
+    "identical": true,
+    "mean_mse": 0.0,
+    "mean_psnr_db": null,
+    "min_psnr_db": null,
+    "max_abs_diff": 0,
+    "mean_pct_pixels_changed": 0.0,
+    "worst_frame_index": 0
+  },
+  "vs_previous": {
+    "frames_compared": 1,
+    "frame_count_ref": 1,
+    "frame_count_cand": 1,
+    "identical": true,
+    "mean_mse": 0.0,
+    "mean_psnr_db": null,
+    "min_psnr_db": null,
+    "max_abs_diff": 0,
+    "mean_pct_pixels_changed": 0.0,
+    "worst_frame_index": 0
+  },
+  "thresholds_used": {
+    "max_mean_mse": 2.0,
+    "min_mean_psnr_db": 45.0,
+    "max_pct_pixels_changed": 1.0
+  },
+  "golden_tag": "v0.33.2",
+  "previous_commit": "ace9172e95038ac25015c419713aa7755f739034"
 }
