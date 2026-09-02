@@ -1,0 +1,19 @@
+{
+  "status": "checkout_error",
+  "error": null,
+  "comfy_version": null,
+  "torch_version": null,
+  "python_version": null,
+  "gpu_name": null,
+  "vram_peak_mb": null,
+  "rss_peak_mb": null,
+  "validation": null,
+  "timings": null,
+  "commit_checked_out": null,
+  "runpod_job_id": "3f4a3da9-b3b3-4e51-92bc-dec4ff986043-u1",
+  "attempt": 2,
+  "delay_s": 242,
+  "execution_ms": 764,
+  "outputs": [],
+  "outputs_dir": "/home/runner/work/_temp/regression-work/sdxl_t2i/outputs"
+}
