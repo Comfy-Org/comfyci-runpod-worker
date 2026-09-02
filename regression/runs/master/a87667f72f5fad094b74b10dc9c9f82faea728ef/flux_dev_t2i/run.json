@@ -1,0 +1,19 @@
+{
+  "status": "checkout_error",
+  "error": null,
+  "comfy_version": null,
+  "torch_version": null,
+  "python_version": null,
+  "gpu_name": null,
+  "vram_peak_mb": null,
+  "rss_peak_mb": null,
+  "validation": null,
+  "timings": null,
+  "commit_checked_out": null,
+  "runpod_job_id": "9631b86d-0d87-4711-85b0-b8836379c28e-u1",
+  "attempt": 2,
+  "delay_s": 14544,
+  "execution_ms": 921,
+  "outputs": [],
+  "outputs_dir": "/home/runner/work/_temp/regression-work/flux_dev_t2i/outputs"
+}
