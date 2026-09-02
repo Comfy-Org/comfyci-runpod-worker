@@ -10,10 +10,10 @@
   "validation": null,
   "timings": null,
   "commit_checked_out": null,
-  "runpod_job_id": "ac2bffaf-68c5-423d-b21f-9a698633165a-u1",
+  "runpod_job_id": "e310291f-d5c2-482e-bb30-54f0fc46340a-u1",
   "attempt": 2,
-  "delay_s": 127,
-  "execution_ms": 5970,
+  "delay_s": 125,
+  "execution_ms": 5463,
   "outputs": [],
   "outputs_dir": "/home/runner/work/_temp/regression-work/sdxl_t2i/outputs"
 }
