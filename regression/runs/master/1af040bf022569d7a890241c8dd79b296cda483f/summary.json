@@ -1,0 +1,42 @@
+{
+  "branch": "master",
+  "commit": "1af040bf022569d7a890241c8dd79b296cda483f",
+  "run_ts": 1788402913,
+  "overall": "pass",
+  "workflows": {
+    "flux_dev_t2i": {
+      "workflow_id": "flux_dev_t2i",
+      "worker_status": "checkout_error",
+      "verdict": "infra_error",
+      "vs_golden": null,
+      "vs_previous": null,
+      "thresholds_used": null,
+      "golden_tag": null,
+      "previous_commit": null,
+      "gpu_name": null,
+      "timings": null,
+      "vram_peak_mb": null,
+      "rss_peak_mb": null,
+      "comfy_version": null,
+      "torch_version": null,
+      "python_version": null
+    },
+    "sdxl_t2i": {
+      "workflow_id": "sdxl_t2i",
+      "worker_status": "checkout_error",
+      "verdict": "infra_error",
+      "vs_golden": null,
+      "vs_previous": null,
+      "thresholds_used": null,
+      "golden_tag": null,
+      "previous_commit": null,
+      "gpu_name": null,
+      "timings": null,
+      "vram_peak_mb": null,
+      "rss_peak_mb": null,
+      "comfy_version": null,
+      "torch_version": null,
+      "python_version": null
+    }
+  }
+}

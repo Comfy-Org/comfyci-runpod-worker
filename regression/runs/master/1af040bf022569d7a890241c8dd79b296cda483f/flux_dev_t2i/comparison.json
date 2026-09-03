@@ -1,0 +1,8 @@
+{
+  "verdict": "infra_error",
+  "vs_golden": null,
+  "vs_previous": null,
+  "thresholds_used": null,
+  "golden_tag": null,
+  "previous_commit": null
+}
