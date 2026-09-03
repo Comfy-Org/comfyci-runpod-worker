@@ -10,10 +10,10 @@
   "validation": null,
   "timings": null,
   "commit_checked_out": null,
-  "runpod_job_id": "a0d1ab1f-1c13-4bae-b9a1-c2d358d1f9ce-u2",
+  "runpod_job_id": "37828e0b-88c7-49a6-9df1-5611599226d5-u1",
   "attempt": 2,
-  "delay_s": 131,
-  "execution_ms": 415,
+  "delay_s": 129,
+  "execution_ms": 821,
   "outputs": [],
   "outputs_dir": "/home/runner/work/_temp/regression-work/flux_dev_t2i/outputs"
 }
