@@ -1,0 +1,35 @@
+{
+  "status": "ok",
+  "error": null,
+  "comfy_version": "0.35.0",
+  "torch_version": "2.11.0+cu128",
+  "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+  "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+  "vram_peak_mb": 8159.6,
+  "rss_peak_mb": 8913.7,
+  "validation": {
+    "filled_defaults": [],
+    "missing_nodes": [],
+    "ok": true,
+    "stripped_inputs": []
+  },
+  "timings": {
+    "checkout_s": 1.71,
+    "pip_s": 14.66,
+    "prompt_exec_s": 44.73,
+    "server_start_s": 11.69
+  },
+  "commit_checked_out": "b00584967778871f329c2d31190a5e9b767b8366",
+  "runpod_job_id": "960d2e4f-26ae-4852-bd7b-4b655a9bd146-u1",
+  "attempt": 1,
+  "delay_s": 198291,
+  "execution_ms": 75726,
+  "outputs": [
+    {
+      "filename": "sdxl_t2i_00001_.png",
+      "bytes": 1591494,
+      "sha256": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260"
+    }
+  ],
+  "outputs_dir": "/home/runner/work/_temp/regression-work/sdxl_t2i/outputs"
+}
