@@ -1,0 +1,34 @@
+{
+  "verdict": "fail",
+  "vs_golden": {
+    "frames_compared": 1,
+    "frame_count_ref": 1,
+    "frame_count_cand": 1,
+    "identical": false,
+    "mean_mse": 3.442175,
+    "mean_psnr_db": 42.76,
+    "min_psnr_db": 42.76,
+    "max_abs_diff": 145,
+    "mean_pct_pixels_changed": 69.986,
+    "worst_frame_index": 0
+  },
+  "vs_previous": {
+    "frames_compared": 1,
+    "frame_count_ref": 1,
+    "frame_count_cand": 1,
+    "identical": true,
+    "mean_mse": 0.0,
+    "mean_psnr_db": null,
+    "min_psnr_db": null,
+    "max_abs_diff": 0,
+    "mean_pct_pixels_changed": 0.0,
+    "worst_frame_index": 0
+  },
+  "thresholds_used": {
+    "max_mean_mse": 2.0,
+    "min_mean_psnr_db": 45.0,
+    "max_pct_pixels_changed": 1.0
+  },
+  "golden_tag": "v0.33.2",
+  "previous_commit": "66b68a337208d6bc69e341f86c33abcc3c032012"
+}
