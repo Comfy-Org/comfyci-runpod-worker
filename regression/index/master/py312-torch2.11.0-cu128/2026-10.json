@@ -1,0 +1,939 @@
+{
+  "schema_version": 1,
+  "branch": "master",
+  "lane": "py312-torch2.11.0-cu128",
+  "shard": "2026-10",
+  "entries": [
+    {
+      "c": "b87fe48b0491425f682f7ffdaed56d0387cb6c5d",
+      "t": 1791142918,
+      "o": "fail",
+      "infra": false,
+      "cv": "0.38.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Add comfy_attention and AttentionTensorContainer support to more models. (#16766)",
+        "a": "comfyanonymous",
+        "pr": 16766,
+        "ct": 1791140796
+      },
+      "prev": "f1072eb0350638a3390ddb6afbcaa8c6b237c6fd",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/f1072eb0350638a3390ddb6afbcaa8c6b237c6fd...b87fe48b0491425f682f7ffdaed56d0387cb6c5d"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "fail",
+          "d": "inherited",
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 3.442175,
+          "psnr": 42.76,
+          "pct": 69.986,
+          "pv": true,
+          "exec": 110.36,
+          "vram": 21507.5,
+          "g": "v0.33.2",
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 34.8,
+          "vram": 8157.6,
+          "g": "v0.33.2",
+          "th": null
+        }
+      },
+      "s": null
+    },
+    {
+      "c": "f1072eb0350638a3390ddb6afbcaa8c6b237c6fd",
+      "t": 1791066286,
+      "o": "fail",
+      "infra": false,
+      "cv": "0.38.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Add new attention and compiler stuff to AGENTS.md (#16762)",
+        "a": "comfyanonymous",
+        "pr": 16762,
+        "ct": 1791062742
+      },
+      "prev": "e9027f2b30f37bb3052714eb08fcf479542f4fc0",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/e9027f2b30f37bb3052714eb08fcf479542f4fc0...f1072eb0350638a3390ddb6afbcaa8c6b237c6fd"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "fail",
+          "d": "inherited",
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 3.442175,
+          "psnr": 42.76,
+          "pct": 69.986,
+          "pv": true,
+          "exec": 105.37,
+          "vram": 21795.5,
+          "g": "v0.33.2",
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 34.07,
+          "vram": 8157.6,
+          "g": "v0.33.2",
+          "th": null
+        }
+      },
+      "s": null
+    },
+    {
+      "c": "e9027f2b30f37bb3052714eb08fcf479542f4fc0",
+      "t": 1791017387,
+      "o": "fail",
+      "infra": false,
+      "cv": "0.38.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "fix(assets): write the prune and offline marking in short batches so saves aren't locked out (#16696)",
+        "a": "synap5e",
+        "pr": 16696,
+        "ct": 1791015637
+      },
+      "prev": "42664106ef63a841a87203fba990adfcfb1eed8e",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/42664106ef63a841a87203fba990adfcfb1eed8e...e9027f2b30f37bb3052714eb08fcf479542f4fc0"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "fail",
+          "d": "inherited",
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 3.442175,
+          "psnr": 42.76,
+          "pct": 69.986,
+          "pv": true,
+          "exec": 117.02,
+          "vram": 21961.6,
+          "g": "v0.33.2",
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 41.99,
+          "vram": 8145.6,
+          "g": "v0.33.2",
+          "th": null
+        }
+      },
+      "s": null
+    },
+    {
+      "c": "42664106ef63a841a87203fba990adfcfb1eed8e",
+      "t": 1791013646,
+      "o": "fail",
+      "infra": false,
+      "cv": "0.38.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "[Partner Nodes] fix(OpenAI): remove transparent background for GPT Image 2 (#16744)",
+        "a": "bigcat88",
+        "pr": 16744,
+        "ct": 1791012194
+      },
+      "prev": "30c4c3aa756f4655cde89c287c0745381a6c2bbc",
+      "range": {
+        "n": 2,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/30c4c3aa756f4655cde89c287c0745381a6c2bbc...42664106ef63a841a87203fba990adfcfb1eed8e"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "fail",
+          "d": "inherited",
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 3.442175,
+          "psnr": 42.76,
+          "pct": 69.986,
+          "pv": true,
+          "exec": 117.25,
+          "vram": 22057.6,
+          "g": "v0.33.2",
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 33.56,
+          "vram": 8159.5,
+          "g": "v0.33.2",
+          "th": null
+        }
+      },
+      "s": null
+    },
+    {
+      "c": "30c4c3aa756f4655cde89c287c0745381a6c2bbc",
+      "t": 1791011053,
+      "o": "fail",
+      "infra": false,
+      "cv": "0.38.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "perf(assets): let the partial live-path index serve live-row-at-path lookups (#16659)",
+        "a": "synap5e",
+        "pr": 16659,
+        "ct": 1791010617
+      },
+      "prev": "3c169c2c7de85ccec4582af336a92c469f14df02",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/3c169c2c7de85ccec4582af336a92c469f14df02...30c4c3aa756f4655cde89c287c0745381a6c2bbc"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "fail",
+          "d": "inherited",
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 3.442175,
+          "psnr": 42.76,
+          "pct": 69.986,
+          "pv": true,
+          "exec": 107.35,
+          "vram": 21441.6,
+          "g": "v0.33.2",
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 33.56,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": null
+        }
+      },
+      "s": null
+    },
+    {
+      "c": "3c169c2c7de85ccec4582af336a92c469f14df02",
+      "t": 1790998082,
+      "o": "fail",
+      "infra": false,
+      "cv": "0.38.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Echo the Create Bounding Boxes background as a UI preview (#16636)",
+        "a": "jtydhr88",
+        "pr": 16636,
+        "ct": 1790997855
+      },
+      "prev": "30f15eaf5c34d9b1e0fa51e07eb0d97d09f4a0cc",
+      "range": {
+        "n": 2,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/30f15eaf5c34d9b1e0fa51e07eb0d97d09f4a0cc...3c169c2c7de85ccec4582af336a92c469f14df02"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "fail",
+          "d": "inherited",
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 3.442175,
+          "psnr": 42.76,
+          "pct": 69.986,
+          "pv": true,
+          "exec": 112.76,
+          "vram": 22083.5,
+          "g": "v0.33.2",
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 51.83,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": null
+        }
+      },
+      "s": null
+    },
+    {
+      "c": "30f15eaf5c34d9b1e0fa51e07eb0d97d09f4a0cc",
+      "t": 1790996254,
+      "o": "fail",
+      "infra": false,
+      "cv": "0.38.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "feat(assets): report scan CPU and paused time, and classify scan failures (#16719)",
+        "a": "synap5e",
+        "pr": 16719,
+        "ct": 1790995189
+      },
+      "prev": "4d981c9b09db3d605c4234dd38bcea3e0abce148",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/4d981c9b09db3d605c4234dd38bcea3e0abce148...30f15eaf5c34d9b1e0fa51e07eb0d97d09f4a0cc"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "fail",
+          "d": "inherited",
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 3.442175,
+          "psnr": 42.76,
+          "pct": 69.986,
+          "pv": true,
+          "exec": 108.05,
+          "vram": 22081.6,
+          "g": "v0.33.2",
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 34.06,
+          "vram": 8159.5,
+          "g": "v0.33.2",
+          "th": null
+        }
+      },
+      "s": null
+    },
+    {
+      "c": "4d981c9b09db3d605c4234dd38bcea3e0abce148",
+      "t": 1790990978,
+      "o": "fail",
+      "infra": false,
+      "cv": "0.38.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Disable pinned memory automatically on integrated GPUs (#16746)",
+        "a": "rattus128",
+        "pr": 16746,
+        "ct": 1790990175
+      },
+      "prev": "36c0b0a687e5e6d7b55e3e61ab24262ffc0f2508",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/36c0b0a687e5e6d7b55e3e61ab24262ffc0f2508...4d981c9b09db3d605c4234dd38bcea3e0abce148"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "fail",
+          "d": "inherited",
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 3.442175,
+          "psnr": 42.76,
+          "pct": 69.986,
+          "pv": true,
+          "exec": 105.23,
+          "vram": 22083.6,
+          "g": "v0.33.2",
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 33.67,
+          "vram": 8159.5,
+          "g": "v0.33.2",
+          "th": null
+        }
+      },
+      "s": null
+    },
+    {
+      "c": "36c0b0a687e5e6d7b55e3e61ab24262ffc0f2508",
+      "t": 1790980882,
+      "o": "fail",
+      "infra": false,
+      "cv": "0.38.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "chore: update workflow templates to v0.11.76 (#16739)",
+        "a": "comfyui-wiki",
+        "pr": 16739,
+        "ct": 1790979724
+      },
+      "prev": "f355cb183e77f8403ab9df10ccd6878d790f325b",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/f355cb183e77f8403ab9df10ccd6878d790f325b...36c0b0a687e5e6d7b55e3e61ab24262ffc0f2508"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "fail",
+          "d": "inherited",
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 3.442175,
+          "psnr": 42.76,
+          "pct": 69.986,
+          "pv": true,
+          "exec": 105.31,
+          "vram": 21315.5,
+          "g": "v0.33.2",
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 38.86,
+          "vram": 8157.6,
+          "g": "v0.33.2",
+          "th": null
+        }
+      },
+      "s": null
+    },
+    {
+      "c": "f355cb183e77f8403ab9df10ccd6878d790f325b",
+      "t": 1790975763,
+      "o": "fail",
+      "infra": false,
+      "cv": "0.38.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "[Partner Nodes] chore(Luma): deprecate Ray 2 nodes (#16741)",
+        "a": "bigcat88",
+        "pr": 16741,
+        "ct": 1790975605
+      },
+      "prev": "2472a20bd291451acc303917059ab14dfc380478",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/2472a20bd291451acc303917059ab14dfc380478...f355cb183e77f8403ab9df10ccd6878d790f325b"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "fail",
+          "d": "inherited",
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 3.442175,
+          "psnr": 42.76,
+          "pct": 69.986,
+          "pv": true,
+          "exec": 105.5,
+          "vram": 22019.5,
+          "g": "v0.33.2",
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 34.31,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": null
+        }
+      },
+      "s": null
+    },
+    {
+      "c": "2472a20bd291451acc303917059ab14dfc380478",
+      "t": 1790968504,
+      "o": "fail",
+      "infra": false,
+      "cv": "0.38.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Update comfy-kitchen version to 0.2.37 (#16738)",
+        "a": "comfyanonymous",
+        "pr": 16738,
+        "ct": 1790967019
+      },
+      "prev": "65787d668397d230bf5839d69a0a7239e2dad378",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/65787d668397d230bf5839d69a0a7239e2dad378...2472a20bd291451acc303917059ab14dfc380478"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "fail",
+          "d": "inherited",
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 3.442175,
+          "psnr": 42.76,
+          "pct": 69.986,
+          "pv": true,
+          "exec": 105.49,
+          "vram": 22083.5,
+          "g": "v0.33.2",
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 35.19,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": null
+        }
+      },
+      "s": null
+    },
+    {
+      "c": "65787d668397d230bf5839d69a0a7239e2dad378",
+      "t": 1790922524,
+      "o": "fail",
+      "infra": false,
+      "cv": "0.38.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "fix(assets): batch prefix filters so scans work with many model folders (#16645)",
+        "a": "synap5e",
+        "pr": 16645,
+        "ct": 1790920153
+      },
+      "prev": "fa98a189b4271c76f66210e15f81790b555eb610",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/fa98a189b4271c76f66210e15f81790b555eb610...65787d668397d230bf5839d69a0a7239e2dad378"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "fail",
+          "d": "inherited",
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 3.442175,
+          "psnr": 42.76,
+          "pct": 69.986,
+          "pv": true,
+          "exec": 113.9,
+          "vram": 21795.6,
+          "g": "v0.33.2",
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 35.06,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": null
+        }
+      },
+      "s": null
+    },
+    {
+      "c": "fa98a189b4271c76f66210e15f81790b555eb610",
+      "t": 1790904784,
+      "o": "fail",
+      "infra": false,
+      "cv": "0.38.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "chore: update workflow templates to v0.11.74 (#16724)",
+        "a": "purzbeats",
+        "pr": 16724,
+        "ct": 1790904135
+      },
+      "prev": "1b883beab11c04a2eb82cf6a3ee64294f3303897",
+      "range": {
+        "n": 2,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/1b883beab11c04a2eb82cf6a3ee64294f3303897...fa98a189b4271c76f66210e15f81790b555eb610"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "fail",
+          "d": "inherited",
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 3.442175,
+          "psnr": 42.76,
+          "pct": 69.986,
+          "pv": true,
+          "exec": 108.29,
+          "vram": 22019.6,
+          "g": "v0.33.2",
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 35.57,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": null
+        }
+      },
+      "s": null
+    },
+    {
+      "c": "1b883beab11c04a2eb82cf6a3ee64294f3303897",
+      "t": 1790894519,
+      "o": "fail",
+      "infra": false,
+      "cv": "0.38.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "[Partner Nodes] feat(BFL): add FLUX 3 Image node (#16716)",
+        "a": "bigcat88",
+        "pr": 16716,
+        "ct": 1790893025
+      },
+      "prev": "170594057a22673349ddf0a3d88624b7fa5865bb",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/170594057a22673349ddf0a3d88624b7fa5865bb...1b883beab11c04a2eb82cf6a3ee64294f3303897"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "fail",
+          "d": "inherited",
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 3.442175,
+          "psnr": 42.76,
+          "pct": 69.986,
+          "pv": true,
+          "exec": 113.14,
+          "vram": 22091.6,
+          "g": "v0.33.2",
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 35.07,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": null
+        }
+      },
+      "s": null
+    },
+    {
+      "c": "170594057a22673349ddf0a3d88624b7fa5865bb",
+      "t": 1790889830,
+      "o": "fail",
+      "infra": false,
+      "cv": "0.38.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "feat: add --offline and --disable-partner-nodes, deprecate --disable-api-nodes (#16672)",
+        "a": "deepme987",
+        "pr": 16672,
+        "ct": 1790887530
+      },
+      "prev": "77c0f39e343aa83597d67cd95811df9e4fbfef2e",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/77c0f39e343aa83597d67cd95811df9e4fbfef2e...170594057a22673349ddf0a3d88624b7fa5865bb"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "fail",
+          "d": "inherited",
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 3.442175,
+          "psnr": 42.76,
+          "pct": 69.986,
+          "pv": true,
+          "exec": 111.86,
+          "vram": 22083.6,
+          "g": "v0.33.2",
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 36.58,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": null
+        }
+      },
+      "s": null
+    },
+    {
+      "c": "77c0f39e343aa83597d67cd95811df9e4fbfef2e",
+      "t": 1790879048,
+      "o": "fail",
+      "infra": false,
+      "cv": "0.38.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Update default bit depth for 'exr' option to 16 bit float. (#16715)",
+        "a": "comfyanonymous",
+        "pr": 16715,
+        "ct": 1790876591
+      },
+      "prev": "2d6b73283af2447bdd065ece4090b8c6b1784544",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/2d6b73283af2447bdd065ece4090b8c6b1784544...77c0f39e343aa83597d67cd95811df9e4fbfef2e"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "fail",
+          "d": "inherited",
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 3.442175,
+          "psnr": 42.76,
+          "pct": 69.986,
+          "pv": true,
+          "exec": 112.84,
+          "vram": 21507.6,
+          "g": "v0.33.2",
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 36.07,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": null
+        }
+      },
+      "s": null
+    },
+    {
+      "c": "2d6b73283af2447bdd065ece4090b8c6b1784544",
+      "t": 1790857634,
+      "o": "fail",
+      "infra": false,
+      "cv": "0.38.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Reduce MiniMax-H3 peak VRAM by releasing embedding temporaries before blocks",
+        "a": "Tokha233",
+        "pr": null,
+        "ct": 1790856296
+      },
+      "prev": "651ca296a73cd21c12a57eb8741d52e40dc6528f",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/651ca296a73cd21c12a57eb8741d52e40dc6528f...2d6b73283af2447bdd065ece4090b8c6b1784544"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "fail",
+          "d": "inherited",
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 3.442175,
+          "psnr": 42.76,
+          "pct": 69.986,
+          "pv": true,
+          "exec": 112.01,
+          "vram": 22081.6,
+          "g": "v0.33.2",
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 36.82,
+          "vram": 8157.6,
+          "g": "v0.33.2",
+          "th": null
+        }
+      },
+      "s": null
+    },
+    {
+      "c": "651ca296a73cd21c12a57eb8741d52e40dc6528f",
+      "t": 1790826917,
+      "o": "fail",
+      "infra": false,
+      "cv": "0.38.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Bump comfyui-frontend-package to 1.53.10 (#16456)",
+        "a": "comfy-pr-bot",
+        "pr": 16456,
+        "ct": 1790826276
+      },
+      "prev": "0e70b969c6951816430044401ce90a86241d0e4b",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/0e70b969c6951816430044401ce90a86241d0e4b...651ca296a73cd21c12a57eb8741d52e40dc6528f"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "fail",
+          "d": "inherited",
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 3.442175,
+          "psnr": 42.76,
+          "pct": 69.986,
+          "pv": true,
+          "exec": 106.92,
+          "vram": 21699.6,
+          "g": "v0.33.2",
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 35.07,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": null
+        }
+      },
+      "s": null
+    },
+    {
+      "c": "0e70b969c6951816430044401ce90a86241d0e4b",
+      "t": 1790825635,
+      "o": "fail",
+      "infra": false,
+      "cv": "0.38.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Add 16-bit float support to Save EXR. (#16706)",
+        "a": "comfyanonymous",
+        "pr": 16706,
+        "ct": 1790823644
+      },
+      "prev": "b65d1ffaca35fcda5889e120dcd0c8520553c7b2",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/b65d1ffaca35fcda5889e120dcd0c8520553c7b2...0e70b969c6951816430044401ce90a86241d0e4b"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "fail",
+          "d": "inherited",
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 3.442175,
+          "psnr": 42.76,
+          "pct": 69.986,
+          "pv": true,
+          "exec": 106.34,
+          "vram": 22083.6,
+          "g": "v0.33.2",
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 34.79,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": null
+        }
+      },
+      "s": null
+    }
+  ]
+}
