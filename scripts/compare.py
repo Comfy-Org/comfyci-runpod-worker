@@ -4,6 +4,11 @@ Compares the PNGs of a candidate run against a reference run (golden baseline
 or previous master run): per-frame MSE, PSNR (mean/min), max abs channel diff,
 % pixels changed, plus an `identical` flag. Also renders a side-by-side strip
 and an abs-diff heatmap of the worst frame for the dashboard.
+
+Figure titles name the reference ("golden <tag>" / "previous") and the
+candidate generically ("candidate") rather than embedding a commit sha, so a
+candidate that is bit-identical to an earlier one renders byte-identical
+figures and git stores them once.
 """
 from __future__ import annotations
 
@@ -82,7 +87,8 @@ def save_figures(ref_dir: Path, cand_dir: Path, figures_dir: Path, label: str,
         ax.axis("off")
     fig.suptitle(f"{ref_name} vs {cand_name} (seed-locked)", fontsize=12)
     fig.tight_layout()
-    fig.savefig(figures_dir / f"side_by_side_{label}.png", dpi=110)
+    fig.savefig(figures_dir / f"side_by_side_{label}.png", dpi=110,
+                metadata={"Software": None})
     plt.close(fig)
 
     a = np.asarray(Image.open(ref_frames[worst_idx]).convert("RGB"))
@@ -94,14 +100,19 @@ def save_figures(ref_dir: Path, cand_dir: Path, figures_dir: Path, label: str,
     ax.axis("off")
     fig.colorbar(im, ax=ax, fraction=0.04)
     fig.tight_layout()
-    fig.savefig(figures_dir / f"diff_heatmap_{label}.png", dpi=110)
+    fig.savefig(figures_dir / f"diff_heatmap_{label}.png", dpi=110,
+                metadata={"Software": None})
     plt.close(fig)
 
 
 def compare_with_figures(ref_dir: Path, cand_dir: Path, figures_dir: Path, label: str,
-                         ref_name: str, cand_name: str) -> dict:
-    res = compare_dirs(ref_dir, cand_dir)
-    if not res.get("error") and not res.get("identical"):
+                         ref_name: str, cand_name: str = "candidate",
+                         metrics: dict | None = None, figures: bool = True) -> dict:
+    """Compare and (unless `figures` is False or the frames are identical)
+    render the dashboard figures. Pass `metrics` to reuse an earlier
+    compare_dirs() result instead of recomputing it."""
+    res = dict(metrics) if metrics is not None else compare_dirs(ref_dir, cand_dir)
+    if figures and not res.get("error") and not res.get("identical"):
         try:
             save_figures(ref_dir, cand_dir, figures_dir, label, ref_name, cand_name,
                          res.get("worst_frame_index") or 0)

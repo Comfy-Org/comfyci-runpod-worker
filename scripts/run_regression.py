@@ -69,6 +69,23 @@ def derive_thresholds(entry: dict, defaults: dict, noise_floor: dict | None) -> 
     return th
 
 
+def classify_detail(verdict: str | None, vs_previous: dict | None,
+                    previous_verdict: str | None, golden_tag: str | None = None,
+                    previous_golden_tag: str | None = None) -> str | None:
+    """Label a failure vs golden: 'new_drift' when this commit's outputs differ
+    from the previous tested run (the change happened here), 'inherited' when
+    they are bit-identical to a previous run that already failed against the
+    same golden. None when there is nothing to compare against, or when the
+    outputs match a previous run that did not fail against this golden (the
+    golden changed in between, not the code)."""
+    if verdict != "fail" or not vs_previous or vs_previous.get("error"):
+        return None
+    if vs_previous.get("identical"):
+        same_golden = golden_tag is None or previous_golden_tag == golden_tag
+        return "inherited" if previous_verdict == "fail" and same_golden else None
+    return "new_drift"
+
+
 def metrics_pass(metrics: dict, th: dict) -> bool:
     if metrics.get("error"):
         return False
@@ -84,6 +101,14 @@ def metrics_pass(metrics: dict, th: dict) -> bool:
     if metrics.get("mean_pct_pixels_changed", 0) > th["max_pct_pixels_changed"]:
         return False
     return True
+
+
+def first_output_sha(run_rec: dict) -> str | None:
+    """sha256 of the first PNG (by filename) — the identity of a run's output."""
+    pngs = sorted((o for o in run_rec.get("outputs") or []
+                   if str(o.get("filename", "")).endswith(".png")),
+                  key=lambda o: o["filename"])
+    return pngs[0].get("sha256") if pngs else None
 
 
 def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: Path,
@@ -106,12 +131,15 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
         workdir=workdir,
         comfy_repo=args.repo_url,
     )
-    (workdir / "run.json").write_text(json.dumps(run_rec, indent=2), encoding="utf-8")
+    published = {k: v for k, v in run_rec.items() if k != "outputs_dir"}  # runner-local path
+    (workdir / "run.json").write_text(json.dumps(published, indent=2), encoding="utf-8")
     status = run_rec.get("status")
     print(f"[{wf_id}] worker status: {status}")
 
-    comparison: dict = {"verdict": None, "vs_golden": None, "vs_previous": None,
-                        "thresholds_used": None, "golden_tag": None, "previous_commit": None}
+    comparison: dict = {"verdict": None, "detail": None, "vs_golden": None,
+                        "vs_previous": None, "thresholds_used": None, "golden_tag": None,
+                        "previous_commit": None, "previous_verdict": None,
+                        "previous_golden_tag": None, "figures": False}
 
     if status in INFRA_STATUSES:
         comparison["verdict"] = "infra_error"
@@ -120,6 +148,22 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
     else:
         outputs_dir = Path(run_rec["outputs_dir"])
         figures_dir = workdir / "figures"
+
+        # Previous run first (metrics only): it decides whether a failure vs
+        # golden is new drift introduced by this commit or drift inherited
+        # from an earlier commit, which in turn decides whether figures are
+        # worth rendering again.
+        prev_dir = workdir / "_previous"
+        latest = store.latest_pointer(args.branch)
+        if latest and latest.get("commit") and latest["commit"] != args.commit:
+            prev = latest["commit"]
+            comparison["previous_commit"] = prev
+            if store.fetch_run_outputs(args.branch, prev, wf_id, prev_dir):
+                comparison["vs_previous"] = compare.compare_dirs(prev_dir, outputs_dir)
+                prev_summary = store.run_summary(args.branch, prev) or {}
+                prev_wf = prev_summary.get("workflows", {}).get(wf_id) or {}
+                comparison["previous_verdict"] = prev_wf.get("verdict")
+                comparison["previous_golden_tag"] = prev_wf.get("golden_tag")
 
         golden_ptr = store.golden_current(wf_id)
         if golden_ptr and golden_ptr.get("tag"):
@@ -131,24 +175,28 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
                 noise_floor = store.noise_floor(wf_id, tag)
                 th = derive_thresholds(entry, defaults, noise_floor)
                 comparison["thresholds_used"] = th
+                vs_golden = compare.compare_dirs(golden_dir, outputs_dir)
+                comparison["verdict"] = "pass" if metrics_pass(vs_golden, th) else "fail"
+                comparison["detail"] = classify_detail(
+                    comparison["verdict"], comparison["vs_previous"],
+                    comparison["previous_verdict"], tag, comparison["previous_golden_tag"])
+                # Inherited failures are bit-identical to an earlier run whose
+                # figures already exist: don't render (and store) them again.
+                want_figures = comparison["detail"] != "inherited"
                 comparison["vs_golden"] = compare.compare_with_figures(
-                    golden_dir, outputs_dir, figures_dir, "golden",
-                    f"golden {tag}", args.commit[:8])
-                comparison["verdict"] = "pass" if metrics_pass(comparison["vs_golden"], th) else "fail"
+                    golden_dir, outputs_dir, figures_dir, "golden", f"golden {tag}",
+                    metrics=vs_golden, figures=want_figures)
+                comparison["figures"] = bool(want_figures and not vs_golden.get("identical")
+                                             and not vs_golden.get("error"))
             else:
                 comparison["verdict"] = "no_baseline"
         else:
             comparison["verdict"] = "no_baseline"
 
-        latest = store.latest_pointer(args.branch)
-        if latest and latest.get("commit") and latest["commit"] != args.commit:
-            prev = latest["commit"]
-            comparison["previous_commit"] = prev
-            prev_dir = workdir / "_previous"
-            n = store.fetch_run_outputs(args.branch, prev, wf_id, prev_dir)
-            if n:
-                comparison["vs_previous"] = compare.compare_with_figures(
-                    prev_dir, outputs_dir, figures_dir, "prev", prev[:8], args.commit[:8])
+        if comparison["vs_previous"] is not None:
+            comparison["vs_previous"] = compare.compare_with_figures(
+                prev_dir, outputs_dir, figures_dir, "prev", "previous",
+                metrics=comparison["vs_previous"])
 
     (workdir / "comparison.json").write_text(json.dumps(comparison, indent=2), encoding="utf-8")
 
@@ -162,10 +210,14 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
     if not args.skip_publish:
         store.publish_workflow_run(args.branch, args.commit, wf_id, publish_dir)
     return {"workflow_id": wf_id, "worker_status": status, "verdict": comparison["verdict"],
+            "detail": comparison["detail"],
             "vs_golden": comparison["vs_golden"], "vs_previous": comparison["vs_previous"],
             "thresholds_used": comparison["thresholds_used"],
             "golden_tag": comparison["golden_tag"],
             "previous_commit": comparison["previous_commit"],
+            "previous_verdict": comparison["previous_verdict"],
+            "figures": comparison["figures"],
+            "output_sha256": first_output_sha(run_rec),
             "gpu_name": run_rec.get("gpu_name"), "timings": run_rec.get("timings"),
             "vram_peak_mb": run_rec.get("vram_peak_mb"),
             "rss_peak_mb": run_rec.get("rss_peak_mb"),
@@ -222,8 +274,10 @@ def main():
     verdicts = {r["workflow_id"]: r["verdict"] for r in results}
     overall = ("fail" if any(v in ("fail", "execution_error") for v in verdicts.values())
                else "pass")
-    summary = {"branch": args.branch, "commit": args.commit, "run_ts": int(time.time()),
-               "overall": overall, "workflows": {r["workflow_id"]: r for r in results}}
+    summary = {"schema_version": 2, "branch": args.branch, "commit": args.commit,
+               "run_ts": int(time.time()), "overall": overall,
+               "has_infra_error": any(v == "infra_error" for v in verdicts.values()),
+               "workflows": {r["workflow_id"]: r for r in results}}
 
     if not args.skip_publish:
         store.publish_summary(args.branch, args.commit, summary)
