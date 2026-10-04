@@ -1,0 +1,22 @@
+# Unit tests for the CPU-side orchestration scripts (no RunPod, no network).
+name: Script tests
+on:
+  pull_request:
+    paths: ['scripts/**', '.github/workflows/scripts-tests.yml']
+  push:
+    branches: [main]
+    paths: ['scripts/**', '.github/workflows/scripts-tests.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r scripts/requirements.txt pytest
+      - run: python -m pytest scripts/tests -q

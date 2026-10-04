@@ -135,3 +135,9 @@ regression/
   changing either, regenerate and re-bless (`blessed.json` records both).
 - Local dry run without publishing anything:
   `python scripts/run_regression.py --commit <sha> --branch test --skip-publish`
+- Script tests (run on every PR by the *Script tests* workflow):
+  `pip install -r scripts/requirements.txt pytest && python -m pytest scripts/tests`
+- The results checkout is a blobless sparse clone: only the aggregate
+  directories are materialised, run directories on first use.
+- `run.json` `delay_s` is in seconds from summary `schema_version: 2` on;
+  earlier records hold RunPod's raw millisecond value under the same key.

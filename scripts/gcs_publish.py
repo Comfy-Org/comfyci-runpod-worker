@@ -52,6 +52,11 @@ def upload_dir(bucket: str, blob_prefix: str, local_dir: Path):
             bkt.blob(f"{blob_prefix}/{rel}").upload_from_filename(str(p))
 
 
+def list_paths(bucket: str, blob_prefix: str) -> list[str]:
+    """Object names under `blob_prefix/` (recursive)."""
+    return [b.name for b in client().list_blobs(bucket, prefix=blob_prefix.rstrip("/") + "/")]
+
+
 def download_dir(bucket: str, blob_prefix: str, local_dir: Path) -> int:
     """Download every blob under prefix into local_dir. Returns file count."""
     local_dir = Path(local_dir)

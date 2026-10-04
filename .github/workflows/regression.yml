@@ -42,7 +42,7 @@ jobs:
           # Read the last-tested pointer straight from the results branch
           # (raw.githubusercontent.com caches for ~5 min; git does not).
           LAST=""
-          if git fetch --depth 1 origin results 2>/dev/null; then
+          if git fetch --depth 1 --filter=blob:none origin results 2>/dev/null; then
             LAST=$(git show FETCH_HEAD:regression/latest/master.json 2>/dev/null \
                    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("commit",""))' || true)
           fi
