@@ -31,8 +31,8 @@ RED = ("fail", "execution_error")
 LANES_FILE = Path(__file__).resolve().parents[1] / "manifest" / "lanes.json"
 
 
-def load_lanes(path: Path = LANES_FILE) -> dict:
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+def load_lanes(path: Path | None = None) -> dict:
+    return json.loads(Path(path or LANES_FILE).read_text(encoding="utf-8"))
 
 
 def lane_for_prefix(lanes: dict, prefix: str) -> str | None:
@@ -223,20 +223,23 @@ class IndexBuilder:
             self._write_shard(m, shards[m])
         self._write_aggregates(shards)
 
-    def refresh(self):
+    def refresh(self, workflows=()):
         """Rewrite head and lanes.json from the existing shards (after a bless:
-        golden shas and accepted chains change without a new run)."""
+        golden shas and accepted chains change without a new run). `workflows`
+        names the workflows whose golden must be published even when no run
+        is indexed yet."""
         head = self.store.download_json(self.head_path()) or {}
         shards = self._load_shards(head.get("shards", []))
-        if not any(shards.values()):
+        if not any(shards.values()) and not workflows:
             return
-        self._write_aggregates(shards)
+        self._write_aggregates(shards, workflows)
 
-    def _write_aggregates(self, shards: dict[str, list[dict]]):
+    def _write_aggregates(self, shards: dict[str, list[dict]], workflows=()):
         union = sorted((e for es in shards.values() for e in es), key=sort_key, reverse=True)
         months = sorted(m for m, es in shards.items() if es)
         latest = union[0] if union else None
-        goldens = {wf_id: self._golden_sha(wf_id) for wf_id in (latest or {}).get("w", {})}
+        wf_ids = set((latest or {}).get("w", {})) | set(workflows)
+        goldens = {wf_id: self._golden_sha(wf_id) for wf_id in sorted(wf_ids)}
         chains = first_bad(union)
         for wf_id in list(chains):
             # Accepted drift: the latest output is the blessed golden itself.
