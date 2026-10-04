@@ -33,6 +33,21 @@ def test_metrics_pass_thresholds():
     assert not run_regression.metrics_pass({"error": "no PNGs"}, th)
 
 
+def test_write_thumbnails(tmp_path):
+    import numpy as np
+    from PIL import Image
+    out = tmp_path / "outputs"
+    out.mkdir()
+    for name in ("b_00002_.png", "a_00001_.png"):
+        Image.fromarray(np.zeros((640, 480, 3), dtype=np.uint8)).save(out / name)
+    assert run_regression.write_thumbnails(out) == "a_00001_.webp"
+    thumbs = sorted(p.name for p in (out / "thumbs").iterdir())
+    assert thumbs == ["a_00001_.webp", "b_00002_.webp"]
+    with Image.open(out / "thumbs" / "a_00001_.webp") as im:
+        assert max(im.size) == 256
+    assert run_regression.write_thumbnails(tmp_path / "empty") is None
+
+
 def test_first_output_sha_uses_first_png_by_name():
     rec = {"outputs": [{"filename": "b_00002_.png", "sha256": "two"},
                        {"filename": "a_00001_.png", "sha256": "one"},
