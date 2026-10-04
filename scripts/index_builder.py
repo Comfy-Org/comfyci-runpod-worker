@@ -298,6 +298,11 @@ class IndexBuilder:
         a backfill; feed the result to upsert() through a derived writer)."""
         runs_prefix = f"{self.store.prefix}/runs/{self.branch}"
         paths = self.store.list_json(runs_prefix, "summary.json")
+        prefetch = getattr(self.store, "prefetch", None)
+        if prefetch:
+            # One round trip for every summary and run record instead of a
+            # lazy fetch per file.
+            prefetch(paths + self.store.list_json(runs_prefix, "run.json"))
         summaries = []
         for p in paths:
             s = self.store.read_blob_json(p)

@@ -34,6 +34,20 @@ def test_sparse_checkout_materialises_on_demand(tmp_path, remote):
     assert s.read_blob_json("regression/runs/master/aaa/summary.json")["commit"] == "aaa"
 
 
+def test_prefetch_batches_blobs_without_materialising(tmp_path, remote):
+    s = _store(tmp_path, remote, "a")
+    paths = ["regression/runs/master/aaa/summary.json",
+             "regression/runs/master/aaa/wf/outputs/wf_00001_.png"]
+    blobs = s.list_blobs("regression/runs/master")
+    assert set(paths) <= set(blobs)
+    s.prefetch(paths)
+    # Objects are now local: reading must not need the remote.
+    s.remote_url = str(tmp_path / "gone")
+    s._git("remote", "set-url", "origin", str(tmp_path / "gone"))
+    assert s.read_blob_json(paths[0])["commit"] == "aaa"
+    assert not (s.workdir / "regression" / "runs").exists()
+
+
 def test_concurrent_publishers_keep_each_others_derived_files(tmp_path, remote):
     a = _store(tmp_path, remote, "a")
     b = _store(tmp_path, remote, "b")
