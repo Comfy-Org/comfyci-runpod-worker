@@ -1,0 +1,8 @@
+{
+  "tag": "v0.38.0",
+  "commit": "6b747c0428c343e1417219641db93a4fb7cb69ae",
+  "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+  "torch_version": "2.11.0+cu128",
+  "generated_by": "marawan206",
+  "generated_ts": 1791156202
+}
