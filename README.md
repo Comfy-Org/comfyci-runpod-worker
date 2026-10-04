@@ -39,6 +39,8 @@ pick with `--storage` / `REGRESSION_STORAGE`):
 | `Dockerfile`, `docker/` | Worker image: CUDA + torch + pre-cloned ComfyUI. Commit under test is checked out per request. |
 | `src/` | RunPod handler (`handler.py`), commit checkout, workflow runner, volume model sync |
 | `manifest/workflows.json` | Single source of truth: workflows, models, seeds, thresholds (staged workflow JSONs not yet in the manifest live in `manifest/workflows/`) |
+| `manifest/lanes.json` | Environment lanes (python / torch / cuda / GPU, cadence, storage prefix) published to the dashboard through the run index |
+| `.github/workflows/build-index.yml` | Backfills or repairs the run index for a branch/lane (workflow_dispatch) |
 | `scripts/` | Orchestration run on the (CPU) CI runner: submit/poll, compare, publish, golden generation |
 | `.github/workflows/regression.yml` | Scheduled poller that tests each new master commit (interim, until the core CI job below) |
 | `action.yml` | Composite action for ComfyUI's `test-ci.yml` (GCS phase) |
@@ -86,6 +88,23 @@ failures publish no figures (`figures: false`): the figures of the first
 failing commit already show the diff. `summary.json` carries
 `schema_version: 2` and `has_infra_error` (infra errors never turn `overall`
 red).
+
+## Run index
+
+Every publish maintains a compact index under `regression/index/`: a per-lane
+head file with the newest 500 runs and the first bad commit of each open
+failing chain, complete monthly shards, and `lanes.json` with the lane
+registry from `manifest/lanes.json`, per-branch latest pointers and the
+current golden tag and output sha per workflow. Entries carry the commit
+subject, author and PR (looked up with the Actions token), the tested range
+to the previous run (HEAD polling can skip commits), per-workflow verdicts
+with the drift class, output sha, metrics and timings. Entries are ordered by
+commit time, so re-testing an older commit never reorders history. The
+dashboard's history and matrix views read only these files.
+
+**Build run index** (workflow_dispatch) backfills or repairs a branch/lane
+from the committed summaries; dispatch it once after the first deploy and
+whenever an index file needs regenerating.
 
 ## One-time infrastructure setup
 
@@ -140,7 +159,13 @@ regression/
   manifest-snapshot/<commit>.json
   golden/<workflow_id>/<tag>/{outputs/, run_r1.json, run_r2.json, noise_floor.json, blessed.json}
   golden/<workflow_id>/current.json        # active blessed tag
+  index/lanes.json                         # lane registry + per-branch latest + golden shas
+  index/<branch>/<lane>.json               # newest 500 runs + first bad commit per workflow
+  index/<branch>/<lane>/<YYYY-MM>.json     # complete monthly shards
 ```
+
+Run outputs also carry 256-px WebP previews under `<workflow_id>/outputs/thumbs/`
+for the dashboard's list views.
 
 ## Notes
 

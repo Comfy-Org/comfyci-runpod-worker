@@ -3,35 +3,7 @@ writers, and recovery from a concurrent publisher."""
 import json
 import subprocess
 
-import pytest
-
 import storage
-
-
-def _git(cwd, *args):
-    return subprocess.run(["git", "-C", str(cwd), *args], check=True,
-                          capture_output=True, text=True).stdout
-
-
-@pytest.fixture
-def remote(tmp_path):
-    """Bare repo whose `results` branch already holds one run and a pointer."""
-    bare = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "-q", "--bare", "-b", "results", str(bare)], check=True)
-    _git(bare, "config", "uploadpack.allowFilter", "true")
-    seed = tmp_path / "seed"
-    subprocess.run(["git", "init", "-q", "-b", "results", str(seed)], check=True)
-    run = seed / "regression" / "runs" / "master" / "aaa"
-    (run / "wf" / "outputs").mkdir(parents=True)
-    (run / "summary.json").write_text(json.dumps({"commit": "aaa", "overall": "pass",
-                                                 "workflows": {"wf": {"verdict": "pass"}}}))
-    (run / "wf" / "outputs" / "wf_00001_.png").write_bytes(b"\x89PNG seed")
-    (seed / "regression" / "latest").mkdir()
-    (seed / "regression" / "latest" / "master.json").write_text(json.dumps({"commit": "aaa"}))
-    _git(seed, "add", "-A")
-    _git(seed, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "seed")
-    _git(seed, "push", "-q", str(bare), "HEAD:refs/heads/results")
-    return bare
 
 
 def _store(tmp_path, remote, name):
