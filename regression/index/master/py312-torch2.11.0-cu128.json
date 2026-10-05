@@ -3,7 +3,7 @@
   "branch": "master",
   "lane": "py312-torch2.11.0-cu128",
   "layout": 1,
-  "generated_ts": 1791158043,
+  "generated_ts": 1791159907,
   "count": 230,
   "shards": [
     "2026-08",
@@ -19,6 +19,7 @@
     "flux_dev_t2i": {
       "commit": "b5cc8830279eae909a59de030af1e50761c36751",
       "run_ts": 1790133888,
+      "kind": "fail",
       "prev_good": "912fca4f39b875a0360f2c5170568176ea813ded",
       "pr": 16488,
       "author": "comfyanonymous",

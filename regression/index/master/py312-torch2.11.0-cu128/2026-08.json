@@ -5,6 +5,55 @@
   "shard": "2026-08",
   "entries": [
     {
+      "c": "d3eaf6adb388c27245374ac26e585fef4936c485",
+      "t": 1788223747,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.34.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Minimax h3 controlnet as a model patch instead of a controlnet. (#15975)",
+        "a": "comfyanonymous",
+        "pr": 15975,
+        "ct": 1788219882
+      },
+      "prev": "a8b4fa64104a4d834c51396eef5c62518b7691c9",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/a8b4fa64104a4d834c51396eef5c62518b7691c9...d3eaf6adb388c27245374ac26e585fef4936c485"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "0b3532285816b7438ef7deee2bc3ece742154f5b54501a847f8d80607abac237",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 121.46,
+          "vram": 21411.6,
+          "g": "v0.33.2",
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 38,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": null
+        }
+      },
+      "s": null
+    },
+    {
       "c": "a8b4fa64104a4d834c51396eef5c62518b7691c9",
       "t": 1788218072,
       "o": "pass",
