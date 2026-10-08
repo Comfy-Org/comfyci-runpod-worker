@@ -205,6 +205,14 @@ def test_drift_on_a_commit_behind_the_previous_run_is_not_reported(tmp_path, mon
     assert run(tmp_path, _summary(DRIFT, rng=ok)) == "created on #16488"
 
 
+def test_drift_in_a_batch_of_commits_is_not_reported(tmp_path, monkeypatch, env, gh):
+    on(monkeypatch)
+    rng = {"prev": "b" * 40, "commits_between": 3, "compare_url": "u"}
+    assert run(tmp_path, _summary(DRIFT, rng=rng)) == (
+        "skip: batch of 3 commits, not attributable to one PR")
+    assert gh.writes() == []
+
+
 def test_clean_rerun_resolves_an_existing_comment(tmp_path, monkeypatch, env, gh):
     on(monkeypatch)
     run(tmp_path, _summary(DRIFT))

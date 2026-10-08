@@ -304,6 +304,10 @@ def run(summary_path: Path) -> str:
     if state == "changed" and rng and not (isinstance(rng.get("commits_between"), int)
                                            and rng["commits_between"] > 0):
         return "skip: the tested commit is not ahead of the previous run"
+    # A run that covers several commits cannot say which PR changed the output,
+    # and the change may come from a non-owner's commit: don't comment.
+    if state == "changed" and rng and isinstance(rng.get("commits_between"), int)             and rng["commits_between"] > 1:
+        return f"skip: batch of {rng['commits_between']} commits, not attributable to one PR"
 
     read_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or None
     pr = target_pr(summary, read_token)

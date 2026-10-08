@@ -137,14 +137,15 @@ whenever an index file needs regenerating.
 After each run, `scripts/notify_pr.py` can leave one comment on the ComfyUI
 pull request that landed the tested commit. Its first line starts with
 **(PULSE)**; below it, a row per workflow (verdict, new or inherited, PSNR,
-mean MSE, % pixels changed, exec time, peak VRAM), the lane, a compare link
-when the run covered a batch of commits, and the run's page on ci.comfy.org.
+mean MSE, % pixels changed, exec time, peak VRAM), the lane and the run's page
+on ci.comfy.org.
 
 - **When**: a workflow's outputs changed at this commit (`detail: new_drift`),
   or it hit an execution error while its prior run (`prior_verdict`) produced
   outputs. Never for pass, inherited drift, infra errors, missing goldens, a
-  workflow with no prior run, or a re-test of a commit older than the previous
-  run.
+  workflow with no prior run, a re-test of a commit older than the previous
+  run, or a run that covered several new commits (the change cannot be pinned
+  on one PR).
 - **One comment per PR**: found again by the hidden marker
   `<!-- pulse-regression:v1 -->` and the token owner's login, and edited in
   place, so reruns never add a second one. A later clean run of the same
