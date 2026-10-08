@@ -56,10 +56,27 @@ jobs:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
           RUNPOD_ENDPOINT_ID: ${{ secrets.RUNPOD_ENDPOINT_ID }}
           GITHUB_TOKEN: ${{ github.token }}
+          COMMIT: ${{ steps.target.outputs.commit }}
+          WORKFLOWS: ${{ inputs.workflows || 'all' }}
+        # The summary file is written before the script exits, so the PR
+        # comment step below can read it even when this step fails.
         run: |
           python scripts/run_regression.py \
-            --commit "${{ steps.target.outputs.commit }}" \
+            --commit "$COMMIT" \
             --branch master \
-            --workflows "${{ inputs.workflows || 'all' }}" \
+            --workflows "$WORKFLOWS" \
             --workdir "$RUNNER_TEMP/regression-work" \
-            --results-workdir "$RUNNER_TEMP/results-checkout"
+            --results-workdir "$RUNNER_TEMP/results-checkout" \
+            --summary-out "$RUNNER_TEMP/summary.json"
+      # PULSE: one comment, updated in place, on the PR that landed the tested
+      # commit when its outputs changed; code owners' PRs only. dry-run (the
+      # default) only renders it into the job summary. See README.
+      - name: PR comment (PULSE)
+        if: always() && steps.target.outputs.skip != 'true'
+        continue-on-error: true
+        env:
+          PULSE_PR_COMMENTS: ${{ vars.PULSE_PR_COMMENTS || 'dry-run' }}
+          PULSE_GH_TOKEN: ${{ secrets.PULSE_GH_TOKEN }}
+          PULSE_ALLOWED_AUTHORS: ${{ vars.PULSE_ALLOWED_AUTHORS }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/notify_pr.py --summary "$RUNNER_TEMP/summary.json"
