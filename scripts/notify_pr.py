@@ -4,7 +4,8 @@ GPU outputs, and keep it up to date.
 
 Policy (per run summary, see run_regression.py --summary-out):
   - comment when a workflow's outputs changed here (detail 'new_drift') or a
-    workflow hit an execution error its prior run did not have;
+    workflow hit an execution error where its prior run produced outputs, and
+    only when the tested commit is ahead of the previous run;
   - never for pass, inherited drift, infra errors or missing baselines;
   - an existing comment on the PR is updated in place (hidden marker, one
     comment per PR, authored by the token's user), and switched to a short
@@ -81,7 +82,10 @@ def change_kind(wr: dict) -> str | None:
     v = wr.get("verdict")
     if v == "fail" and wr.get("detail") == "new_drift":
         return "new_drift"
-    if v == "execution_error" and wr.get("prior_verdict") != "execution_error":
+    # Only when the prior run produced outputs: a workflow with no prior verdict
+    # (just added to the manifest, or never compared) erroring is not news
+    # about this commit.
+    if v == "execution_error" and wr.get("prior_verdict") in ("pass", "fail"):
         return "new_error"
     return None
 
@@ -293,6 +297,13 @@ def run(summary_path: Path) -> str:
     state = decide(summary)
     if state is None:
         return "skip: nothing new to report"
+    # A dispatch of an older commit is compared with the newer previous run,
+    # so its "new" drift says nothing about its own PR. The compare from the
+    # previous run then has no commits (or could not be read): don't comment.
+    rng = summary.get("tested_range")
+    if state == "changed" and rng and not (isinstance(rng.get("commits_between"), int)
+                                           and rng["commits_between"] > 0):
+        return "skip: the tested commit is not ahead of the previous run"
 
     read_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or None
     pr = target_pr(summary, read_token)

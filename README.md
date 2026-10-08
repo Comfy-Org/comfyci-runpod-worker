@@ -141,8 +141,10 @@ mean MSE, % pixels changed, exec time, peak VRAM), the lane, a compare link
 when the run covered a batch of commits, and the run's page on ci.comfy.org.
 
 - **When**: a workflow's outputs changed at this commit (`detail: new_drift`),
-  or it hit an execution error its prior run (`prior_verdict`) did not have.
-  Never for pass, inherited drift, infra errors or missing goldens.
+  or it hit an execution error while its prior run (`prior_verdict`) produced
+  outputs. Never for pass, inherited drift, infra errors, missing goldens, a
+  workflow with no prior run, or a re-test of a commit older than the previous
+  run.
 - **One comment per PR**: found again by the hidden marker
   `<!-- pulse-regression:v1 -->` and the token owner's login, and edited in
   place, so reruns never add a second one. A later clean run of the same
@@ -156,12 +158,14 @@ when the run covered a batch of commits, and the run's page on ci.comfy.org.
   the comment into the job summary and posts nothing; `on` posts; `off` skips
   the step's work entirely. `on` without the token falls back to dry-run.
 - **Token** (repo secret `PULSE_GH_TOKEN`): a personal access token of the
-  account the comments should come from; they appear as that user. Either a
-  classic token with the `public_repo` scope, or a fine-grained token with
-  resource owner Comfy-Org, repository `Comfy-Org/ComfyUI`, and Issues and
-  Pull requests set to read and write. Fine-grained tokens for an
-  organisation's repositories may need approval by an org owner, depending on
-  the org's token policy. Reads (PR lookup, `CODEOWNERS`) use the Actions
+  account the comments should come from; they appear as that user. Prefer a
+  fine-grained token with resource owner Comfy-Org, repository
+  `Comfy-Org/ComfyUI` only, and Issues and Pull requests set to read and
+  write. Fine-grained tokens for an organisation's repositories may need
+  approval by an org owner, depending on the org's token policy. A classic
+  token with the `public_repo` scope also works, but it can push to every
+  public repository the account can write to, and anyone who can edit this
+  repo's workflows can use it. Reads (PR lookup, `CODEOWNERS`) use the Actions
   token.
 - **Non-blocking**: the step runs even when the suite fails, has
   `continue-on-error`, and turns every API or network problem into a warning.

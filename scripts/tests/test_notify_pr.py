@@ -168,7 +168,8 @@ def test_no_codeowners_and_no_override_never_posts(tmp_path, monkeypatch, env, g
 @pytest.mark.parametrize("workflows, expected", [
     ({"a": _wf("fail", "new_drift")}, "changed"),
     ({"a": _wf("execution_error", prior="pass")}, "changed"),
-    ({"a": _wf("execution_error", prior=None)}, "changed"),
+    ({"a": _wf("execution_error", prior="fail")}, "changed"),
+    ({"a": _wf("execution_error", prior=None)}, None),               # new workflow
     ({"a": _wf("execution_error", prior="execution_error")}, None),   # standing error
     ({"a": _wf("fail", "inherited")}, None),
     ({"a": _wf("fail", None)}, None),                                 # unclassified
@@ -183,11 +184,25 @@ def test_decide(workflows, expected):
 
 @pytest.mark.parametrize("workflows", [
     {"a": _wf("fail", "inherited")}, {"a": _wf("pass")}, {"a": _wf("infra_error")},
-    {"a": _wf("no_baseline")}, {"a": _wf("execution_error", prior="execution_error")}])
+    {"a": _wf("no_baseline")}, {"a": _wf("execution_error", prior="execution_error")},
+    {"a": _wf("execution_error", prior=None)}])
 def test_quiet_runs_never_create_a_comment(tmp_path, monkeypatch, env, gh, workflows):
     on(monkeypatch)
     assert run(tmp_path, _summary(workflows)).startswith("skip")
     assert gh.writes() == []
+
+
+@pytest.mark.parametrize("rng", [
+    {"prev": "b" * 40, "commits_between": 0, "compare_url": "u"},      # older commit re-tested
+    {"prev": "b" * 40, "commits_between": None, "compare_url": "u"}])  # compare unavailable
+def test_drift_on_a_commit_behind_the_previous_run_is_not_reported(tmp_path, monkeypatch, env,
+                                                                   gh, rng):
+    on(monkeypatch)
+    assert run(tmp_path, _summary(DRIFT, rng=rng)) == (
+        "skip: the tested commit is not ahead of the previous run")
+    assert gh.writes() == []
+    ok = {**rng, "commits_between": 1}
+    assert run(tmp_path, _summary(DRIFT, rng=ok)) == "created on #16488"
 
 
 def test_clean_rerun_resolves_an_existing_comment(tmp_path, monkeypatch, env, gh):
