@@ -23,7 +23,9 @@ import sys
 import time
 from pathlib import Path
 
+import commit_meta
 import compare
+import index_builder
 import storage
 from submit_and_poll import INFRA_STATUSES, RunPodClient, run_workflow_job
 
@@ -109,6 +111,25 @@ def first_output_sha(run_rec: dict) -> str | None:
                    if str(o.get("filename", "")).endswith(".png")),
                   key=lambda o: o["filename"])
     return pngs[0].get("sha256") if pngs else None
+
+
+def write_thumbnails(outputs_dir: Path, size: int = 256) -> str | None:
+    """WebP previews next to the full PNGs (outputs/thumbs/); returns the first
+    thumbnail's filename. Full PNGs are ~1.6 MB and raw.githubusercontent.com
+    serves them slowly, so the dashboard's list views use these instead."""
+    from PIL import Image
+    thumbs_dir = outputs_dir / "thumbs"
+    first = None
+    for png in sorted(outputs_dir.rglob("*.png")):
+        if thumbs_dir in png.parents:
+            continue
+        thumbs_dir.mkdir(exist_ok=True)
+        name = png.stem + ".webp"
+        with Image.open(png) as im:
+            im.thumbnail((size, size))
+            im.convert("RGB").save(thumbs_dir / name, "WEBP", quality=80, method=4)
+        first = first or name
+    return first
 
 
 def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: Path,
@@ -200,6 +221,13 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
 
     (workdir / "comparison.json").write_text(json.dumps(comparison, indent=2), encoding="utf-8")
 
+    thumbnail = None
+    if run_rec.get("outputs_dir") and comparison["verdict"] not in ("infra_error", "execution_error"):
+        try:
+            thumbnail = write_thumbnails(Path(run_rec["outputs_dir"]))
+        except Exception as e:  # previews are a convenience, never a failure
+            print(f"[{wf_id}] thumbnail generation failed: {e!r}")
+
     # Publish run.json/comparison.json/outputs/figures; baseline copies stay local.
     publish_dir = workdir
     for sub in ("_golden", "_previous"):
@@ -218,6 +246,7 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
             "previous_verdict": comparison["previous_verdict"],
             "figures": comparison["figures"],
             "output_sha256": first_output_sha(run_rec),
+            "thumbnail": thumbnail,
             "gpu_name": run_rec.get("gpu_name"), "timings": run_rec.get("timings"),
             "vram_peak_mb": run_rec.get("vram_peak_mb"),
             "rss_peak_mb": run_rec.get("rss_peak_mb"),
@@ -235,9 +264,30 @@ def main():
     ap.add_argument("--workdir", default="./regression-work")
     ap.add_argument("--workflows", default="all", help="csv of workflow ids, or 'all'")
     ap.add_argument("--skip-publish", action="store_true", help="local dry run, no writes")
+    ap.add_argument("--lane", default=None, help="lane id from manifest/lanes.json "
+                                                 "(default: the lane whose prefix matches)")
     storage.add_storage_args(ap)
     args = ap.parse_args()
+
+    # The lane decides the storage prefix; an unknown lane or prefix is a
+    # configuration error, caught before any GPU job is submitted.
+    lanes = index_builder.load_lanes()
+    if args.lane:
+        if args.lane not in lanes["lanes"]:
+            raise SystemExit(f"unknown lane {args.lane!r}; see manifest/lanes.json")
+        lane_id = args.lane
+        args.prefix = lanes["lanes"][lane_id].get("prefix", args.prefix)
+    else:
+        lane_id = index_builder.lane_for_prefix(lanes, args.prefix)
+        if not lane_id:
+            raise SystemExit(f"no lane in manifest/lanes.json has prefix {args.prefix!r}; "
+                             "pass --lane")
+    layout = lanes["lanes"][lane_id].get("layout", 1)
     store = storage.from_args(args)
+    # The pointer as it stands before this run names the previous tested
+    # commit (the per-workflow comparisons read it again later, but they can
+    # race with each other once the first workflow publishes).
+    prev_commit = (store.latest_pointer(args.branch) or {}).get("commit")
 
     manifest_path = Path(args.manifest).resolve()
     repo_root = manifest_path.parent.parent
@@ -277,6 +327,10 @@ def main():
     summary = {"schema_version": 2, "branch": args.branch, "commit": args.commit,
                "run_ts": int(time.time()), "overall": overall,
                "has_infra_error": any(v == "infra_error" for v in verdicts.values()),
+               "lane": lane_id,
+               "commit_meta": commit_meta.fetch_commit_meta(args.commit),
+               "tested_range": (commit_meta.fetch_range(prev_commit, args.commit)
+                                if prev_commit and prev_commit != args.commit else None),
                "workflows": {r["workflow_id"]: r for r in results}}
 
     if not args.skip_publish:
@@ -287,6 +341,11 @@ def main():
             store.update_latest(args.branch,
                                 {"commit": args.commit, "run_ts": summary["run_ts"],
                                  "workflows": sorted(verdicts)})
+        # The run index is a derived file: regenerated on the freshest tree if
+        # the push has to retry behind a concurrent publisher.
+        builder = index_builder.IndexBuilder(store, args.branch, lane_id, layout, lanes)
+        entry = index_builder.entry_from_summary(summary, lane_id, layout)
+        store.register_derived(lambda st, b=builder, e=entry: b.upsert([e]))
         store.finalize(f"regression {args.branch}@{args.commit[:8]}: {overall}")
 
     for r in results:

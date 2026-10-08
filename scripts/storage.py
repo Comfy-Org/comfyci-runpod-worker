@@ -246,11 +246,50 @@ class GitHubStorage(Storage):
                 n += 1
         return n
 
-    def list_json(self, blob_prefix: str, name: str) -> list[str]:
-        r = self._git("ls-tree", "-r", "--name-only", "HEAD", f"{blob_prefix}/", check=False)
+    def list_blobs(self, blob_prefix: str) -> dict[str, str]:
+        """{path: blob id} for every committed file under `blob_prefix`, from the
+        local trees only (no blob is fetched)."""
+        r = self._git("ls-tree", "-r", "HEAD", f"{blob_prefix}/", check=False)
         if r.returncode != 0:
-            return []
-        return [line for line in r.stdout.splitlines() if line.endswith("/" + name)]
+            return {}
+        out = {}
+        for line in r.stdout.splitlines():
+            meta, _, path = line.partition("\t")
+            parts = meta.split()
+            if len(parts) == 3 and parts[1] == "blob":
+                out[path] = parts[2]
+        return out
+
+    def list_json(self, blob_prefix: str, name: str) -> list[str]:
+        return [p for p in self.list_blobs(blob_prefix) if p.endswith("/" + name)]
+
+    def prefetch(self, paths: list[str]):
+        """Fetch the blobs behind committed `paths` in ONE round trip. A partial
+        clone otherwise lazily fetches one object per read, which takes seconds
+        each against GitHub. Mirrors git's own batched lazy-fetch command."""
+        wanted = set(paths)
+        if not wanted:
+            return
+        # One tree listing over the common parent instead of one per directory.
+        parents = [p.rsplit("/", 1)[0].split("/") for p in wanted]
+        common = []
+        for parts in zip(*parents):
+            if len(set(parts)) != 1:
+                break
+            common.append(parts[0])
+        blobs = self.list_blobs("/".join(common)) if common else {}
+        oids = [oid for path, oid in blobs.items() if path in wanted]
+        if not oids:
+            return
+        # Bytes, not text: text mode would write CRLF on Windows and git would
+        # reject the ids as refspecs.
+        r = subprocess.run(
+            ["git", "-C", str(self.workdir), "-c", "fetch.negotiationAlgorithm=noop",
+             "fetch", "--no-tags", "--no-write-fetch-head", "--recurse-submodules=no",
+             "--filter=blob:none", "--stdin", "origin"],
+            input=("\n".join(oids) + "\n").encode(), check=False, capture_output=True)
+        if r.returncode != 0:  # reads fall back to per-object lazy fetches
+            print(f"storage: prefetch failed: {r.stderr.decode(errors='replace')[-300:]}")
 
     def read_blob_json(self, path: str) -> dict | None:
         r = subprocess.run(["git", "-C", str(self.workdir), "cat-file", "-p", f"HEAD:{path}"],
