@@ -274,7 +274,7 @@ def main():
                                                  "(default: the lane whose prefix matches)")
     ap.add_argument("--summary-out", default=None,
                     help="also write the run summary here (for the PR comment step); "
-                         "written before exiting, whatever the verdict")
+                         "written once results are published, whatever the verdict")
     storage.add_storage_args(ap)
     args = ap.parse_args()
 
@@ -352,8 +352,6 @@ def main():
                "tested_range": (commit_meta.fetch_range(prev_commit, args.commit)
                                 if prev_commit and prev_commit != args.commit else None),
                "workflows": {r["workflow_id"]: r for r in results}}
-    if args.summary_out:
-        write_summary(Path(args.summary_out), summary)
 
     if not args.skip_publish:
         store.publish_summary(args.branch, args.commit, summary)
@@ -368,6 +366,10 @@ def main():
         entry = index_builder.entry_from_summary(summary, lane_id, layout)
         store.register_derived(lambda st, b=builder, e=entry: b.upsert([e]))
         store.finalize(f"regression {args.branch}@{args.commit[:8]}: {overall}")
+    # After publishing, so the PR comment step never links to results that
+    # did not make it to the store; before the exit code, so a red run has one.
+    if args.summary_out:
+        write_summary(Path(args.summary_out), summary)
 
     for r in results:
         v = r["verdict"]

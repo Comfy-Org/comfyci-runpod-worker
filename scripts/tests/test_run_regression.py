@@ -102,3 +102,30 @@ def test_summary_out_is_written_on_failure_with_prior_verdicts(tmp_path, monkeyp
     flux, sdxl = summary["workflows"]["flux_dev_t2i"], summary["workflows"]["sdxl_t2i"]
     assert (flux["prior_verdict"], flux["prior_commit"]) == ("execution_error", "prev")
     assert (sdxl["prior_verdict"], sdxl["prior_commit"]) == ("pass", "old")
+
+
+def test_summary_out_is_not_written_when_publishing_fails(tmp_path, monkeypatch):
+    import sys
+    import pytest
+    import commit_meta
+    import storage
+
+    class BrokenStore(FakeStore):
+        def snapshot_manifest(self, commit, manifest):
+            pass
+
+        def publish_summary(self, branch, commit, summary):
+            raise RuntimeError("push rejected")
+
+    monkeypatch.setattr(storage, "from_args", lambda args: BrokenStore({}))
+    monkeypatch.setattr(commit_meta, "fetch_commit_meta", lambda sha: None)
+    monkeypatch.setattr(run_regression, "process_workflow",
+                        lambda wf_id, *a: {"workflow_id": wf_id, "worker_status": "ok",
+                                           "verdict": "fail", "detail": "new_drift"})
+    out = tmp_path / "summary.json"
+    monkeypatch.setattr(sys, "argv", ["run_regression.py", "--commit", "new", "--branch", "master",
+                                      "--summary-out", str(out)])
+    with pytest.raises(RuntimeError):
+        run_regression.main()
+    # No summary, so no PR comment linking to results that were never published.
+    assert not out.exists()
