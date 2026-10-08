@@ -1,0 +1,23 @@
+# Unit tests for the CPU-side orchestration scripts (no RunPod, no network),
+# plus the manifest lint that checks every workflow against its model list.
+name: Script tests
+on:
+  pull_request:
+    paths: ['scripts/**', 'manifest/**', 'docker/extra_model_paths.yaml', '.github/workflows/scripts-tests.yml']
+  push:
+    branches: [main]
+    paths: ['scripts/**', 'manifest/**', 'docker/extra_model_paths.yaml', '.github/workflows/scripts-tests.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r scripts/requirements.txt pytest
+      - run: python -m pytest scripts/tests -q
