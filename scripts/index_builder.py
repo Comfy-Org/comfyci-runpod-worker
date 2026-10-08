@@ -73,6 +73,20 @@ def _num(v):
     return v if isinstance(v, (int, float)) else None
 
 
+def compact_meta(meta: dict | None) -> dict | None:
+    """Commit metadata for an index entry. The PR title, author and avatar
+    (pt/pa/av) are only present when the PR lookup found them, so entries
+    from older summaries keep their shape."""
+    if not meta:
+        return None
+    m = {"s": meta.get("subject"), "a": meta.get("author"), "pr": meta.get("pr"),
+         "ct": meta.get("committed_ts")}
+    for key, src in (("pt", "pr_title"), ("pa", "pr_author"), ("av", "pr_avatar")):
+        if meta.get(src):
+            m[key] = meta[src]
+    return m
+
+
 def entry_from_summary(summary: dict, lane: str, layout: int,
                        meta: dict | None = None, tested_range: dict | None = None,
                        prev_entry: dict | None = None,
@@ -125,8 +139,7 @@ def entry_from_summary(summary: dict, lane: str, layout: int,
         "cv": first.get("comfy_version"),
         "lane": lane,
         "layout": layout,
-        "m": ({"s": meta.get("subject"), "a": meta.get("author"), "pr": meta.get("pr"),
-               "ct": meta.get("committed_ts")} if meta else None),
+        "m": compact_meta(meta),
         "prev": prev,
         "range": ({"n": tested_range.get("commits_between"),
                    "url": tested_range.get("compare_url")} if tested_range else None),
