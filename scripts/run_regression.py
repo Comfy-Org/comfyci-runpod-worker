@@ -8,7 +8,8 @@ failures, so RunPod flakiness cannot block core merges.
 
 Usage (CI):
   python run_regression.py --commit $GITHUB_SHA --branch master \
-      [--manifest ../manifest/workflows.json] [--workflows all]
+      [--manifest ../manifest/workflows.json] [--workflows all] \
+      [--summary-out summary.json]
 Env: RUNPOD_API_KEY, RUNPOD_ENDPOINT_ID; GITHUB_TOKEN to push results in
 Actions (github storage) or GOOGLE_APPLICATION_CREDENTIALS (gcs storage).
 """
@@ -255,6 +256,11 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
             "python_version": run_rec.get("python_version")}
 
 
+def write_summary(path: Path, summary: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", default=str(HERE.parent / "manifest" / "workflows.json"))
@@ -266,6 +272,9 @@ def main():
     ap.add_argument("--skip-publish", action="store_true", help="local dry run, no writes")
     ap.add_argument("--lane", default=None, help="lane id from manifest/lanes.json "
                                                  "(default: the lane whose prefix matches)")
+    ap.add_argument("--summary-out", default=None,
+                    help="also write the run summary here (for the PR comment step); "
+                         "written once results are published, whatever the verdict")
     storage.add_storage_args(ap)
     args = ap.parse_args()
 
@@ -288,6 +297,10 @@ def main():
     # commit (the per-workflow comparisons read it again later, but they can
     # race with each other once the first workflow publishes).
     prev_commit = (store.latest_pointer(args.branch) or {}).get("commit")
+    builder = index_builder.IndexBuilder(store, args.branch, lane_id, layout, lanes)
+    # The index as it stands before this run: it also records runs that had
+    # execution errors, which the pointer above skips.
+    prior_entries = (store.download_json(builder.head_path()) or {}).get("entries") or []
 
     manifest_path = Path(args.manifest).resolve()
     repo_root = manifest_path.parent.parent
@@ -324,11 +337,18 @@ def main():
     verdicts = {r["workflow_id"]: r["verdict"] for r in results}
     overall = ("fail" if any(v in ("fail", "execution_error") for v in verdicts.values())
                else "pass")
+    meta = commit_meta.fetch_commit_meta(args.commit)
+    priors = index_builder.prior_verdicts(prior_entries, args.commit,
+                                          (meta or {}).get("committed_ts"))
+    for r in results:
+        prior = priors.get(r["workflow_id"]) or {}
+        r["prior_verdict"] = prior.get("verdict")
+        r["prior_commit"] = prior.get("commit")
     summary = {"schema_version": 2, "branch": args.branch, "commit": args.commit,
                "run_ts": int(time.time()), "overall": overall,
                "has_infra_error": any(v == "infra_error" for v in verdicts.values()),
                "lane": lane_id,
-               "commit_meta": commit_meta.fetch_commit_meta(args.commit),
+               "commit_meta": meta,
                "tested_range": (commit_meta.fetch_range(prev_commit, args.commit)
                                 if prev_commit and prev_commit != args.commit else None),
                "workflows": {r["workflow_id"]: r for r in results}}
@@ -343,10 +363,13 @@ def main():
                                  "workflows": sorted(verdicts)})
         # The run index is a derived file: regenerated on the freshest tree if
         # the push has to retry behind a concurrent publisher.
-        builder = index_builder.IndexBuilder(store, args.branch, lane_id, layout, lanes)
         entry = index_builder.entry_from_summary(summary, lane_id, layout)
         store.register_derived(lambda st, b=builder, e=entry: b.upsert([e]))
         store.finalize(f"regression {args.branch}@{args.commit[:8]}: {overall}")
+    # After publishing, so the PR comment step never links to results that
+    # did not make it to the store; before the exit code, so a red run has one.
+    if args.summary_out:
+        write_summary(Path(args.summary_out), summary)
 
     for r in results:
         v = r["verdict"]

@@ -73,6 +73,20 @@ def _num(v):
     return v if isinstance(v, (int, float)) else None
 
 
+def compact_meta(meta: dict | None) -> dict | None:
+    """Commit metadata for an index entry. The PR title, author and avatar
+    (pt/pa/av) are only present when the PR lookup found them, so entries
+    from older summaries keep their shape."""
+    if not meta:
+        return None
+    m = {"s": meta.get("subject"), "a": meta.get("author"), "pr": meta.get("pr"),
+         "ct": meta.get("committed_ts")}
+    for key, src in (("pt", "pr_title"), ("pa", "pr_author"), ("av", "pr_avatar")):
+        if meta.get(src):
+            m[key] = meta[src]
+    return m
+
+
 def entry_from_summary(summary: dict, lane: str, layout: int,
                        meta: dict | None = None, tested_range: dict | None = None,
                        prev_entry: dict | None = None,
@@ -125,8 +139,7 @@ def entry_from_summary(summary: dict, lane: str, layout: int,
         "cv": first.get("comfy_version"),
         "lane": lane,
         "layout": layout,
-        "m": ({"s": meta.get("subject"), "a": meta.get("author"), "pr": meta.get("pr"),
-               "ct": meta.get("committed_ts")} if meta else None),
+        "m": compact_meta(meta),
         "prev": prev,
         "range": ({"n": tested_range.get("commits_between"),
                    "url": tested_range.get("compare_url")} if tested_range else None),
@@ -171,6 +184,24 @@ def first_bad(entries: list[dict]) -> dict:
                                      "golden": cell.get("g"), "runs": 0}
                 chains[wf_id]["runs"] += 1
     return {wf_id: chain for wf_id, chain in chains.items() if chain}
+
+
+def prior_verdicts(entries: list[dict], commit: str, committed_ts: int | None = None) -> dict:
+    """Per workflow: the most recent red or green verdict before `commit` in
+    commit order, as {wf_id: {"commit", "verdict"}}. Unlike the previous-run
+    pointer (advanced only by fully comparable runs), this sees runs that had
+    execution errors, so it tells a new execution error from a standing one.
+    Entries newer than `committed_ts` (a re-test of an older commit) are
+    skipped; infra errors and missing baselines are looked through."""
+    out: dict[str, dict] = {}
+    for e in sorted(entries, key=sort_key, reverse=True):
+        if e.get("c") == commit or (committed_ts and sort_ts(e) > committed_ts):
+            continue
+        for wf_id, cell in (e.get("w") or {}).items():
+            v = cell.get("v")
+            if wf_id not in out and (v == "pass" or v in RED):
+                out[wf_id] = {"commit": e["c"], "verdict": v}
+    return out
 
 
 class IndexBuilder:

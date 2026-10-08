@@ -87,7 +87,9 @@ previous run that did not fail (the golden changed, not the code). Inherited
 failures publish no figures (`figures: false`): the figures of the first
 failing commit already show the diff. `summary.json` carries
 `schema_version: 2` and `has_infra_error` (infra errors never turn `overall`
-red).
+red). Each workflow also records `prior_verdict` / `prior_commit`: its most
+recent red or green verdict before this commit, read from the run index, which
+(unlike the previous-run pointer) includes runs that had execution errors.
 
 ## Accepting an intentional change (re-bless)
 
@@ -119,7 +121,8 @@ head file with the newest 500 runs and the first bad commit of each open
 failing chain, complete monthly shards, and `lanes.json` with the lane
 registry from `manifest/lanes.json`, per-branch latest pointers and the
 current golden tag and output sha per workflow. Entries carry the commit
-subject, author and PR (looked up with the Actions token), the tested range
+subject, author and PR (looked up with the Actions token; the PR title, author
+and avatar too when the commit landed through a PR), the tested range
 to the previous run (HEAD polling can skip commits), per-workflow verdicts
 with the drift class, output sha, metrics and timings. Entries are ordered by
 commit time, so re-testing an older commit never reorders history. The
@@ -128,6 +131,49 @@ dashboard's history and matrix views read only these files.
 **Build run index** (workflow_dispatch) backfills or repairs a branch/lane
 from the committed summaries; dispatch it once after the first deploy and
 whenever an index file needs regenerating.
+
+## PR comments (PULSE)
+
+After each run, `scripts/notify_pr.py` can leave one comment on the ComfyUI
+pull request that landed the tested commit. Its first line starts with
+**(PULSE)**; below it, a row per workflow (verdict, new or inherited, PSNR,
+mean MSE, % pixels changed, exec time, peak VRAM), the lane and the run's page
+on ci.comfy.org.
+
+- **When**: a workflow's outputs changed at this commit (`detail: new_drift`),
+  or it hit an execution error while its prior run (`prior_verdict`) produced
+  outputs. Never for pass, inherited drift, infra errors, missing goldens, a
+  workflow with no prior run, a re-test of a commit older than the previous
+  run, or a run that covered several new commits (the change cannot be pinned
+  on one PR).
+- **One comment per PR**: found again by the hidden marker
+  `<!-- pulse-regression:v1 -->` and the token owner's login, and edited in
+  place, so reruns never add a second one. A later clean run of the same
+  commit turns it into a short resolved note.
+- **Whose PRs**: only PRs authored by a ComfyUI code owner, i.e. the users on
+  the `*` rule of ComfyUI's `CODEOWNERS` (team entries are ignored). The repo
+  variable `PULSE_ALLOWED_AUTHORS` (comma-separated logins) replaces that list.
+  If `CODEOWNERS` cannot be read and no override is set, nothing is posted.
+  Only the primary lane on master comments.
+- **Modes** (repo variable `PULSE_PR_COMMENTS`): `dry-run` (default) renders
+  the comment into the job summary and posts nothing; `on` posts; `off` skips
+  the step's work entirely. `on` without the token falls back to dry-run.
+- **Token** (repo secret `PULSE_GH_TOKEN`): a personal access token of the
+  account the comments should come from; they appear as that user. Prefer a
+  fine-grained token with resource owner Comfy-Org, repository
+  `Comfy-Org/ComfyUI` only, and Issues and Pull requests set to read and
+  write. Fine-grained tokens for an organisation's repositories may need
+  approval by an org owner, depending on the org's token policy. A classic
+  token with the `public_repo` scope also works, but it can push to every
+  public repository the account can write to, and anyone who can edit this
+  repo's workflows can use it. Reads (PR lookup, `CODEOWNERS`) use the Actions
+  token.
+- **Non-blocking**: the step runs even when the suite fails, has
+  `continue-on-error`, and turns every API or network problem into a warning.
+
+To turn it on: add `PULSE_GH_TOKEN` (Settings → Secrets and variables →
+Actions), check the dry-run output in a few job summaries, then set the
+variable `PULSE_PR_COMMENTS` to `on`. Setting it to `off` stops it at once.
 
 ## One-time infrastructure setup
 
@@ -141,7 +187,8 @@ whenever an index file needs regenerating.
    attached, GPU type `RTX 4090`, max workers 3, idle timeout ~60s. Optionally
    set `HF_TOKEN` as an endpoint env var for gated models.
 3. **Repo secrets** (this repo): `RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID`, and
-   optionally `HF_TOKEN` (gated models). For the GCS phase, additionally
+   optionally `HF_TOKEN` (gated models) and `PULSE_GH_TOKEN` (PR comments,
+   see above). For the GCS phase, additionally
    `GCS_SERVICE_ACCOUNT_JSON` (write access to the CI bucket) and `GCS_BUCKET`
    (`comfy-ci-results`).
 4. **Seed the volume**: run `sync-models.yml` (workflow_dispatch).
