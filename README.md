@@ -49,13 +49,24 @@ One PR to this repo:
 
 1. Export the workflow from ComfyUI via **Workflow → Export (API)** and save it
    as `manifest/workflows/<id>_api.json`. Make sure it ends in a `SaveImage`
-   node (PNG output — lossless is what gets compared). Fix all seeds in the
-   JSON.
+   node (PNG output — lossless is what gets compared) with
+   `filename_prefix: <id>`. Fix all seeds in the JSON. For template
+   workflows, resolve switch nodes to their default branch and drop the
+   unused branch and preview-only nodes, so only the models that actually run
+   need syncing.
 2. Add an entry under `workflows` in `manifest/workflows.json`:
    - `workflow_path`, `seed_overrides` (node id → input patch, belt-and-braces
      for the seed), `models` (name + download url + ComfyUI models
-     subdirectory), and optionally `timeout_s`, `gpu_type`, `thresholds`.
+     subdirectory, plus `sha256` when the host publishes one), and optionally
+     `timeout_s`, `gpu_type`, `thresholds`, `comfy_flags`.
+   - Input images for `LoadImage` nodes are listed under `models` too, with
+     `"directory": "input"` (pin the url to a commit, not a branch), and the
+     entry sets `"comfy_flags": ["--input-directory", "/runpod-volume/models/input"]`
+     so ComfyUI reads them from the volume.
    - Start with `"enabled": false`.
+   - `python -m pytest scripts/tests -q` lints the manifest against every
+     workflow it references (loaded files listed in `models`, seed override
+     targets, model folders, `SaveImage` prefix = workflow id).
 3. Merge. `sync-models.yml` downloads the new models onto the network volume
    automatically.
 4. Generate + bless a golden for it: run the **Golden baselines** workflow with
