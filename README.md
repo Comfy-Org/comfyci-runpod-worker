@@ -89,6 +89,29 @@ failing commit already show the diff. `summary.json` carries
 `schema_version: 2` and `has_infra_error` (infra errors never turn `overall`
 red).
 
+## Accepting an intentional change (re-bless)
+
+When a commit changes numerics on purpose (a kernel optimisation that moves
+every pixel by a rounding error, say), the golden is stale, not the code.
+Re-bless with a reason so the history explains itself:
+
+- From a release tag on master, with a fresh two-run noise floor: run
+  **Golden baselines** with `ref=<tag>`, `workflows=<id>`, `bless=false`,
+  inspect `golden/<id>/<tag>/outputs/` and `noise_floor.json`, then re-run with
+  `bless_only=true` and a `reason`.
+- Without GPU time, from a run that already exists on the results branch:
+  `from_run=master/<full sha>`, `workflows=<id>`, `reason=...`, `bless=true`.
+  The golden is named after the commit (12-char sha; pass `ref=<tag>` to name
+  it after a tag that resolves to that same commit), has no `run_r2.json`, and
+  its noise floor is inherited from the previous golden and marked
+  `measured: false`.
+
+An existing `golden/<id>/<tag>/` is never overwritten unless `force` is set.
+`golden/<id>/current.json` records `reason`, `supersedes` and the golden's
+`output_sha256`; `golden/<id>/history.json` keeps every bless; the run index
+is refreshed in the same publish so accepted drift stops being reported as an
+open regression.
+
 ## Run index
 
 Every publish maintains a compact index under `regression/index/`: a per-lane
@@ -158,7 +181,8 @@ regression/
   latest/<branch>.json                     # previous-run pointer, written last
   manifest-snapshot/<commit>.json
   golden/<workflow_id>/<tag>/{outputs/, run_r1.json, run_r2.json, noise_floor.json, blessed.json}
-  golden/<workflow_id>/current.json        # active blessed tag
+  golden/<workflow_id>/current.json        # active blessed tag (+ reason, supersedes, output_sha256)
+  golden/<workflow_id>/history.json        # every bless
   index/lanes.json                         # lane registry + per-branch latest + golden shas
   index/<branch>/<lane>.json               # newest 500 runs + first bad commit per workflow
   index/<branch>/<lane>/<YYYY-MM>.json     # complete monthly shards
