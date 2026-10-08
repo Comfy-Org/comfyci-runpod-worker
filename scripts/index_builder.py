@@ -186,6 +186,24 @@ def first_bad(entries: list[dict]) -> dict:
     return {wf_id: chain for wf_id, chain in chains.items() if chain}
 
 
+def prior_verdicts(entries: list[dict], commit: str, committed_ts: int | None = None) -> dict:
+    """Per workflow: the most recent red or green verdict before `commit` in
+    commit order, as {wf_id: {"commit", "verdict"}}. Unlike the previous-run
+    pointer (advanced only by fully comparable runs), this sees runs that had
+    execution errors, so it tells a new execution error from a standing one.
+    Entries newer than `committed_ts` (a re-test of an older commit) are
+    skipped; infra errors and missing baselines are looked through."""
+    out: dict[str, dict] = {}
+    for e in sorted(entries, key=sort_key, reverse=True):
+        if e.get("c") == commit or (committed_ts and sort_ts(e) > committed_ts):
+            continue
+        for wf_id, cell in (e.get("w") or {}).items():
+            v = cell.get("v")
+            if wf_id not in out and (v == "pass" or v in RED):
+                out[wf_id] = {"commit": e["c"], "verdict": v}
+    return out
+
+
 class IndexBuilder:
     def __init__(self, store, branch: str, lane: str, layout: int, lanes: dict | None = None):
         self.store = store

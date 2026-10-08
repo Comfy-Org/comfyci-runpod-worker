@@ -105,6 +105,7 @@ def _run_main(tmp_path, remote, root, *extra):
     sys.argv = argv
     try:
         # Point the lane registry at the test manifest and the store at the bare remote.
+        lanes_file = golden_baseline.index_builder.LANES_FILE
         golden_baseline.index_builder.LANES_FILE = root / "manifest" / "lanes.json"
         orig = storage.from_args
 
@@ -116,6 +117,7 @@ def _run_main(tmp_path, remote, root, *extra):
             return golden_baseline.main()
         finally:
             storage.from_args = orig
+            golden_baseline.index_builder.LANES_FILE = lanes_file
     finally:
         sys.argv = old
 

@@ -110,6 +110,23 @@ def test_first_bad_walks_commit_time_not_run_time():
         "author": "dev", "golden": "v0.33.2", "runs": 1}
 
 
+def test_prior_verdicts_look_through_infra_errors_and_see_execution_errors():
+    entries = [_entry("e", 5, "fail"), _entry("d", 4, "infra_error"),
+               _entry("c", 3, "execution_error"), _entry("b", 2, "pass")]
+    # Re-running 'e' itself: its own entry is not its prior.
+    assert index_builder.prior_verdicts(entries, "e") == {
+        "flux": {"commit": "c", "verdict": "execution_error"}}
+    assert index_builder.prior_verdicts(entries, "f")["flux"]["commit"] == "e"
+    assert index_builder.prior_verdicts([_entry("a", 1, "no_baseline")], "b") == {}
+    assert index_builder.prior_verdicts([], "a") == {}
+
+
+def test_prior_verdicts_skip_newer_commits_on_a_retest():
+    entries = [_entry("new", 50, "execution_error", ct=20), _entry("old", 40, "pass", ct=10)]
+    assert index_builder.prior_verdicts(entries, "mid", committed_ts=15)["flux"]["commit"] == "old"
+    assert index_builder.prior_verdicts(entries, "next", committed_ts=30)["flux"]["commit"] == "new"
+
+
 def test_merge_entry_keeps_other_workflows_on_partial_rerun():
     old = {"c": "x", "t": 1, "o": "fail", "infra": False, "m": {"s": "x"}, "prev": "p",
            "w": {"flux": {"v": "fail"}, "sdxl": {"v": "pass"}}}
