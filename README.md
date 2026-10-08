@@ -76,6 +76,17 @@ Thresholds come from the manifest entry if set, otherwise from the manifest
 defaults loosened to 3× the golden's own re-run noise floor
 (`noise_floor.json`), so nondeterministic workflows don't false-alarm.
 
+A failure vs golden is also classified against the previous tested run
+(`detail` in `summary.json`): `new_drift` when this commit's outputs differ
+from the previous run (the change happened here), `inherited` when they are
+bit-identical to a previous run that already failed against the same golden,
+and null when there is nothing to compare against or the outputs match a
+previous run that did not fail (the golden changed, not the code). Inherited
+failures publish no figures (`figures: false`): the figures of the first
+failing commit already show the diff. `summary.json` carries
+`schema_version: 2` and `has_infra_error` (infra errors never turn `overall`
+red).
+
 ## One-time infrastructure setup
 
 1. **Docker image**: `build-image.yml` pushes
@@ -122,6 +133,8 @@ Identical on both backends (branch root or bucket root):
 ```
 regression/
   runs/<branch>/<commit>/<workflow_id>/{outputs/, run.json, comparison.json, figures/}
+                                           # figures/ only when the frames differ and the
+                                           # failure is not inherited
   runs/<branch>/<commit>/summary.json      # per-commit rollup (dashboard entrypoint)
   latest/<branch>.json                     # previous-run pointer, written last
   manifest-snapshot/<commit>.json
@@ -135,3 +148,9 @@ regression/
   changing either, regenerate and re-bless (`blessed.json` records both).
 - Local dry run without publishing anything:
   `python scripts/run_regression.py --commit <sha> --branch test --skip-publish`
+- Script tests (run on every PR by the *Script tests* workflow):
+  `pip install -r scripts/requirements.txt pytest && python -m pytest scripts/tests`
+- The results checkout is a blobless sparse clone: only the aggregate
+  directories are materialised, run directories on first use.
+- `run.json` `delay_s` is in seconds from summary `schema_version: 2` on;
+  earlier records hold RunPod's raw millisecond value under the same key.
