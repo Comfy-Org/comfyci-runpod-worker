@@ -20,6 +20,8 @@ ENTRY_KEYS = {"enabled", "workflow_path", "seed_overrides", "models",
 OPTIONAL_ENTRY_KEYS = {"comfy_flags"}
 # Inputs whose string value names a file the worker must find on the volume.
 FILE_INPUT = re.compile(r"^(ckpt|unet|clip|vae|lora)_name\d*$")
+# Any other loader (control_net_name, upscale model_name, ...) is caught by extension.
+FILE_EXT = re.compile(r"\.(safetensors|sft|ckpt|pt|pth|bin|gguf|onnx)$", re.I)
 # Loader filenames that ship with ComfyUI itself rather than the volume.
 BUILTIN_FILES: set[str] = set()
 # LoadImage files come from the volume's input/ folder via --input-directory.
@@ -45,9 +47,27 @@ def _referenced_files(wf: dict) -> set[str]:
         for name, value in node["inputs"].items():
             if not isinstance(value, str):
                 continue
-            if FILE_INPUT.match(name) or (node["class_type"] == "LoadImage" and name == "image"):
+            if (FILE_INPUT.match(name) or FILE_EXT.search(value)
+                    or (node["class_type"] == "LoadImage" and name == "image")):
                 out.add(re.sub(r" \[(input|output|temp)\]$", "", value))
     return out
+
+
+def _links(node: dict) -> list:
+    return [v for v in node["inputs"].values()
+            if isinstance(v, list) and len(v) == 2 and isinstance(v[0], str)]
+
+
+def _save_ancestors(wf: dict) -> set[str]:
+    """Node ids that feed a SaveImage (ComfyUI runs output nodes and their inputs only)."""
+    seen, stack = set(), [nid for nid, n in wf.items() if n["class_type"] == "SaveImage"]
+    while stack:
+        nid = stack.pop()
+        if nid in seen or nid not in wf:
+            continue
+        seen.add(nid)
+        stack.extend(link[0] for link in _links(wf[nid]))
+    return seen
 
 
 def test_model_folders_parsed():
@@ -74,9 +94,18 @@ def test_workflow_is_api_format(wf_id):
     for nid, node in wf.items():
         assert isinstance(node, dict) and isinstance(node.get("class_type"), str), nid
         assert isinstance(node.get("inputs"), dict), nid
-        for name, value in node["inputs"].items():
-            if isinstance(value, list) and len(value) == 2 and isinstance(value[0], str):
-                assert value[0] in wf, f"{nid}.{name} links to missing node {value[0]}"
+        for link in _links(node):
+            assert link[0] in wf, f"{nid} links to missing node {link[0]}"
+            assert isinstance(link[1], int) and link[1] >= 0, f"{nid} link {link} has a bad output index"
+
+
+@pytest.mark.parametrize("wf_id", sorted(WORKFLOWS))
+def test_every_node_feeds_a_save(wf_id):
+    """Leftover preview/aux output nodes still run (a PreviewAny on an LLM branch
+    would load and sample the LLM), and dead nodes hide what the test exercises."""
+    wf = _load_workflow(WORKFLOWS[wf_id])
+    stray = sorted(f"{nid}:{wf[nid]['class_type']}" for nid in set(wf) - _save_ancestors(wf))
+    assert not stray, f"nodes that do not feed a SaveImage: {stray}"
 
 
 @pytest.mark.parametrize("wf_id", sorted(WORKFLOWS))
@@ -104,6 +133,15 @@ def test_every_loaded_file_is_synced(wf_id):
     names = {m["name"] for m in entry["models"]}
     missing = _referenced_files(_load_workflow(entry)) - names - BUILTIN_FILES
     assert not missing, f"loaded by the workflow but not in its models list: {sorted(missing)}"
+
+
+@pytest.mark.parametrize("wf_id", sorted(WORKFLOWS))
+def test_every_synced_file_is_loaded(wf_id):
+    """A models entry the workflow never loads is a dead download on the volume
+    (e.g. a dropped switch branch's model left behind)."""
+    entry = WORKFLOWS[wf_id]
+    unused = {m["name"] for m in entry["models"]} - _referenced_files(_load_workflow(entry))
+    assert not unused, f"in the models list but never loaded: {sorted(unused)}"
 
 
 @pytest.mark.parametrize("wf_id", sorted(WORKFLOWS))
@@ -143,5 +181,17 @@ def test_referenced_files_helper():
         "2": {"class_type": "KSampler", "inputs": {"sampler_name": "euler"}},
         "3": {"class_type": "LoadImage", "inputs": {"image": "x.png [input]"}},
         "4": {"class_type": "UNETLoader", "inputs": {"unet_name": ["9", 0]}},
+        "5": {"class_type": "ControlNetLoader", "inputs": {"control_net_name": "cn.safetensors"}},
+        "6": {"class_type": "SaveImage", "inputs": {"filename_prefix": "x", "images": ["4", 0]}},
     }
-    assert _referenced_files(wf) == {"a.safetensors", "b.safetensors", "x.png"}
+    assert _referenced_files(wf) == {"a.safetensors", "b.safetensors", "x.png", "cn.safetensors"}
+
+
+def test_save_ancestors_helper():
+    wf = {
+        "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+        "2": {"class_type": "PreviewAny", "inputs": {"source": ["1", 0]}},
+        "3": {"class_type": "SaveImage", "inputs": {"filename_prefix": "x", "images": ["1", 0]}},
+        "4": {"class_type": "CLIPLoader", "inputs": {"clip_name": "c.safetensors"}},
+    }
+    assert _save_ancestors(wf) == {"1", "3"}

@@ -65,8 +65,9 @@ One PR to this repo:
      so ComfyUI reads them from the volume.
    - Start with `"enabled": false`.
    - `python -m pytest scripts/tests -q` lints the manifest against every
-     workflow it references (loaded files listed in `models`, seed override
-     targets, model folders, `SaveImage` prefix = workflow id).
+     workflow it references (loaded files and `models` match both ways, every
+     node feeds the `SaveImage`, seed override targets, model folders,
+     `SaveImage` prefix = workflow id).
 3. Merge. `sync-models.yml` downloads the new models onto the network volume
    automatically.
 4. Generate + bless a golden for it: run the **Golden baselines** workflow with
