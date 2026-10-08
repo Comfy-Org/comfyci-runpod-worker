@@ -20,7 +20,28 @@ QUEUE_DEADLINE_S = 600
 COLD_START_ALLOWANCE_S = 900
 
 INFRA_STATUSES = {"checkout_error", "missing_model", "server_start_timeout",
-                  "server_died", "worker_error", "infra_error", "no_outputs"}
+                  "server_died", "worker_error", "infra_error", "no_outputs",
+                  "bad_request"}
+# bad_request is a deterministic orchestrator/handler contract error: retrying
+# it would only buy a second identical failure.
+RETRYABLE_STATUSES = INFRA_STATUSES - {"bad_request"}
+
+
+def _error_detail(err) -> dict | None:
+    """Normalise a job-level error: RunPod returns the handler's dict as a
+    JSON-encoded string, so decode it back when possible."""
+    if err is None:
+        return None
+    if isinstance(err, dict):
+        return err
+    if isinstance(err, str):
+        try:
+            decoded = json.loads(err)
+            if isinstance(decoded, dict):
+                return decoded
+        except ValueError:
+            pass
+    return {"message": str(err)[:2000]}
 
 
 class RunPodClient:
@@ -128,14 +149,20 @@ def run_workflow_job(client: RunPodClient, workflow_id: str, workflow_json: dict
                   ("status", "error", "comfy_version", "torch_version", "python_version",
                    "gpu_name", "vram_peak_mb", "rss_peak_mb", "validation", "timings",
                    "commit_checked_out")}
+        # The RunPod SDK lifts a handler's `error` key to the job level, so
+        # fall back to it or the worker's failure detail is lost.
+        if record.get("error") is None and st.get("error") is not None:
+            record["error"] = _error_detail(st.get("error"))
         record["runpod_job_id"] = job_id
         record["attempt"] = attempt
-        record["delay_s"] = st.get("delayTime")
+        delay = st.get("delayTime")  # RunPod reports milliseconds
+        record["delay_ms"] = delay if isinstance(delay, (int, float)) else None
+        record["delay_s"] = round(delay / 1000, 3) if isinstance(delay, (int, float)) else None
         record["execution_ms"] = st.get("executionTime")
         outputs_dir = workdir / "outputs"
         record["outputs"] = _write_outputs(out.get("outputs") or [], outputs_dir)
         record["outputs_dir"] = str(outputs_dir)
-        if record["status"] in INFRA_STATUSES and attempt == 1:
+        if record["status"] in RETRYABLE_STATUSES and attempt == 1:
             last_err = f"worker infra status {record['status']}: {json.dumps(record.get('error'))[:500]}"
             continue
         return record

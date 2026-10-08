@@ -4,3 +4,4 @@ regression-work/
 golden-work/
 .venv/
 *.log
+results-checkout/
