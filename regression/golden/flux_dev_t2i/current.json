@@ -1,5 +1,10 @@
 {
-  "tag": "v0.33.2",
+  "tag": "v0.38.0",
+  "commit": "6b747c0428c343e1417219641db93a4fb7cb69ae",
   "blessed_by": "marawan206",
-  "blessed_ts": 1787227843
+  "blessed_ts": 1791557355,
+  "reason": "Accept intended FLUX numerics change from ComfyUI #16488 (b5cc8830): adaLN now goes through comfy_kitchen.adaln, whose eager fallback on cu128 rounds mul and add separately. Deterministic and visually equivalent; v0.38.0 golden is byte-identical to master output (sha256 3fa6e2ad).",
+  "supersedes": "v0.33.2",
+  "source": "golden_run",
+  "output_sha256": null
 }

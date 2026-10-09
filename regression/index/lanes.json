@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_ts": 1791557242,
+  "generated_ts": 1791557355,
   "primary": "py312-torch2.11.0-cu128",
   "lanes": {
     "py312-torch2.11.0-cu128": {
@@ -30,8 +30,8 @@
       },
       "goldens": {
         "flux_dev_t2i": {
-          "tag": "v0.33.2",
-          "sha": "0b3532285816b7438ef7deee2bc3ece742154f5b54501a847f8d80607abac237"
+          "tag": "v0.38.0",
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3"
         },
         "sdxl_t2i": {
           "tag": "v0.33.2",
