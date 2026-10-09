@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "primary": "py312-torch2.11.0-cu128",
+  "lanes": {
+    "py312-torch2.11.0-cu128": {
+      "label": "py3.12 / torch 2.11.0 / cu128 / RTX 4090",
+      "python": "3.12",
+      "torch": "2.11.0",
+      "cuda": "12.8",
+      "gpu": "RTX 4090",
+      "cadence": "per-commit",
+      "blocking": true,
+      "role": "primary",
+      "layout": 1,
+      "prefix": "regression"
+    }
+  }
+}
