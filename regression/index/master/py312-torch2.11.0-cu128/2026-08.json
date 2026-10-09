@@ -16,7 +16,10 @@
         "s": "Minimax h3 controlnet as a model patch instead of a controlnet. (#15975)",
         "a": "comfyanonymous",
         "pr": 15975,
-        "ct": 1788219882
+        "ct": 1788219882,
+        "pt": "Minimax h3 controlnet as a model patch instead of a controlnet.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "a8b4fa64104a4d834c51396eef5c62518b7691c9",
       "range": {
@@ -65,7 +68,10 @@
         "s": "Add how to cache model stuff to AGENTS.md (#16003)",
         "a": "comfyanonymous",
         "pr": 16003,
-        "ct": 1788217783
+        "ct": 1788217783,
+        "pt": "Add how to cache model stuff to AGENTS.md",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "95d755cd8107a72258d452b5d3657273d571f07d",
       "range": {
@@ -114,7 +120,10 @@
         "s": "Disable push event trigger for failing workflow. (#15995)",
         "a": "comfyanonymous",
         "pr": 15995,
-        "ct": 1788146354
+        "ct": 1788146354,
+        "pt": "Disable push event trigger for failing workflow.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "f938505952476e48a12687eac696cdc94d48a3fe",
       "range": {
@@ -163,7 +172,10 @@
         "s": "feat: add VideoTrim and VideoCrop nodes with VIDEO_EDIT widget inputs (#15637)",
         "a": "jtydhr88",
         "pr": 15637,
-        "ct": 1788130488
+        "ct": 1788130488,
+        "pt": "feat: add VideoTrim and VideoCrop nodes with VIDEO_EDIT widget inputs",
+        "pa": "jtydhr88",
+        "av": "https://avatars.githubusercontent.com/u/860985?v=4"
       },
       "prev": "8a33128f2f8c5585c57486c07de481241e70a39c",
       "range": {
@@ -212,7 +224,10 @@
         "s": "Improve some warning messages. (#15977)",
         "a": "comfyanonymous",
         "pr": 15977,
-        "ct": 1788048620
+        "ct": 1788048620,
+        "pt": "Improve some warning messages.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "5bdcb5f4edd70412e12fb04f357766cb4504e0fa",
       "range": {
@@ -261,7 +276,10 @@
         "s": "[Partner Nodes] fix(HeyGen): update Avatar Video price badge (#15945)",
         "a": "bigcat88",
         "pr": 15945,
-        "ct": 1788026038
+        "ct": 1788026038,
+        "pt": "[Partner Nodes] fix(HeyGen): update Avatar Video price badge",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "e7051b03758a1247e3adb84a5b784ffacb9a23bd",
       "range": {
@@ -310,7 +328,10 @@
         "s": "Add section about user input tolerance to AGENTS.md (#15955)",
         "a": "comfyanonymous",
         "pr": 15955,
-        "ct": 1787961629
+        "ct": 1787961629,
+        "pt": "Add section about user input tolerance to AGENTS.md",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "2504e68d4d9dedb514e172692f13436623f25aed",
       "range": {
@@ -359,7 +380,10 @@
         "s": "MiniMax-H3: Support PDD LoRA (#15908)",
         "a": "kijai",
         "pr": 15908,
-        "ct": 1787955156
+        "ct": 1787955156,
+        "pt": "MiniMax-H3: Support PDD LoRA",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
       },
       "prev": "3ac5d7941dfa2504555260512132d1cb5664648d",
       "range": {
@@ -408,7 +432,10 @@
         "s": "Add cfgpp_ud10_ab sampler. (#15951)",
         "a": "comfyanonymous",
         "pr": 15951,
-        "ct": 1787945598
+        "ct": 1787945598,
+        "pt": "Add cfgpp_ud10_ab sampler.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "0a33ed6c28f926d14536235771c222f9e6d1026b",
       "range": {
@@ -457,7 +484,10 @@
         "s": "Add to readme that we support HDR and high bit depth. (#15940)",
         "a": "comfyanonymous",
         "pr": 15940,
-        "ct": 1787885850
+        "ct": 1787885850,
+        "pt": "Add to readme that we support HDR and high bit depth.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "4c6359f2e39df5ac075d556acb7ccd49a91f7181",
       "range": {
@@ -506,7 +536,10 @@
         "s": "[Partner Nodes] feat(Google-Omni): add support for Omni 1.1 model (#15929)",
         "a": "bigcat88",
         "pr": 15929,
-        "ct": 1787869775
+        "ct": 1787869775,
+        "pt": "[Partner Nodes] feat(Google-Omni): add support for Omni 1.1 model",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "e20d433a4966dcc88fa5abbae6ace824cb78b263",
       "range": {
@@ -555,7 +588,10 @@
         "s": "chore: update workflow templates to v0.11.50 (#15931)",
         "a": "comfyui-wiki",
         "pr": 15931,
-        "ct": 1787858514
+        "ct": 1787858514,
+        "pt": "Update workflow templates to v0.11.50",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
       },
       "prev": "77739723a36ea503f875c121b03e9c4288aa4914",
       "range": {
@@ -604,7 +640,10 @@
         "s": "fix(memory): respect the container cgroup memory limit instead of host RAM (#15927)",
         "a": "bigcat88",
         "pr": 15927,
-        "ct": 1787842651
+        "ct": 1787842651,
+        "pt": "fix(memory): respect the container cgroup memory limit instead of host RAM (CORE-394)",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "d8e7bbc9d586d95f758d6b0ed23d519088be578a",
       "range": {
@@ -653,7 +692,10 @@
         "s": "fix(video): remux HEVC to mp4/mov as hvc1 via hevc_mp4toannexb (#15809)",
         "a": "bigcat88",
         "pr": 15809,
-        "ct": 1787790530
+        "ct": 1787790530,
+        "pt": "fix(video): remux HEVC to mp4/mov as hvc1 via hevc_mp4toannexb",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "5653b4ac8eca01e64df7d8b5a2ee22385f14dabf",
       "range": {
@@ -702,7 +744,10 @@
         "s": "Support avif in Save Image Advanced node. (#15891)",
         "a": "comfyanonymous",
         "pr": 15891,
-        "ct": 1787786277
+        "ct": 1787786277,
+        "pt": "Support avif in Save Image Advanced node.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "a25c7bf2b8c7408d8724f4245dbe09d95992e3a1",
       "range": {
@@ -751,7 +796,10 @@
         "s": "[Partner Nodes] feat(WAN): add WAN3-Prime model support (#15894)",
         "a": "bigcat88",
         "pr": 15894,
-        "ct": 1787768763
+        "ct": 1787768763,
+        "pt": "[Partner Nodes] feat(WAN): add WAN3-Prime model support",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "b133e48368d0f52bb014f0dd7ae1adb7403d515b",
       "range": {
@@ -800,7 +848,10 @@
         "s": "[Partner Nodes] chore(Google): drop retiring Veo 2 and Veo 3.0 models (#15883)",
         "a": "bigcat88",
         "pr": 15883,
-        "ct": 1787733006
+        "ct": 1787733006,
+        "pt": "[Partner Nodes] chore(Google): drop retiring Veo 2 and Veo 3.0 models",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "12d5279438bfefc058a269eae805ceab6047777f",
       "range": {
@@ -898,7 +949,10 @@
         "s": "Update workflow templates to v0.11.48 (#15888)",
         "a": "comfyui-wiki",
         "pr": 15888,
-        "ct": 1787689756
+        "ct": 1787689756,
+        "pt": "Update workflow templates to v0.11.48",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
       },
       "prev": "7d9d0c391b90b3d89c2ec880a870bb34236a417c",
       "range": {
@@ -947,7 +1001,10 @@
         "s": "[Partner Nodes] feat(Pixverse): add Pixverse V6 model support (#15880)",
         "a": "bigcat88",
         "pr": 15880,
-        "ct": 1787686846
+        "ct": 1787686846,
+        "pt": "[Partner Nodes] feat(Pixverse): add Pixverse V6 model support",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "7a054eb472d4f911ad3ed1d943f6e7de4d67730f",
       "range": {
@@ -996,7 +1053,10 @@
         "s": "comfy-aimdo 0.4.15 (#15886)",
         "a": "rattus128",
         "pr": 15886,
-        "ct": 1787674360
+        "ct": 1787674360,
+        "pt": "comfy-aimdo 0.4.15",
+        "pa": "rattus128",
+        "av": "https://avatars.githubusercontent.com/u/46076784?v=4"
       },
       "prev": "a1079ba16f2674734b065eb036fbfdddaa321a4d",
       "range": {
@@ -1045,7 +1105,10 @@
         "s": "[Partner Nodes] chore(Tripo): remove retired Refine node and v2.0 model version (#15851)",
         "a": "bigcat88",
         "pr": 15851,
-        "ct": 1787639123
+        "ct": 1787639123,
+        "pt": "[Partner Nodes] chore(Tripo): remove retired Refine node and v2.0 model version",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "2618d32dfbf67b01ff2e12e0c630a360a6acb4ad",
       "range": {
@@ -1094,7 +1157,10 @@
         "s": "Python 3.10 will be EOL soon, please upgrade. (#15874)",
         "a": "comfyanonymous",
         "pr": 15874,
-        "ct": 1787627378
+        "ct": 1787627378,
+        "pt": "Python 3.10 will be EOL soon, please upgrade.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "5f0c4e18cb7e98f0e7c46c2c7ce928d641351e67",
       "range": {
@@ -1143,7 +1209,10 @@
         "s": "Fix default database path for custom user directory (#14539)",
         "a": "Constantine1916",
         "pr": 14539,
-        "ct": 1787613543
+        "ct": 1787613543,
+        "pt": "Fix default database path for custom user directory",
+        "pa": "Constantine1916",
+        "av": "https://avatars.githubusercontent.com/u/52125907?v=4"
       },
       "prev": "eb8cad737517717b65244dd5ede09fb447f95cd7",
       "range": {
@@ -1192,7 +1261,10 @@
         "s": "Update nodes_image_compare.py (#15868)",
         "a": "alexisrolland",
         "pr": 15868,
-        "ct": 1787605019
+        "ct": 1787605019,
+        "pt": "Mark Compare Image node as not experimental anymore",
+        "pa": "alexisrolland",
+        "av": "https://avatars.githubusercontent.com/u/13064696?v=4"
       },
       "prev": "180060c295da013c9bc834f575ae8142a4e6c38f",
       "range": {
@@ -1241,7 +1313,10 @@
         "s": "chore: update workflow templates to v0.11.46 (#15864)",
         "a": "comfyui-wiki",
         "pr": 15864,
-        "ct": 1787596302
+        "ct": 1787596302,
+        "pt": "Update workflow templates to v0.11.46",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
       },
       "prev": "bab6ee5f274c5231bfc072daf045104838e7147b",
       "range": {
@@ -1290,7 +1365,10 @@
         "s": "[Partner Nodes] feat(Meshy): add Meshy-7 support (#15807)",
         "a": "bigcat88",
         "pr": 15807,
-        "ct": 1787590128
+        "ct": 1787590128,
+        "pt": "[Partner Nodes] feat(Meshy): add Meshy-7 support",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "41218e4873220205f633b3d3ab0a4207141be205",
       "range": {
@@ -1339,7 +1417,10 @@
         "s": "[Partner Nodes] feat(Wan): add Wan 3.0 video generation nodes (#15843)",
         "a": "bigcat88",
         "pr": 15843,
-        "ct": 1787589015
+        "ct": 1787589015,
+        "pt": "[Partner Nodes] feat(Wan): add Wan 3.0 video generation nodes",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "b78cec879b9460d5cb25228a83a942fb78d2cd24",
       "range": {
@@ -1388,7 +1469,10 @@
         "s": "Increase minimum pyav version. (#15827)",
         "a": "comfyanonymous",
         "pr": 15827,
-        "ct": 1787502558
+        "ct": 1787502558,
+        "pt": "Increase minimum pyav version.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "82f839f5e737d8bfce480872ba05e5a430f2526f",
       "range": {
@@ -1437,7 +1521,10 @@
         "s": "feat: Support Sam3d-body (CORE-35) (#14370)",
         "a": "kijai",
         "pr": 14370,
-        "ct": 1787450902
+        "ct": 1787450902,
+        "pt": "feat: Support Sam3d-body (CORE-35)",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
       },
       "prev": "9db05e0e1f035d1902ffc256fe7a336e549ced34",
       "range": {
@@ -1486,7 +1573,10 @@
         "s": "Add colorspace option and change bit_depth to a combo on CreateVideo. (#15810)",
         "a": "comfyanonymous",
         "pr": 15810,
-        "ct": 1787447249
+        "ct": 1787447249,
+        "pt": "Add colorspace option and change bit_depth to a combo on CreateVideo.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "924743af083c151296cc16f925aeab113b6484e8",
       "range": {
@@ -1535,7 +1625,10 @@
         "s": "Minimax-H3: Add missing special tokens (#15808)",
         "a": "kijai",
         "pr": 15808,
-        "ct": 1787436209
+        "ct": 1787436209,
+        "pt": "Minimax-H3: Add missing special tokens",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
       },
       "prev": "783545f689a0af730065994b46b382ae24844c99",
       "range": {
@@ -1584,7 +1677,10 @@
         "s": "[Partner Nodes] feat(ByteDance): add vCube Video Enhance node (#15755)",
         "a": "bigcat88",
         "pr": 15755,
-        "ct": 1787375856
+        "ct": 1787375856,
+        "pt": "[Partner Nodes] feat(ByteDance): add vCube Video Enhance node",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "7dde56176efa71fd74ef7b3930ab5882d1926288",
       "range": {
@@ -1633,7 +1729,10 @@
         "s": "Increase trellis2 memory factor a bit. (#15796)",
         "a": "comfyanonymous",
         "pr": 15796,
-        "ct": 1787359496
+        "ct": 1787359496,
+        "pt": "Increase trellis2 memory factor a bit.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "28864ca8fed67cc05a957710f88ce23aff75fd2f",
       "range": {
@@ -1682,7 +1781,10 @@
         "s": "fix: fail CLA allowlist step on API errors (#15792)",
         "a": "alexisrolland",
         "pr": 15792,
-        "ct": 1787348089
+        "ct": 1787348089,
+        "pt": "fix: fail CLA allowlist step on API errors",
+        "pa": "alexisrolland",
+        "av": "https://avatars.githubusercontent.com/u/13064696?v=4"
       },
       "prev": "76135e557da1ec7dcb270160f01e597565e3e003",
       "range": {
@@ -1731,7 +1833,10 @@
         "s": "Add HDR color space options to h264 codec in Save Video node. (#15764)",
         "a": "comfyanonymous",
         "pr": 15764,
-        "ct": 1787271391
+        "ct": 1787271391,
+        "pt": "Add HDR color space options to h264 codec in Save Video node.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": null,
       "range": null,
@@ -1777,7 +1882,10 @@
         "s": "Support HDR video saving, AV1 codec, mkv and webm. (#15741)",
         "a": "comfyanonymous",
         "pr": 15741,
-        "ct": 1787268560
+        "ct": 1787268560,
+        "pt": "Support HDR video saving, AV1 codec, mkv and webm.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "de6b062fb5ed1c9b471a3ebcd614705d93d67560",
       "range": {
@@ -1826,7 +1934,10 @@
         "s": "ci: add Notify on Merge dispatch workflow (#15568)",
         "a": "luke-mino-altherr",
         "pr": 15568,
-        "ct": 1787251170
+        "ct": 1787251170,
+        "pt": "ci: add Notify on Merge dispatch workflow",
+        "pa": "luke-mino-altherr",
+        "av": "https://avatars.githubusercontent.com/u/9704719?v=4"
       },
       "prev": "8583b0ce0a813c6215e2c304d08bf597e2993c37",
       "range": {
@@ -1875,7 +1986,10 @@
         "s": "chore: update workflow templates to v0.11.44 (#15754)",
         "a": "comfyui-wiki",
         "pr": 15754,
-        "ct": 1787243715
+        "ct": 1787243715,
+        "pt": "Update workflow templates to v0.11.44",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
       },
       "prev": "18c9aa48734e708ee59c545f87acba1757a061d0",
       "range": {
@@ -1924,7 +2038,10 @@
         "s": "[Partner Nodes] feat(Bytedance): add new Seedream node with Fast Mode widget (#15750)",
         "a": "bigcat88",
         "pr": 15750,
-        "ct": 1787242064
+        "ct": 1787242064,
+        "pt": "[Partner Nodes] feat(Bytedance): add new Seedream node with Fast Mode widget",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "5ab2f7a2d676c1fb7b410c22e82e2ed8f217b56c",
       "range": {
@@ -1973,7 +2090,10 @@
         "s": "Limit Windows multi-GPU visibility (#15737)",
         "a": "rattus128",
         "pr": 15737,
-        "ct": 1787182307
+        "ct": 1787182307,
+        "pt": "Limit Windows multi-GPU visibility (CORE-391)",
+        "pa": "rattus128",
+        "av": "https://avatars.githubusercontent.com/u/46076784?v=4"
       },
       "prev": null,
       "range": null,
@@ -2019,7 +2139,10 @@
         "s": "[Partner Nodes] feat(Gemini-LLM): Add Gemini 3.7 Flash to the Gemini text node (#15688)",
         "a": "bigcat88",
         "pr": 15688,
-        "ct": 1787122790
+        "ct": 1787122790,
+        "pt": "[Partner Nodes] Add Gemini 3.7 Flash to the Gemini text node text node",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": null,
       "range": null,

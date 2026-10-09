@@ -16,7 +16,10 @@
         "s": "chore: update workflow templates to v0.11.73 (#16693)",
         "a": "comfyui-wiki",
         "pr": 16693,
-        "ct": 1790798804
+        "ct": 1790798804,
+        "pt": "Update workflow templates to v0.11.73",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
       },
       "prev": "051ddedaae52d4042abcde4e110446ea835211cd",
       "range": {
@@ -65,7 +68,10 @@
         "s": "[Partner Nodes] feat(HeyGen): add HeyGen Video 1.0 reference-to-video and image-to-video nodes (#16695)",
         "a": "bigcat88",
         "pr": 16695,
-        "ct": 1790796718
+        "ct": 1790796718,
+        "pt": "[Partner Nodes] feat(HeyGen): add nodes for HeyGen Video 1.0 model",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "83071e1aec311d31e773d64d6872181b3bad0fe2",
       "range": {
@@ -114,7 +120,10 @@
         "s": "Fix minimax vae offload issue. (#16698)",
         "a": "comfyanonymous",
         "pr": 16698,
-        "ct": 1790794327
+        "ct": 1790794327,
+        "pt": "Fix minimax vae offload issue.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "33ee2b36d2d6e8f25cfc796b774ca387917b98de",
       "range": {
@@ -163,7 +172,10 @@
         "s": "[Partner Nodes] feat(Ideogram): add Ideogram 4.5 text-to-image, edit and precise edit nodes (#16689)",
         "a": "bigcat88",
         "pr": 16689,
-        "ct": 1790791679
+        "ct": 1790791679,
+        "pt": "[Partner Nodes] feat(Ideogram): add nodes for Ideogram 4.5 model",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "8cfe5e1ecb97512dea8deaac15e1228d7e6feeb1",
       "range": {
@@ -212,7 +224,10 @@
         "s": "[Partner Nodes] feat(Anthropic): add Sonnet 5.5 model (#16647)",
         "a": "bigcat88",
         "pr": 16647,
-        "ct": 1790761827
+        "ct": 1790761827,
+        "pt": "[Partner Nodes] feat(Anthropic): add Sonnet 5.5 model",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "fb2315f11db0ebfaafa9099a5df5227dc6bb42bc",
       "range": {
@@ -261,7 +276,10 @@
         "s": "Fix crash when selecting int8 or int4 cache in qwen image 2.1 (#16667)",
         "a": "comfyanonymous",
         "pr": 16667,
-        "ct": 1790740809
+        "ct": 1790740809,
+        "pt": "Fix crash when selecting int8 or int4 cache in qwen image 2.1",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "e6beab52ef70e0bcabf322d809c7ae39d04b17bc",
       "range": {
@@ -310,7 +328,10 @@
         "s": "fix(assets): recover records when a drive comes back with hashing off (#16646)",
         "a": "synap5e",
         "pr": 16646,
-        "ct": 1790738102
+        "ct": 1790738102,
+        "pt": "fix(assets): recover records when a drive comes back with hashing off",
+        "pa": "synap5e",
+        "av": "https://avatars.githubusercontent.com/u/2515062?v=4"
       },
       "prev": "ebd432a78af0607a4d72df386920362e8f6836ce",
       "range": {
@@ -359,7 +380,10 @@
         "s": "fix(assets): don't let a model category that can't be listed abort the scan (#16658)",
         "a": "synap5e",
         "pr": 16658,
-        "ct": 1790736539
+        "ct": 1790736539,
+        "pt": "fix(assets): don't let a model category that can't be listed abort the scan",
+        "pa": "synap5e",
+        "av": "https://avatars.githubusercontent.com/u/2515062?v=4"
       },
       "prev": "2d2fa46e18d293ced1b958fe288730e2ef4b322e",
       "range": {
@@ -408,7 +432,10 @@
         "s": "feat: add DynamicGroup widget input (#16260)",
         "a": "jaeone94",
         "pr": 16260,
-        "ct": 1790732528
+        "ct": 1790732528,
+        "pt": "feat: add DynamicGroup widget input",
+        "pa": "jaeone94",
+        "av": "https://avatars.githubusercontent.com/u/89377375?v=4"
       },
       "prev": "a65316bd54bdfa5597a119bb6d314939116b2167",
       "range": {
@@ -457,7 +484,10 @@
         "s": "Use higher quality defaults for Save Video encoding. (#16663)",
         "a": "comfyanonymous",
         "pr": 16663,
-        "ct": 1790729375
+        "ct": 1790729375,
+        "pt": "Use higher quality defaults for Save Video encoding.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "9d80841aa1990305cc7a280c5ea505f317efcc2d",
       "range": {
@@ -506,7 +536,10 @@
         "s": "chore: update embedded docs to v0.5.13 (#16618)",
         "a": "comfyui-wiki",
         "pr": 16618,
-        "ct": 1790714714
+        "ct": 1790714714,
+        "pt": "Update embedded docs to v0.5.13",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
       },
       "prev": "986c4d154ef8c288382ac87d956b52a2b640c8b3",
       "range": {
@@ -555,7 +588,10 @@
         "s": "Support LynnReal light Minimax-H3 vae (#16657)",
         "a": "kijai",
         "pr": 16657,
-        "ct": 1790708525
+        "ct": 1790708525,
+        "pt": "Support LynnReal light Minimax-H3 vae",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
       },
       "prev": "6b747c0428c343e1417219641db93a4fb7cb69ae",
       "range": {
@@ -653,7 +689,10 @@
         "s": "Avoid unnecessary write. (#16639)",
         "a": "comfyanonymous",
         "pr": 16639,
-        "ct": 1790656657
+        "ct": 1790656657,
+        "pt": "Avoid unnecessary write.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "67f11ccbaaca402330622efcbf6e5c922d729096",
       "range": {
@@ -702,7 +741,10 @@
         "s": "Speedup generation on qwen3.5/3.8 with long contexts. (#16638)",
         "a": "comfyanonymous",
         "pr": 16638,
-        "ct": 1790655431
+        "ct": 1790655431,
+        "pt": "Speedup generation on qwen3.5/3.8 with long contexts.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "56c50055cfed1cec453252d32a0ed608dc48e9b4",
       "range": {
@@ -751,7 +793,10 @@
         "s": "perf(assets): keep the UI responsive during asset scans and rescan output by listing folders (#16546)",
         "a": "synap5e",
         "pr": 16546,
-        "ct": 1790651081
+        "ct": 1790651081,
+        "pt": "perf(assets): keep the UI responsive during asset scans and rescan output by listing folders",
+        "pa": "synap5e",
+        "av": "https://avatars.githubusercontent.com/u/2515062?v=4"
       },
       "prev": "a35fcbac26b820cb634c2a6d2c47c309354987f1",
       "range": {
@@ -800,7 +845,10 @@
         "s": "fix(db): wait briefly for the database lock at startup (#16602)",
         "a": "synap5e",
         "pr": 16602,
-        "ct": 1790649979
+        "ct": 1790649979,
+        "pt": "fix(db): wait briefly for the database lock at startup",
+        "pa": "synap5e",
+        "av": "https://avatars.githubusercontent.com/u/2515062?v=4"
       },
       "prev": "9671d89fea26a23309938f726983f4edff6c0ad9",
       "range": {
@@ -849,7 +897,10 @@
         "s": "Fixes for last PR. (#16637)",
         "a": "comfyanonymous",
         "pr": 16637,
-        "ct": 1790649111
+        "ct": 1790649111,
+        "pt": "Fixes for last PR.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "491bf3b928db565328292f83268d00af57867786",
       "range": {
@@ -898,7 +949,10 @@
         "s": "Support w6a8 quantization format (#16483)",
         "a": "kijai",
         "pr": 16483,
-        "ct": 1790646284
+        "ct": 1790646284,
+        "pt": "Support w6a8 quantization format",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
       },
       "prev": "84131a647167443b90de5146a8721d7f8299a96f",
       "range": {
@@ -947,7 +1001,10 @@
         "s": "Optimize Seedvr2 (#16530)",
         "a": "kijai",
         "pr": 16530,
-        "ct": 1790646187
+        "ct": 1790646187,
+        "pt": "Optimize Seedvr2",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
       },
       "prev": "3b3939a78878ca0d5c0817d8829df8cbf7308ffd",
       "range": {
@@ -996,7 +1053,10 @@
         "s": "Support Qwen-Image 2.1 union fun controlnet (#16519)",
         "a": "kijai",
         "pr": 16519,
-        "ct": 1790638265
+        "ct": 1790638265,
+        "pt": "Support Qwen-Image 2.1 union fun controlnet",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
       },
       "prev": "2139131e880cf07116f0d0238de8cfbb125d2114",
       "range": {
@@ -1045,7 +1105,10 @@
         "s": "Searching \"kitchen\" now returns the attention node. (#16632)",
         "a": "comfyanonymous",
         "pr": 16632,
-        "ct": 1790627931
+        "ct": 1790627931,
+        "pt": "Searching \"kitchen\" now returns the attention node.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "7fbcfa8be9a8f47cf905ec47978b5bd754959ea7",
       "range": {
@@ -1094,7 +1157,10 @@
         "s": "Speedup Yue2 AR (#16626)",
         "a": "rattus128",
         "pr": 16626,
-        "ct": 1790619696
+        "ct": 1790619696,
+        "pt": "Speedup Yue2 AR",
+        "pa": "rattus128",
+        "av": "https://avatars.githubusercontent.com/u/46076784?v=4"
       },
       "prev": "8d534945ebd53cff61e8def81757c6a6c1b9cf2d",
       "range": {
@@ -1143,7 +1209,10 @@
         "s": "Add comfy_attention and AttentionTensorContainer to a few models. (#16595)",
         "a": "comfyanonymous",
         "pr": 16595,
-        "ct": 1790549117
+        "ct": 1790549117,
+        "pt": "Add comfy_attention and AttentionTensorContainer to a few models.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "47e63a20a4cbff2ede31f3b4f3dddf562dd8e6b4",
       "range": {
@@ -1192,7 +1261,10 @@
         "s": "Clamp Qwen Image 2.1 fp16 activations in place. (#16608)",
         "a": "dcbert",
         "pr": 16608,
-        "ct": 1790545052
+        "ct": 1790545052,
+        "pt": "Clamp Qwen Image 2.1 fp16 activations in place",
+        "pa": "dcbert",
+        "av": "https://avatars.githubusercontent.com/u/25210384?v=4"
       },
       "prev": "a9b777bc4ed80476c9aa0ae966c378495ef3563b",
       "range": {
@@ -1241,7 +1313,10 @@
         "s": "[Partner Nodes] chore(Sora): remove deprecated nodes (#16609)",
         "a": "bigcat88",
         "pr": 16609,
-        "ct": 1790542016
+        "ct": 1790542016,
+        "pt": "[Partner Nodes] chore(Sora): remove deprecated Sora nodes",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "4ef23c34d950eecc37040a21ee1741a49d2e44b1",
       "range": {
@@ -1290,7 +1365,10 @@
         "s": "Fix potential regression with previous PR. (#16596)",
         "a": "comfyanonymous",
         "pr": 16596,
-        "ct": 1790476847
+        "ct": 1790476847,
+        "pt": "Fix potential regression with previous PR.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "a73d24ba17715a82d3e5dfcaf5525cba7ae9890d",
       "range": {
@@ -1339,7 +1417,10 @@
         "s": "Support tiny VAE for Qwen-Image 2.1 (#16552)",
         "a": "kijai",
         "pr": 16552,
-        "ct": 1790469974
+        "ct": 1790469974,
+        "pt": "Support tiny VAE for Qwen-Image 2.1",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
       },
       "prev": "79be670e2d9be63e238785af307369d2b9039ed1",
       "range": {
@@ -1388,7 +1469,10 @@
         "s": "Mention some ComfyUI optimization details in README. (#16576)",
         "a": "comfyanonymous",
         "pr": 16576,
-        "ct": 1790392252
+        "ct": 1790392252,
+        "pt": "Mention some ComfyUI optimization details in README.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "7897b4ee3527847a155bc0921a44f90489548019",
       "range": {
@@ -1437,7 +1521,10 @@
         "s": "perf(assets): replace pathlib prefix checks in the asset scan (#16543)",
         "a": "synap5e",
         "pr": 16543,
-        "ct": 1790386734
+        "ct": 1790386734,
+        "pt": "perf(assets): replace pathlib prefix checks in the asset scan",
+        "pa": "synap5e",
+        "av": "https://avatars.githubusercontent.com/u/2515062?v=4"
       },
       "prev": "66b68a337208d6bc69e341f86c33abcc3c032012",
       "range": {
@@ -1486,7 +1573,10 @@
         "s": "Update sheetsage2 abc creation from upstream yue code. (#16569)",
         "a": "comfyanonymous",
         "pr": 16569,
-        "ct": 1790384139
+        "ct": 1790384139,
+        "pt": "Update sheetsage2 abc creation from upstream yue code.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "f2a419eb5c107f422951e9f6afc9caf8ffe03f66",
       "range": {
@@ -1535,7 +1625,10 @@
         "s": "Fix HDR output issue with negative values in Convert Image Color Space. (#16565)",
         "a": "comfyanonymous",
         "pr": 16565,
-        "ct": 1790369699
+        "ct": 1790369699,
+        "pt": "Fix HDR output issue with negative values in Convert Image Color Space.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "f02c1452c803cc196265341f449918aa6233fca8",
       "range": {
@@ -1584,7 +1677,10 @@
         "s": "chore: update workflow templates to v0.11.70 (#16557)",
         "a": "comfyui-wiki",
         "pr": 16557,
-        "ct": 1790366871
+        "ct": 1790366871,
+        "pt": "Update workflow templates to v0.11.70",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
       },
       "prev": "39cb5a8b10d1311a46bebee297e724bbb09d1938",
       "range": {
@@ -1633,7 +1729,10 @@
         "s": "Fix Qwen VL image preprocessing crash on 4-channel (RGBA) input (#16548)",
         "a": "chelsealong",
         "pr": 16548,
-        "ct": 1790364866
+        "ct": 1790364866,
+        "pt": "Fix Qwen VL image preprocessing crash on 4-channel (RGBA) input",
+        "pa": "chelsealong",
+        "av": "https://avatars.githubusercontent.com/u/14966750?v=4"
       },
       "prev": "88ab4a06566454ad89db8f0bedb970d6c08cd1b7",
       "range": {
@@ -1682,7 +1781,10 @@
         "s": "Small fix: skip unnecessary work. (#16540)",
         "a": "comfyanonymous",
         "pr": 16540,
-        "ct": 1790303598
+        "ct": 1790303598,
+        "pt": "Small fix: skip unnecessary work.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "78368eafee727c52efd121b775e0783c195e5c94",
       "range": {
@@ -1731,7 +1833,10 @@
         "s": "feat(npu): support async weight offload streams (#16057)",
         "a": "Big2Wheel",
         "pr": 16057,
-        "ct": 1790294806
+        "ct": 1790294806,
+        "pt": "feat(npu): support async weight offload streams",
+        "pa": "Big2Wheel",
+        "av": "https://avatars.githubusercontent.com/u/100981785?v=4"
       },
       "prev": "ca3c529cfa8ae81da014258fe34287a02d5279c1",
       "range": {
@@ -1780,7 +1885,10 @@
         "s": "Add missing RDNA2 arches to list. (#16537)",
         "a": "comfyanonymous",
         "pr": 16537,
-        "ct": 1790290958
+        "ct": 1790290958,
+        "pt": "Add missing RDNA2 arches to list.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "93810483a4739a1588236919a3128d3070244146",
       "range": {
@@ -1829,7 +1937,10 @@
         "s": "[Partner Nodes] feat(ByteDance): add Seedream 5.0 Flash (#16522)",
         "a": "bigcat88",
         "pr": 16522,
-        "ct": 1790272191
+        "ct": 1790272191,
+        "pt": "[Partner Nodes] feat(ByteDance): add Seedream 5.0 Flash",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "6a103b1dff9b986412efce1ba333224ffcccee19",
       "range": {
@@ -1878,7 +1989,10 @@
         "s": "[Partner Nodes] feat(OpenAI): add GPT-6 Sol and Luna models (#16520)",
         "a": "bigcat88",
         "pr": 16520,
-        "ct": 1790270531
+        "ct": 1790270531,
+        "pt": "[Partner Nodes] feat(OpenAI): add GPT-6 Sol and Luna models",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "1568e6cfd04586a4b3c4e1817ea7dde09b1bf9e7",
       "range": {
@@ -1927,7 +2041,10 @@
         "s": "Lower memory usage and .comfy_attention support for lumina family models. (#16515)",
         "a": "comfyanonymous",
         "pr": 16515,
-        "ct": 1790218908
+        "ct": 1790218908,
+        "pt": "Lower memory usage and .comfy_attention support for lumina family models.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "41c83ee79f46c3564a1e4ccb9db1c8e4d7f00ec9",
       "range": {
@@ -1976,7 +2093,10 @@
         "s": "Fix saving/loading ming image model breaking detection. (#16514)",
         "a": "comfyanonymous",
         "pr": 16514,
-        "ct": 1790217383
+        "ct": 1790217383,
+        "pt": "Fix saving/loading ming image model breaking detection.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "3b4c0b0e457cf0a51cf3038e0a6750d8f96ce251",
       "range": {
@@ -2025,7 +2145,10 @@
         "s": "feat: ming-image support (#16482)",
         "a": "kijai",
         "pr": 16482,
-        "ct": 1790215051
+        "ct": 1790215051,
+        "pt": "feat: ming-image support",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
       },
       "prev": "f427c3a285502cc452bbf134b810668844b79ffa",
       "range": {
@@ -2074,7 +2197,10 @@
         "s": "Move file reads out of the remaining asset write transactions (#16486)",
         "a": "synap5e",
         "pr": 16486,
-        "ct": 1790209436
+        "ct": 1790209436,
+        "pt": "Move file reads out of the remaining asset write transactions",
+        "pa": "synap5e",
+        "av": "https://avatars.githubusercontent.com/u/2515062?v=4"
       },
       "prev": "9d3bfc393b3415e146efb8434b32784cc2e69521",
       "range": {
@@ -2123,7 +2249,10 @@
         "s": "Take the SQLite write lock up front for asset scan and output-registration writes (#16480)",
         "a": "synap5e",
         "pr": 16480,
-        "ct": 1790201831
+        "ct": 1790201831,
+        "pt": "Take the SQLite write lock up front for asset scan and output-registration writes",
+        "pa": "synap5e",
+        "av": "https://avatars.githubusercontent.com/u/2515062?v=4"
       },
       "prev": "557597f5b25f84a8d26a1d11c0f95839ce763f2f",
       "range": {
@@ -2172,7 +2301,10 @@
         "s": "Fix ImageUpscaleWithModel crashing on RGBA images (#16500)",
         "a": "chelsealong",
         "pr": 16500,
-        "ct": 1790200520
+        "ct": 1790200520,
+        "pt": "Fix ImageUpscaleWithModel crashing on RGBA images",
+        "pa": "chelsealong",
+        "av": "https://avatars.githubusercontent.com/u/14966750?v=4"
       },
       "prev": "2255709aa0be2deade91c7c80cda49d31b73906f",
       "range": {
@@ -2221,7 +2353,10 @@
         "s": "chore: update workflow templates to v0.11.69 (#16503)",
         "a": "comfyui-wiki",
         "pr": 16503,
-        "ct": 1790185873
+        "ct": 1790185873,
+        "pt": "Update workflow templates to v0.11.69",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
       },
       "prev": "15ef24d1c0333a3eba56c5cd153d8db65363ff8f",
       "range": {
@@ -2270,7 +2405,10 @@
         "s": "[Partner Nodes] feat(Recraft): add Recraft V4.1 Flash to the V4 text-to-image node (#16501)",
         "a": "bigcat88",
         "pr": 16501,
-        "ct": 1790182672
+        "ct": 1790182672,
+        "pt": "[Partner Nodes] feat(Recraft): add Recraft V4.1 Flash to the V4 text-to-image node",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "b5cc8830279eae909a59de030af1e50761c36751",
       "range": {
@@ -2319,7 +2457,10 @@
         "s": "Port some optimizations to flux model family. (#16488)",
         "a": "comfyanonymous",
         "pr": 16488,
-        "ct": 1790133373
+        "ct": 1790133373,
+        "pt": "Port some optimizations to flux model family.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "912fca4f39b875a0360f2c5170568176ea813ded",
       "range": {
@@ -2368,7 +2509,10 @@
         "s": "Fix MiniMax-H3 VAE rms_rope crash on offloaded qk_norm_scale (#16485)",
         "a": "chelsealong",
         "pr": 16485,
-        "ct": 1790127558
+        "ct": 1790127558,
+        "pt": "Fix MiniMax-H3 VAE rms_rope crash on offloaded qk_norm_scale",
+        "pa": "chelsealong",
+        "av": "https://avatars.githubusercontent.com/u/14966750?v=4"
       },
       "prev": "95539f56344958339e39b7582a476267d489b0ee",
       "range": {
@@ -2417,7 +2561,10 @@
         "s": "support union cn 2.0 (#16471)",
         "a": "kijai",
         "pr": 16471,
-        "ct": 1790094429
+        "ct": 1790094429,
+        "pt": "MiniMax-H3: Support Fun-Controlnet-Union 2.0 (CORE-462)",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
       },
       "prev": "b33e2b55cae074eca5aec96283cceac19aa249ba",
       "range": {
@@ -2466,7 +2613,10 @@
         "s": "chore: update workflow templates to v0.11.68 (#16466)",
         "a": "comfyui-wiki",
         "pr": 16466,
-        "ct": 1790058150
+        "ct": 1790058150,
+        "pt": "Update workflow templates to v0.11.68",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
       },
       "prev": "e638023d54497dbe0579565e5de4bb7076899592",
       "range": {
@@ -2515,7 +2665,10 @@
         "s": "Fast disk detection to all model loaders. (#16425)",
         "a": "comfyanonymous",
         "pr": 16425,
-        "ct": 1790042226
+        "ct": 1790042226,
+        "pt": "Fast disk detection to all model loaders.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "d158420950922dde49dad1fa87fa549735fd5137",
       "range": {
@@ -2564,7 +2717,10 @@
         "s": "Cuda graphs + memory compiler on ace step 1.5 autoregressive model. (#16461)",
         "a": "comfyanonymous",
         "pr": 16461,
-        "ct": 1790041770
+        "ct": 1790041770,
+        "pt": "Cuda graphs + memory compiler on ace step 1.5 autoregressive model.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "b16023b004d3b1bfbbd6463414dc20da1b36cc4d",
       "range": {
@@ -2613,7 +2769,10 @@
         "s": "Remove torchaudio dependency. (#16457)",
         "a": "comfyanonymous",
         "pr": 16457,
-        "ct": 1790038616
+        "ct": 1790038616,
+        "pt": "Remove torchaudio dependency.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "b0f4b7b294ce482a2e071d9d762c133d38c7aa07",
       "range": {
@@ -2662,7 +2821,10 @@
         "s": "JsonExtractString can now handle JSON with prefix and/or suffix. (#16439)",
         "a": "comfyanonymous",
         "pr": 16439,
-        "ct": 1789970333
+        "ct": 1789970333,
+        "pt": "JsonExtractString can now handle JSON with prefix and/or suffix.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "c194dd00cd42aa18d9dbf27d977bf6b85d9ea565",
       "range": {
@@ -2711,7 +2873,10 @@
         "s": "Allow model files to contain which attention should be used for each block. (#16419)",
         "a": "comfyanonymous",
         "pr": 16419,
-        "ct": 1789925515
+        "ct": 1789925515,
+        "pt": "Allow model files to contain which attention should be used for each block.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "0f74f7fb9f83a78bf46188fd4fd53e6bc44c1ae8",
       "range": {
@@ -2809,7 +2974,10 @@
         "s": "Fix MiniMax Music 3 producing noise with CUDA graphs enabled. (#16428)",
         "a": "RaynoldVanHeyningen",
         "pr": 16428,
-        "ct": 1789916520
+        "ct": 1789916520,
+        "pt": "Fix MiniMax Music 3 producing noise with CUDA graphs enabled.",
+        "pa": "RaynoldVanHeyningen",
+        "av": "https://avatars.githubusercontent.com/u/2429611?v=4"
       },
       "prev": "3dd559d81f745747cab884a3b9f5fd8867d79efe",
       "range": {
@@ -2858,7 +3026,10 @@
         "s": "[Partner Nodes] feat(Meshy): add Meshy 7.1 support (#16412)",
         "a": "bigcat88",
         "pr": 16412,
-        "ct": 1789913010
+        "ct": 1789913010,
+        "pt": "[Partner Nodes] feat(Meshy): add Meshy 7.1 support",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "5ba116a40f1944f64e2e4a8ace826656e6293bf4",
       "range": {
@@ -2907,7 +3078,10 @@
         "s": "Add --disable-fast-disk to disable fast disk. (#16424)",
         "a": "comfyanonymous",
         "pr": 16424,
-        "ct": 1789889758
+        "ct": 1789889758,
+        "pt": "Add a way to disable fast disk for debugging.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "96be9a139d68c1d45ee9380e2aad2746ecf6bc48",
       "range": {
@@ -2956,7 +3130,10 @@
         "s": "chore: update workflow templates to v0.11.65 (#16423)",
         "a": "comfyui-wiki",
         "pr": 16423,
-        "ct": 1789882102
+        "ct": 1789882102,
+        "pt": "Update workflow templates to v0.11.65",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
       },
       "prev": "c8ed2c8ce957475459731135c4ca31c6856a4542",
       "range": {
@@ -3005,7 +3182,10 @@
         "s": "Lower wan peak vram when using comfy kitchen attention. (#16418)",
         "a": "comfyanonymous",
         "pr": 16418,
-        "ct": 1789872630
+        "ct": 1789872630,
+        "pt": "Lower wan peak vram when using comfy kitchen attention.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "00abd23d4ecc1d5f5a002df3705362436be325b7",
       "range": {
@@ -3054,7 +3234,10 @@
         "s": "chore: update embedded docs to v0.5.12 (#16396)",
         "a": "comfyui-wiki",
         "pr": 16396,
-        "ct": 1789860589
+        "ct": 1789860589,
+        "pt": "Update embedded docs to v0.5.12",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
       },
       "prev": "6bfaacc67c2103481e5f0c84d75257cd0581d86a",
       "range": {
@@ -3103,7 +3286,10 @@
         "s": "feat: Qwen-image 2.1 support (CORE-423) (#16400)",
         "a": "kijai",
         "pr": 16400,
-        "ct": 1789857842
+        "ct": 1789857842,
+        "pt": "feat: Qwen-image 2.1 support (CORE-423)",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
       },
       "prev": "3c80da7f87ee359b2d06f107cb3c0797079dfbbb",
       "range": {
@@ -3152,7 +3338,10 @@
         "s": "Fix ace step VAE decode crashing on non bf16 GPUs. (#16405)",
         "a": "comfyanonymous",
         "pr": 16405,
-        "ct": 1789756535
+        "ct": 1789756535,
+        "pt": "Fix ace step VAE decode crashing on non bf16 GPUs.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "0d9017220a8a06c85f059f387949ff0bf23f4672",
       "range": {
@@ -3201,7 +3390,10 @@
         "s": "Bump comfyui-frontend-package to 1.53.6 (#16386)",
         "a": "comfy-pr-bot",
         "pr": 16386,
-        "ct": 1789747995
+        "ct": 1789747995,
+        "pt": "Bump comfyui-frontend-package to 1.53.6",
+        "pa": "comfy-pr-bot",
+        "av": "https://avatars.githubusercontent.com/u/172744619?v=4"
       },
       "prev": "a8686f2b33fc540f137df50c0f0719953830a5e7",
       "range": {
@@ -3250,7 +3442,10 @@
         "s": "[Partner Nodes] feat(client): send Idempotency-Key on partner-proxy calls and collect replays (#16220)",
         "a": "bigcat88",
         "pr": 16220,
-        "ct": 1789714578
+        "ct": 1789714578,
+        "pt": "[Partner Nodes] feat(client): send Idempotency-Key on partner-proxy calls and collect replays",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "944386c233e02eaf877b1c8d5d513fb3d3a4d5e3",
       "range": {
@@ -3299,7 +3494,10 @@
         "s": "Lower the pos embed precision of SheetSage2 to match upstream. (#16395)",
         "a": "comfyanonymous",
         "pr": 16395,
-        "ct": 1789702988
+        "ct": 1789702988,
+        "pt": "Lower the pos embed precision of SheetSage2 to match upstream.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "4d7e61b7d4c8494c490d12231f70955d9518f55f",
       "range": {
@@ -3348,7 +3546,10 @@
         "s": "Fix issue with qwen speedup PR. (#16389)",
         "a": "comfyanonymous",
         "pr": 16389,
-        "ct": 1789695245
+        "ct": 1789695245,
+        "pt": "Fix issue with qwen speedup PR.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "9a77c1db9eff68d7320dcd98f0757b4450161d4b",
       "range": {
@@ -3397,7 +3598,10 @@
         "s": "Qwen3/3.5/3.8 cudagraphs and w4a8 gemv support (CORE-390) (#15623)",
         "a": "kijai",
         "pr": 15623,
-        "ct": 1789691904
+        "ct": 1789691904,
+        "pt": "Qwen3/3.5/3.8 cudagraphs and w4a8 gemv support (CORE-390)",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
       },
       "prev": "7de99222f06e1b6cddb1868859319010bd7ac878",
       "range": {
@@ -3446,7 +3650,10 @@
         "s": "chores: Update nodes names and categories (#16274)",
         "a": "alexisrolland",
         "pr": 16274,
-        "ct": 1789688934
+        "ct": 1789688934,
+        "pt": "chores: Update nodes names and categories",
+        "pa": "alexisrolland",
+        "av": "https://avatars.githubusercontent.com/u/13064696?v=4"
       },
       "prev": "cf5cc2b6984ac0dcd7e6cb3ffa25c4b039aedb67",
       "range": {
@@ -3495,7 +3702,10 @@
         "s": "Update comfy-kitchen version to 0.2.35 (#16385)",
         "a": "comfyanonymous",
         "pr": 16385,
-        "ct": 1789686773
+        "ct": 1789686773,
+        "pt": "Update comfy-kitchen version to 0.2.35",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "a2f455c9da47fad15a09459e2a2a2de9ea50e7c4",
       "range": {
@@ -3544,7 +3754,10 @@
         "s": "feat: Support MoGe 3 (CORE-443) (#16381)",
         "a": "kijai",
         "pr": 16381,
-        "ct": 1789669024
+        "ct": 1789669024,
+        "pt": "feat: Support MoGe 3 (CORE-443)",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
       },
       "prev": "387f98aa2822f684b8597959a52a467d88cc4806",
       "range": {
@@ -3593,7 +3806,10 @@
         "s": "[Partner Nodes] fix(Tripo): refuse a P2 run whose linked GLB or FBX output would be empty (#16369)",
         "a": "bigcat88",
         "pr": 16369,
-        "ct": 1789630153
+        "ct": 1789630153,
+        "pt": "[Partner Nodes] fix(Tripo): refuse a P2 run whose linked GLB or FBX output would be empty",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "d39cdfdb03932f14f390dda27891b3e546efb746",
       "range": {
@@ -3642,7 +3858,10 @@
         "s": "Always put text encoder on GPU when dynamic vram on. (#16374)",
         "a": "comfyanonymous",
         "pr": 16374,
-        "ct": 1789612059
+        "ct": 1789612059,
+        "pt": "Always put text encoder on GPU when dynamic vram on.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "4e779e5619749e3d7c4eeac378f6f9447a2b9f36",
       "range": {
@@ -3691,7 +3910,10 @@
         "s": "Add CFG control to YuE2 Generate Music node (#16373)",
         "a": "comfyanonymous",
         "pr": 16373,
-        "ct": 1789609109
+        "ct": 1789609109,
+        "pt": "Add CFG control to YuE2 Generate Music node.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "8ad078bbf81b966cc3c1e96ad9d2d13293f91347",
       "range": {
@@ -3740,7 +3962,10 @@
         "s": "Add transparent background option for GPT Image 2 (#16366)",
         "a": "bigcat88",
         "pr": 16366,
-        "ct": 1789581670
+        "ct": 1789581670,
+        "pt": "[Partner Nodes] feat(OpenAI): add transparent background support for GPT Image 2",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "7a0b5eede3f9721c8faab290689893f36edc6d66",
       "range": {
@@ -3789,7 +4014,10 @@
         "s": "Aimdo 0.5.5 + Auto-detect and enable --fast-disk when the disk is fast (CORE-440) (#16333)",
         "a": "rattus128",
         "pr": 16333,
-        "ct": 1789507801
+        "ct": 1789507801,
+        "pt": "Aimdo 0.5.5 + Auto-detect and enable --fast-disk when the disk is fast (CORE-440)",
+        "pa": "rattus128",
+        "av": "https://avatars.githubusercontent.com/u/46076784?v=4"
       },
       "prev": "ee71d5c4993f29086b27fde1629a945ae48425bf",
       "range": {
@@ -3887,7 +4115,10 @@
         "s": "Update workflow templates to v0.11.62 (#16350)",
         "a": "comfyui-wiki",
         "pr": 16350,
-        "ct": 1789504642
+        "ct": 1789504642,
+        "pt": "Update workflow templates to v0.11.62",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
       },
       "prev": "b2da2b4247921dbd5410163f0f6bd0b741d1e377",
       "range": {
@@ -3936,7 +4167,10 @@
         "s": "Declare loop boundaries in node schema (#16347)",
         "a": "rattus128",
         "pr": 16347,
-        "ct": 1789500427
+        "ct": 1789500427,
+        "pt": "Declare loop boundaries in node schema and mark executionList input strictly internal (CORE-439)",
+        "pa": "rattus128",
+        "av": "https://avatars.githubusercontent.com/u/46076784?v=4"
       },
       "prev": "1a14b82e7339176357d627c41a262543a6a1356b",
       "range": {
@@ -3985,7 +4219,10 @@
         "s": "[Partner Nodes] feat(Tripo): add Tripo P2 text, image and multiview to model nodes (#16320)",
         "a": "bigcat88",
         "pr": 16320,
-        "ct": 1789493701
+        "ct": 1789493701,
+        "pt": "[Partner Nodes] feat(Tripo): add Tripo P2 text, image and multiview to model nodes",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "36da3ff763687eab86a35e1019995dd1fb369b0d",
       "range": {
@@ -4034,7 +4271,10 @@
         "s": "Temporarily disable testing with `--enable-assets` (#16334)",
         "a": "guill",
         "pr": 16334,
-        "ct": 1789446744
+        "ct": 1789446744,
+        "pt": "Temporarily disable testing with `--enable-assets`",
+        "pa": "guill",
+        "av": "https://avatars.githubusercontent.com/u/3157454?v=4"
       },
       "prev": "f14bbe28697778b7c2427d4b71c7fac24b78f8f4",
       "range": {
@@ -4083,7 +4323,10 @@
         "s": "Lower minimax VAE usage by a bit. (#16332)",
         "a": "comfyanonymous",
         "pr": 16332,
-        "ct": 1789445550
+        "ct": 1789445550,
+        "pt": "Lower minimax VAE usage by a bit.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "9a600f8118784eaa2e811ca5e4d2e59d2905b72f",
       "range": {
@@ -4132,7 +4375,10 @@
         "s": "Update comfy-kitchen version to 0.2.34 (#16329)",
         "a": "comfyanonymous",
         "pr": 16329,
-        "ct": 1789442755
+        "ct": 1789442755,
+        "pt": "Update comfy-kitchen version to 0.2.34",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "6cff1e974f8212c6b55581ebfa4f51a544f0a077",
       "range": {
@@ -4181,7 +4427,10 @@
         "s": "Use comfy kitchen apply rope in llama based models. (#16326)",
         "a": "comfyanonymous",
         "pr": 16326,
-        "ct": 1789442160
+        "ct": 1789442160,
+        "pt": "Use comfy kitchen apply rope in llama based models.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "a2afcdb89910f7ada92e2a6e04c8b5c9126122f1",
       "range": {
@@ -4230,7 +4479,10 @@
         "s": "comfy-execution: cache: cache errors is RAM cache sizing scan (#16314)",
         "a": "rattus128",
         "pr": 16314,
-        "ct": 1789421790
+        "ct": 1789421790,
+        "pt": "comfy-execution: cache: catch errors is RAM cache sizing scan (CORE-437)",
+        "pa": "rattus128",
+        "av": "https://avatars.githubusercontent.com/u/46076784?v=4"
       },
       "prev": "50ab50c15a313d5ec6436b6cdc63fc3fca91da0a",
       "range": {
@@ -4279,7 +4531,10 @@
         "s": "Implement Generic Loops (Candidate III - implemented \u2705) (CORE-14) (#16227)",
         "a": "rattus128",
         "pr": 16227,
-        "ct": 1789419394
+        "ct": 1789419394,
+        "pt": "Implement Generic Loops (Candidate III - implemented \u2705) (CORE-14)",
+        "pa": "rattus128",
+        "av": "https://avatars.githubusercontent.com/u/46076784?v=4"
       },
       "prev": "db70adbd1a4693fe8d959b898ecc5dc166daad35",
       "range": {
@@ -4328,7 +4583,10 @@
         "s": "chore: update workflow templates to v0.11.60 (#16319)",
         "a": "comfyui-wiki",
         "pr": 16319,
-        "ct": 1789412030
+        "ct": 1789412030,
+        "pt": "Update workflow templates to v0.11.60",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
       },
       "prev": "b00584967778871f329c2d31190a5e9b767b8366",
       "range": {
@@ -4377,7 +4635,10 @@
         "s": "[Partner Nodes] feat(Gemini-LLM): add GeminiNodeV3, deprecate V2 (#16287)",
         "a": "bigcat88",
         "pr": 16287,
-        "ct": 1789388049
+        "ct": 1789388049,
+        "pt": "[Partner Nodes] feat(Gemini-LLM): add GeminiNodeV3, deprecate V2",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "f42b24efbeee194513fff465d84ad6913a2698d5",
       "range": {
@@ -4426,7 +4687,10 @@
         "s": "feat: structured event log lines for the assets system (#16306)",
         "a": "christian-byrne",
         "pr": 16306,
-        "ct": 1789363473
+        "ct": 1789363473,
+        "pt": "feat: structured event log lines for the assets system",
+        "pa": "christian-byrne",
+        "av": "https://avatars.githubusercontent.com/u/72887196?v=4"
       },
       "prev": "eecbfb404637bcf5f29954ef12767c1d20ede924",
       "range": {
@@ -4475,7 +4739,10 @@
         "s": "test(assets): keep test typing 3.10-compatible (#16305)",
         "a": "synap5e",
         "pr": 16305,
-        "ct": 1789360269
+        "ct": 1789360269,
+        "pt": "test(assets): keep test typing 3.10-compatible",
+        "pa": "synap5e",
+        "av": "https://avatars.githubusercontent.com/u/2515062?v=4"
       },
       "prev": "19e1058f4c445ef74047e77a23f9ca7684c1e4b6",
       "range": {
@@ -4524,7 +4791,10 @@
         "s": "feat(assets): split asset records from content (#16295)",
         "a": "synap5e",
         "pr": 16295,
-        "ct": 1789326291
+        "ct": 1789326291,
+        "pt": "feat(assets): split asset records from content",
+        "pa": "synap5e",
+        "av": "https://avatars.githubusercontent.com/u/2515062?v=4"
       },
       "prev": "798fa9aa47bf7822f6038db591f18098bda1e3c6",
       "range": {
@@ -4573,7 +4843,10 @@
         "s": "Add that Yue 2 is supported to readme. (#16303)",
         "a": "comfyanonymous",
         "pr": 16303,
-        "ct": 1789324286
+        "ct": 1789324286,
+        "pt": "Add that Yue 2 is supported to readme.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "02d39c8cd7828566f48ccf783c1c75b8336044f5",
       "range": {
@@ -4622,7 +4895,10 @@
         "s": "[Partner Nodes] feat(BFL): add the Flux Video Edit node (#16259)",
         "a": "bigcat88",
         "pr": 16259,
-        "ct": 1789286406
+        "ct": 1789286406,
+        "pt": "[Partner Nodes] feat(BFL): add the Flux Video Edit node",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "d43a5fa20c8547ff42d13232f589a06536c42b97",
       "range": {
@@ -4671,7 +4947,10 @@
         "s": "Log typed asset scanner filesystem errors (#16096)",
         "a": "christian-byrne",
         "pr": 16096,
-        "ct": 1789257290
+        "ct": 1789257290,
+        "pt": "Log typed asset scanner filesystem errors",
+        "pa": "christian-byrne",
+        "av": "https://avatars.githubusercontent.com/u/72887196?v=4"
       },
       "prev": "a20738f1d345e2695429544b5defea672dd74486",
       "range": {
@@ -4720,7 +4999,10 @@
         "s": "Fix linear_input_act to respect _full_precision_mm fallback (#16285)",
         "a": "chelsealong",
         "pr": 16285,
-        "ct": 1789253138
+        "ct": 1789253138,
+        "pt": "Fix linear_input_act to respect _full_precision_mm fallback",
+        "pa": "chelsealong",
+        "av": "https://avatars.githubusercontent.com/u/14966750?v=4"
       },
       "prev": "7ba217d6b5ac7ef984b157f7e5dfc93465b9937d",
       "range": {
@@ -4769,7 +5051,10 @@
         "s": "Don't add noise to the alpha channel in the Add Noise to Image node (#15626)",
         "a": "christian-byrne",
         "pr": 15626,
-        "ct": 1789252096
+        "ct": 1789252096,
+        "pt": "Don't add noise to the alpha channel in the Add Noise to Image node",
+        "pa": "christian-byrne",
+        "av": "https://avatars.githubusercontent.com/u/72887196?v=4"
       },
       "prev": "7dac1d2512c20c3c2cc201b24180cde18e41b31a",
       "range": {
@@ -4818,7 +5103,10 @@
         "s": "Increase max song duration in Yue2 node. (#16292)",
         "a": "comfyanonymous",
         "pr": 16292,
-        "ct": 1789246707
+        "ct": 1789246707,
+        "pt": "Increase max song duration in Yue2 node.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "9113c08c2e14f1ca6c0ccab64920777fd01e1bb9",
       "range": {
@@ -4867,7 +5155,10 @@
         "s": "[Partner Nodes] feat(client): consume estimated-duration headers for progress display (#16152)",
         "a": "bigcat88",
         "pr": 16152,
-        "ct": 1789238460
+        "ct": 1789238460,
+        "pt": "[Partner Nodes] feat(client): consume estimated-duration headers for progress display",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "c75d8c966c29cb0392259af791f43373315b72db",
       "range": {
@@ -4916,7 +5207,10 @@
         "s": "[Partner Nodes] feat(Bria): add new image edit nodes and the Video Eraser node (#16264)",
         "a": "bigcat88",
         "pr": 16264,
-        "ct": 1789196337
+        "ct": 1789196337,
+        "pt": "[Partner Nodes] feat(Bria): add new image edit nodes and the Video Eraser node",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "7193f5627f036701e5efc23beaea20fa37ceaadd",
       "range": {
@@ -4965,7 +5259,10 @@
         "s": "Bump comfyui-frontend-package to 1.52.7 (#16275)",
         "a": "christian-byrne",
         "pr": 16275,
-        "ct": 1789180338
+        "ct": 1789180338,
+        "pt": "Bump comfyui-frontend-package to 1.52.7",
+        "pa": "christian-byrne",
+        "av": "https://avatars.githubusercontent.com/u/72887196?v=4"
       },
       "prev": "b058ec652802e1de24f1d429b3c7c1fb868f791c",
       "range": {
@@ -5014,7 +5311,10 @@
         "s": "Support Yue2 music model. (#16250)",
         "a": "comfyanonymous",
         "pr": 16250,
-        "ct": 1789169684
+        "ct": 1789169684,
+        "pt": "Support Yue2 music model.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "1d91a82dc6236af35080957633b95e263afdbf1b",
       "range": {
@@ -5063,7 +5363,10 @@
         "s": "feat: Marigold v2 support (CORE-431) (#16232)",
         "a": "kijai",
         "pr": 16232,
-        "ct": 1789166456
+        "ct": 1789166456,
+        "pt": "feat: Marigold v2 support (CORE-431)",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
       },
       "prev": "c40c94e1f5142b236274c01381b0bd6ba7ca8f85",
       "range": {
@@ -5112,7 +5415,10 @@
         "s": "Fix unit tests (#16271)",
         "a": "alexisrolland",
         "pr": 16271,
-        "ct": 1789151242
+        "ct": 1789151242,
+        "pt": "fix: Fix unit tests for Concatenate Video node",
+        "pa": "alexisrolland",
+        "av": "https://avatars.githubusercontent.com/u/13064696?v=4"
       },
       "prev": "d537de93a0ac17325bbc3c7618e6d945cd804124",
       "range": {
@@ -5161,7 +5467,10 @@
         "s": "Implement Video Concatenate (CORE-436) (#16267)",
         "a": "rattus128",
         "pr": 16267,
-        "ct": 1789149993
+        "ct": 1789149993,
+        "pt": "Implement Video Concatenate (CORE-436)",
+        "pa": "rattus128",
+        "av": "https://avatars.githubusercontent.com/u/46076784?v=4"
       },
       "prev": "1d48d9cf7bcecb6022a87b3cb13e0fb435bf9b8a",
       "range": {
@@ -5210,7 +5519,10 @@
         "s": "Add linear to ImageColorSpace. (#16247)",
         "a": "comfyanonymous",
         "pr": 16247,
-        "ct": 1789091572
+        "ct": 1789091572,
+        "pt": "Add linear to ImageColorSpace.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "6338e4bd428247a4a8843496aa98fb7f2a9d3632",
       "range": {
@@ -5259,7 +5571,10 @@
         "s": "Fix h3 fun controlnet with comfy compiler. (#16240)",
         "a": "comfyanonymous",
         "pr": 16240,
-        "ct": 1789074636
+        "ct": 1789074636,
+        "pt": "Fix h3 fun controlnet with comfy compiler.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "1f641fd9337f0ec4d635a28415a8d25a8d15f753",
       "range": {
@@ -5308,7 +5623,10 @@
         "s": "chore: update workflow templates to v0.11.59 (#16233)",
         "a": "comfyui-wiki",
         "pr": 16233,
-        "ct": 1789061960
+        "ct": 1789061960,
+        "pt": "Update workflow templates to v0.11.59",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
       },
       "prev": "5774ab9cc327d7e4bf895b86ff877ffba0a6b6fa",
       "range": {
@@ -5357,7 +5675,10 @@
         "s": "[Partner Nodes] feat(OpenRouter): add auto aspect ratio to the MAI image node (#16229)",
         "a": "bigcat88",
         "pr": 16229,
-        "ct": 1789060411
+        "ct": 1789060411,
+        "pt": "[Partner Nodes] feat(OpenRouter): add auto aspect ratio to the MAI image node",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "6eba895f7d3615284da81e95bf49eaed4a5f7309",
       "range": {
@@ -5406,7 +5727,10 @@
         "s": "[Partner Nodes] feat(Tripo): migrate to the v3 API, add the Smart Segment node and retire the dead widgets (#16201)",
         "a": "bigcat88",
         "pr": 16201,
-        "ct": 1789059349
+        "ct": 1789059349,
+        "pt": "[Partner Nodes] feat(Tripo): migrate to the v3 API, add the Smart Segment node and retire the dead widgets",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "a7b1d39d342d102f305797fb5ba12dc304d9c1f5",
       "range": {
@@ -5455,7 +5779,10 @@
         "s": "Update instructions for manual install on windows AMD. (#16217)",
         "a": "comfyanonymous",
         "pr": 16217,
-        "ct": 1789007639
+        "ct": 1789007639,
+        "pt": "Update instructions for manual install on windows AMD.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "7ea14e59da26b822bffc7df7220c07d9319392d5",
       "range": {
@@ -5504,7 +5831,10 @@
         "s": "[Partner Nodes] feat(Gemini-LLM): Add Gemini 3.8 Flash to the Gemini text node (#16195)",
         "a": "bigcat88",
         "pr": 16195,
-        "ct": 1788999267
+        "ct": 1788999267,
+        "pt": "[Partner Nodes] feat(Gemini-LLM): Add Gemini 3.8 Flash to the Gemini text node",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "be92396834f9b6e3e361cfe30e7eed693137a448",
       "range": {
@@ -5553,7 +5883,10 @@
         "s": "quant_ops: drop the dead ROCm triton arch gate (#16211)",
         "a": "0xDELUXA",
         "pr": 16211,
-        "ct": 1788984867
+        "ct": 1788984867,
+        "pt": "quant_ops: drop the dead ROCm triton arch gate",
+        "pa": "0xDELUXA",
+        "av": "https://avatars.githubusercontent.com/u/211159064?v=4"
       },
       "prev": "4989cdd95487531b50438c6a091dffa06e4af4b2",
       "range": {
@@ -5602,7 +5935,10 @@
         "s": "[Partner Noes] feat(OpenRouter): add Microsoft `mai-image-2.6` models (#16188)",
         "a": "bigcat88",
         "pr": 16188,
-        "ct": 1788978201
+        "ct": 1788978201,
+        "pt": "[Partner Noes] feat(OpenRouter): add Microsoft `mai-image-2.6` models",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "6f3895ed8d1e0f1d5fad11b48b3f159f7de1cc15",
       "range": {
@@ -5651,7 +5987,10 @@
         "s": "main: bump the AMD Windows VA quota to 4TB (#16199)",
         "a": "rattus128",
         "pr": 16199,
-        "ct": 1788969094
+        "ct": 1788969094,
+        "pt": "main: bump the AMD Windows VA quota to 4TB (CORE-409)",
+        "pa": "rattus128",
+        "av": "https://avatars.githubusercontent.com/u/46076784?v=4"
       },
       "prev": "54e03f5367ebd8d96380e4cf02fa3084f7a7eca5",
       "range": {
@@ -5700,7 +6039,10 @@
         "s": "Add new model blueprints and reorganize subgraph categories (#14785)",
         "a": "comfyui-wiki",
         "pr": 14785,
-        "ct": 1788930526
+        "ct": 1788930526,
+        "pt": "Add new model blueprints and reorganize subgraph categories",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
       },
       "prev": "672ba9e5e388bd6bfac5ceef61f89ffdd9467200",
       "range": {
@@ -5749,7 +6091,10 @@
         "s": "Only lock repo PRs after merging if they contain a CLA signature. (#16191)",
         "a": "comfyanonymous",
         "pr": 16191,
-        "ct": 1788914535
+        "ct": 1788914535,
+        "pt": "Only lock repo PRs after merging if they contain a CLA signature.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "421a1c245c682c04d4325ba365f40c834c66f5b0",
       "range": {
@@ -5798,7 +6143,10 @@
         "s": "Fix MiniMax H3 denoise masks (#15988)",
         "a": "poorpaper",
         "pr": 15988,
-        "ct": 1788902733
+        "ct": 1788902733,
+        "pt": "Fix MiniMax H3 denoise mask velocity conversion",
+        "pa": "poorpaper",
+        "av": "https://avatars.githubusercontent.com/u/43514747?v=4"
       },
       "prev": "249c5a3b951823c7990d0eb596f95b8bc542d00a",
       "range": {
@@ -5847,7 +6195,10 @@
         "s": "Cleaner way of enabling quantized mm on text gen but not on text enc. (#16189)",
         "a": "comfyanonymous",
         "pr": 16189,
-        "ct": 1788897141
+        "ct": 1788897141,
+        "pt": "Cleaner way of enabling quantized mm on text gen but not on text enc.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "b7ebfd73c5a5bae013dfd331050a05692fdfc538",
       "range": {
@@ -5896,7 +6247,10 @@
         "s": "Fix quantized text encoder matmul gating and Gemma4 prefill cache positions (#16185)",
         "a": "kijai",
         "pr": 16185,
-        "ct": 1788893864
+        "ct": 1788893864,
+        "pt": "Fix quantized text encoder matmul gating and Gemma4 prefill cache",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
       },
       "prev": "488e8f8ab84592670bcc2ff6a1aa20fabafd5160",
       "range": {
@@ -5945,7 +6299,10 @@
         "s": "feat: Pixal3D multiview model support (CORE-421) (#16048)",
         "a": "kijai",
         "pr": 16048,
-        "ct": 1788891525
+        "ct": 1788891525,
+        "pt": "feat: Pixal3D multiview model support (CORE-421)",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
       },
       "prev": "00d34d92fe0afbfbab3893ebbab2d5d70f5e9882",
       "range": {
@@ -5994,7 +6351,10 @@
         "s": "Comfy Aimdo 0.5.3 + Memory compiler fixes (#16180)",
         "a": "rattus128",
         "pr": 16180,
-        "ct": 1788885163
+        "ct": 1788885163,
+        "pt": "Comfy Aimdo 0.5.3 + Memory compiler fixes",
+        "pa": "rattus128",
+        "av": "https://avatars.githubusercontent.com/u/46076784?v=4"
       },
       "prev": "efa6c8f804bff78b46a0fd458ebd2e47bba07a30",
       "range": {
@@ -6043,7 +6403,10 @@
         "s": "Add LTXV generated-keyframe nodes and Freeze Latent (#16040)",
         "a": "adamoster",
         "pr": 16040,
-        "ct": 1788832978
+        "ct": 1788832978,
+        "pt": "Add LTXV generated-keyframe nodes and Freeze Latent",
+        "pa": "adamoster",
+        "av": "https://avatars.githubusercontent.com/u/50100462?v=4"
       },
       "prev": "5bbdf8a76678e2c7cfb519a49a9c3a7137fd6280",
       "range": {
@@ -6092,7 +6455,10 @@
         "s": "chore: Harmonize model attention nodes (#16154)",
         "a": "alexisrolland",
         "pr": 16154,
-        "ct": 1788825959
+        "ct": 1788825959,
+        "pt": "chore: Harmonize model attention nodes",
+        "pa": "alexisrolland",
+        "av": "https://avatars.githubusercontent.com/u/13064696?v=4"
       },
       "prev": "f5ed117b88964f5536545221615889adbb8f497f",
       "range": {
@@ -6141,7 +6507,10 @@
         "s": "Remove useless code. (#16169)",
         "a": "comfyanonymous",
         "pr": 16169,
-        "ct": 1788823678
+        "ct": 1788823678,
+        "pt": "Remove useless code.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "41db8f4fa1587d139e412a57b9b69394e3b13f95",
       "range": {
@@ -6190,7 +6559,10 @@
         "s": "Verify aotriton kernels actually launch before enabling pytorch attention (#15648)",
         "a": "0xDELUXA",
         "pr": 15648,
-        "ct": 1788818086
+        "ct": 1788818086,
+        "pt": "Fix: Verify aotriton kernels actually launch before enabling pytorch attention",
+        "pa": "0xDELUXA",
+        "av": "https://avatars.githubusercontent.com/u/211159064?v=4"
       },
       "prev": "9ac7352f70b2206d4ef7a345b30106d0fa3807d1",
       "range": {
@@ -6239,7 +6611,10 @@
         "s": "Fix registration issues (#15890)",
         "a": "guill",
         "pr": 15890,
-        "ct": 1788814244
+        "ct": 1788814244,
+        "pt": "Fix registration issues",
+        "pa": "guill",
+        "av": "https://avatars.githubusercontent.com/u/3157454?v=4"
       },
       "prev": "eb357862592aefe8e136031b9e3aa14e55abddaa",
       "range": {
@@ -6288,7 +6663,10 @@
         "s": "Bump comfyui-frontend-package to 1.51.10 (#16118)",
         "a": "comfy-pr-bot",
         "pr": 16118,
-        "ct": 1788794208
+        "ct": 1788794208,
+        "pt": "Bump comfyui-frontend-package to 1.51.10",
+        "pa": "comfy-pr-bot",
+        "av": "https://avatars.githubusercontent.com/u/172744619?v=4"
       },
       "prev": "ea33b15489b1cc7f13fc74f26e96af995479548f",
       "range": {
@@ -6337,7 +6715,10 @@
         "s": "Fix transparent Porter-Duff blend modes (#15721)",
         "a": "tandede",
         "pr": 15721,
-        "ct": 1788767593
+        "ct": 1788767593,
+        "pt": "Fix Porter-Duff blend modes with transparent layers",
+        "pa": "tandede",
+        "av": "https://avatars.githubusercontent.com/u/127607634?v=4"
       },
       "prev": "fbed745c8d7d62573b099cd61fe51cb64b9b807e",
       "range": {
@@ -6386,7 +6767,10 @@
         "s": "Don't invert the alpha channel in the Invert Image node (#15622)",
         "a": "christian-byrne",
         "pr": 15622,
-        "ct": 1788748706
+        "ct": 1788748706,
+        "pt": "Don't invert the alpha channel in the Invert Image node",
+        "pa": "christian-byrne",
+        "av": "https://avatars.githubusercontent.com/u/72887196?v=4"
       },
       "prev": "aa4582f93a2e388d696ac1d791eadf28ea5c369e",
       "range": {
@@ -6435,7 +6819,10 @@
         "s": "Fix Quantize Image on images with an alpha channel (#15630)",
         "a": "christian-byrne",
         "pr": 15630,
-        "ct": 1788747334
+        "ct": 1788747334,
+        "pt": "Fix Quantize Image on images with an alpha channel",
+        "pa": "christian-byrne",
+        "av": "https://avatars.githubusercontent.com/u/72887196?v=4"
       },
       "prev": "25dfc16f9ac0a87991d34fbf5f02d6c25c844639",
       "range": {
@@ -6484,7 +6871,10 @@
         "s": "Don't adjust the alpha channel in the image color adjustment nodes (#15629)",
         "a": "christian-byrne",
         "pr": 15629,
-        "ct": 1788743360
+        "ct": 1788743360,
+        "pt": "Don't adjust the alpha channel in the image color adjustment nodes",
+        "pa": "christian-byrne",
+        "av": "https://avatars.githubusercontent.com/u/72887196?v=4"
       },
       "prev": "d03a2430e1e7e2e7f9b520b65c0db6ded9683891",
       "range": {
@@ -6533,7 +6923,10 @@
         "s": "Fix Detect Edges (Canny) on images with an alpha channel (#15631)",
         "a": "christian-byrne",
         "pr": 15631,
-        "ct": 1788729215
+        "ct": 1788729215,
+        "pt": "Fix Detect Edges (Canny) on images with an alpha channel",
+        "pa": "christian-byrne",
+        "av": "https://avatars.githubusercontent.com/u/72887196?v=4"
       },
       "prev": "7b3b262bcb9d8b8fefd987eb199954e37c5bd9d2",
       "range": {
@@ -6582,7 +6975,10 @@
         "s": "Add color space conversion node. (#16135)",
         "a": "comfyanonymous",
         "pr": 16135,
-        "ct": 1788728522
+        "ct": 1788728522,
+        "pt": "Add color space conversion node.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "82db4037ce78bfc0c5c65a4b83ef9ca2a01e85aa",
       "range": {
@@ -6631,7 +7027,10 @@
         "s": "Fix test_base_path_changes leaking a reloaded cli_args singleton (#16053)",
         "a": "guill",
         "pr": 16053,
-        "ct": 1788725715
+        "ct": 1788725715,
+        "pt": "fix(tests): Stop folder_path_test from replacing the shared cli_args singleton",
+        "pa": "guill",
+        "av": "https://avatars.githubusercontent.com/u/3157454?v=4"
       },
       "prev": "a99d1f9c14f4594fe1e9d7e17c1997bf104d89fb",
       "range": {
@@ -6680,7 +7079,10 @@
         "s": "Pause comfy compiler for long lived sparse allocations (#16148)",
         "a": "rattus128",
         "pr": 16148,
-        "ct": 1788716985
+        "ct": 1788716985,
+        "pt": "Pause comfy compiler for long lived sparse allocations",
+        "pa": "rattus128",
+        "av": "https://avatars.githubusercontent.com/u/46076784?v=4"
       },
       "prev": "15eb748b3ec5f8a0a2d470b7fb280e2d7579f916",
       "range": {
@@ -6729,7 +7131,10 @@
         "s": "chore: update embedded docs to v0.5.11 (#15947)",
         "a": "comfyui-wiki",
         "pr": 15947,
-        "ct": 1788658265
+        "ct": 1788658265,
+        "pt": "Update embedded docs to v0.5.11",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
       },
       "prev": "e308cc73b466584b0c17be695e5de1a17438bb40",
       "range": {
@@ -6778,7 +7183,10 @@
         "s": "Add Sparse Attention node (#16072)",
         "a": "kijai",
         "pr": 16072,
-        "ct": 1788657495
+        "ct": 1788657495,
+        "pt": "Add Sparse Attention node",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
       },
       "prev": "18ebc2afd4782f3b16fc70ce242139073126de2a",
       "range": {
@@ -6827,7 +7235,10 @@
         "s": "Update comfy-kitchen version to 0.2.33 (#16133)",
         "a": "comfyanonymous",
         "pr": 16133,
-        "ct": 1788650476
+        "ct": 1788650476,
+        "pt": "Update comfy-kitchen version to 0.2.33",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "f00bfd610cb001381603669e2cc01160ae37aaf3",
       "range": {
@@ -6876,7 +7287,10 @@
         "s": "[Partner Nodes] deprecate retired models (#16121)",
         "a": "bigcat88",
         "pr": 16121,
-        "ct": 1788642769
+        "ct": 1788642769,
+        "pt": "[Partner Nodes] deprecate retired models",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "8a43c6bd92499db45dd6b829b118f88dce9ce229",
       "range": {
@@ -6925,7 +7339,10 @@
         "s": "[Partner Nodes] feat(OpenAI): add gpt 6 astra model and reasoning param (#16125)",
         "a": "bigcat88",
         "pr": 16125,
-        "ct": 1788636196
+        "ct": 1788636196,
+        "pt": "[Partner Nodes] feat(OpenAI): add gpt 6 astra model and reasoning param",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "250b2e9551a7bc7a8ebb5beb07e0fecd2983e04a",
       "range": {
@@ -6974,7 +7391,10 @@
         "s": "[Partner Nodes] feat(Comfy-Cloud): add nodes that run curated workflows on Comfy Cloud GPUs (#15935)",
         "a": "deepme987",
         "pr": 15935,
-        "ct": 1788568208
+        "ct": 1788568208,
+        "pt": "[Partner Nodes] feat(Comfy-Cloud): add nodes that run curated workflows on Comfy Cloud GPUs",
+        "pa": "deepme987",
+        "av": "https://avatars.githubusercontent.com/u/42841935?v=4"
       },
       "prev": "6e3c0bda5a756ec334df449cdc7d4a4685631e91",
       "range": {
@@ -7023,7 +7443,10 @@
         "s": "comfy-aimdo 0.5.2 (#16108)",
         "a": "rattus128",
         "pr": 16108,
-        "ct": 1788562513
+        "ct": 1788562513,
+        "pt": "comfy-aimdo 0.5.2",
+        "pa": "rattus128",
+        "av": "https://avatars.githubusercontent.com/u/46076784?v=4"
       },
       "prev": "acb2a019b24861d89721a23862c059e3a6ece660",
       "range": {
@@ -7072,7 +7495,10 @@
         "s": "chore: update workflow templates to v0.11.55 (#16104)",
         "a": "comfyui-wiki",
         "pr": 16104,
-        "ct": 1788553238
+        "ct": 1788553238,
+        "pt": "Update workflow templates to v0.11.55",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
       },
       "prev": "5efd057236db2f315dbc83c780751f89189858f5",
       "range": {
@@ -7121,7 +7547,10 @@
         "s": "[Partner Nodes] feat(MiniMax): add H3 Max Turbo option to H3 text-to-video and first-last-frame nodes (#16094)",
         "a": "bigcat88",
         "pr": 16094,
-        "ct": 1788552251
+        "ct": 1788552251,
+        "pt": "[Partner Nodes] feat(MiniMax): add H3 Max Turbo option to H3 text-to-video and first-last-frame nodes",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "6c53f8c9a06d95f3d847009ceaae55c624169247",
       "range": {
@@ -7170,7 +7599,10 @@
         "s": "[Partner Nodes] feat(Meta): add Muse Image nodes (#16078)",
         "a": "purzbeats",
         "pr": 16078,
-        "ct": 1788549964
+        "ct": 1788549964,
+        "pt": "[Partner Nodes] feat(Meta): add Muse Image nodes",
+        "pa": "purzbeats",
+        "av": "https://avatars.githubusercontent.com/u/97489706?v=4"
       },
       "prev": "8f486ad315a14929b223ff482974b2dfbf4ba72c",
       "range": {
@@ -7219,7 +7651,10 @@
         "s": "[Partner Nodes] fix(Tripo): real output formats, exact pricing, missing parameters and six new nodes (#16060)",
         "a": "bigcat88",
         "pr": 16060,
-        "ct": 1788544060
+        "ct": 1788544060,
+        "pt": "[Partner Nodes] fix(Tripo): real output formats, exact pricing, missing parameters and six new nodes",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "5c23fb7b6cb5912b1488d1b20162987eefb07a99",
       "range": {
@@ -7268,7 +7703,10 @@
         "s": "Remove now unnecessary minimax memory workaround. (#16103)",
         "a": "comfyanonymous",
         "pr": 16103,
-        "ct": 1788542855
+        "ct": 1788542855,
+        "pt": "Remove now unecessary minimax memory workaround.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "e3a78dab9ed69a16b3f461acea70d778db6197b1",
       "range": {
@@ -7317,7 +7755,10 @@
         "s": "chore: Update nodes categories (#16077)",
         "a": "alexisrolland",
         "pr": 16077,
-        "ct": 1788537950
+        "ct": 1788537950,
+        "pt": "chore: Update nodes categories",
+        "pa": "alexisrolland",
+        "av": "https://avatars.githubusercontent.com/u/13064696?v=4"
       },
       "prev": "31dfbd4ca0cb36ab6a573fc13daec8cc3a2e1e98",
       "range": {
@@ -7366,7 +7807,10 @@
         "s": "Allow disconnected Switch inputs (#16083)",
         "a": "rattus128",
         "pr": 16083,
-        "ct": 1788534373
+        "ct": 1788534373,
+        "pt": "Allow disconnected Switch inputs",
+        "pa": "rattus128",
+        "av": "https://avatars.githubusercontent.com/u/46076784?v=4"
       },
       "prev": "e80c1570b6b44a2557d5d8e341e05782d18c9bbb",
       "range": {
@@ -7415,7 +7859,10 @@
         "s": "[Partner Nodes] feat(Recraft): add V4 Styles Pro models to Create Style node (#16043)",
         "a": "bigcat88",
         "pr": 16043,
-        "ct": 1788481883
+        "ct": 1788481883,
+        "pt": "[Partner Nodes] feat(Recraft): add V4 Styles Pro models to Create Style node",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "0eb098b5910f60d3a73f4f027822cd3599396674",
       "range": {
@@ -7464,7 +7911,10 @@
         "s": "Lower peak trellis workflow vram and ram usage. (#16054)",
         "a": "comfyanonymous",
         "pr": 16054,
-        "ct": 1788476511
+        "ct": 1788476511,
+        "pt": "Lower peak trellis workflow vram and ram usage.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "9c90340bc26ea69c2029ee6e882acbbb06e157b4",
       "range": {
@@ -7513,7 +7963,10 @@
         "s": "Update nodes to improve search rank (#16074)",
         "a": "alexisrolland",
         "pr": 16074,
-        "ct": 1788473140
+        "ct": 1788473140,
+        "pt": "Update nodes to improve search rank",
+        "pa": "alexisrolland",
+        "av": "https://avatars.githubusercontent.com/u/13064696?v=4"
       },
       "prev": "d22a13c66747ef89080622bcd095bd722846fa3c",
       "range": {
@@ -7562,7 +8015,10 @@
         "s": "Support MiniMax-H3 and HiDream O1 loras trained with DiffSynth-Studio / ModelScope (#15662)",
         "a": "yjy415",
         "pr": 15662,
-        "ct": 1788469526
+        "ct": 1788469526,
+        "pt": "Support MiniMax-H3 and HiDream O1 loras trained with DiffSynth-Studio / ModelScope",
+        "pa": "yjy415",
+        "av": "https://avatars.githubusercontent.com/u/104360502?v=4"
       },
       "prev": "1aec3a1351f7f5b7280553569a0dbef993b79e45",
       "range": {
@@ -7611,7 +8067,10 @@
         "s": "MiniMax-H3: Make VAE optional, allow using text encoder only references (#16065)",
         "a": "kijai",
         "pr": 16065,
-        "ct": 1788465107
+        "ct": 1788465107,
+        "pt": "MiniMax-H3: Make VAE optional, allow using text encoder only references",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
       },
       "prev": "30bdda1ef13a3a34fce2cd2fec633f15d832122a",
       "range": {
@@ -7660,7 +8119,10 @@
         "s": "Register partner_run_gate_enabled feature flag (#16012)",
         "a": "MaanilVerma",
         "pr": 16012,
-        "ct": 1788437708
+        "ct": 1788437708,
+        "pt": "Register partner_run_gate_enabled feature flag",
+        "pa": "MaanilVerma",
+        "av": "https://avatars.githubusercontent.com/u/74806700?v=4"
       },
       "prev": "345c9190497c82cff53e71fb4ae00d1e135a6542",
       "range": {
@@ -7709,7 +8171,10 @@
         "s": "Add warning about forcing single GPU mode on Windows (#16055)",
         "a": "comfyanonymous",
         "pr": 16055,
-        "ct": 1788403686
+        "ct": 1788403686,
+        "pt": "Add warning about forcing single GPU mode on Windows",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "567275141678c9fd65bafef6aa9dcb4ac9bd70e3",
       "range": {
@@ -7758,7 +8223,10 @@
         "s": "Emit the document canvas from ImageCompositor for the layer editor (#15742)",
         "a": "jtydhr88",
         "pr": 15742,
-        "ct": 1788400675
+        "ct": 1788400675,
+        "pt": "Emit the document canvas from ImageCompositor for the layer editor",
+        "pa": "jtydhr88",
+        "av": "https://avatars.githubusercontent.com/u/860985?v=4"
       },
       "prev": null,
       "range": null,
@@ -7804,7 +8272,10 @@
         "s": "Add live resolution preview widget to ResolutionSelector (#16013)",
         "a": "jtydhr88",
         "pr": 16013,
-        "ct": 1788388156
+        "ct": 1788388156,
+        "pt": "Add live resolution preview widget to ResolutionSelector",
+        "pa": "jtydhr88",
+        "av": "https://avatars.githubusercontent.com/u/860985?v=4"
       },
       "prev": "13d2580501bc0aa65e2fcf6d18fa6a156697bc74",
       "range": {
@@ -7853,7 +8324,10 @@
         "s": "Enable PyTorch SDPA attention and FP8 ops for gfx1171 (#16039)",
         "a": "tvukovic-amd",
         "pr": 16039,
-        "ct": 1788387197
+        "ct": 1788387197,
+        "pt": "Enable PyTorch SDPA attention and FP8 ops for gfx1171",
+        "pa": "tvukovic-amd",
+        "av": "https://avatars.githubusercontent.com/u/127323445?v=4"
       },
       "prev": "a87667f72f5fad094b74b10dc9c9f82faea728ef",
       "range": {
@@ -7902,7 +8376,10 @@
         "s": "chore: update workflow templates to v0.11.54 (#16045)",
         "a": "comfyui-wiki",
         "pr": 16045,
-        "ct": 1788371197
+        "ct": 1788371197,
+        "pt": "Update workflow templates to v0.11.54",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
       },
       "prev": "ace9172e95038ac25015c419713aa7755f739034",
       "range": {
@@ -7951,7 +8428,10 @@
         "s": "[Partner Nodes] feat(Minimax-H3): add the Max model to the Reference node (#16041)",
         "a": "bigcat88",
         "pr": 16041,
-        "ct": 1788362970
+        "ct": 1788362970,
+        "pt": "[Partner Nodes] feat(Minimax-H3): add the Max model to the Reference node",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
       },
       "prev": "ace9172e95038ac25015c419713aa7755f739034",
       "range": {
@@ -8000,7 +8480,10 @@
         "s": "Annotate temp paths in Preview3DAdvanced / PreviewGaussianSplat / PreviewPointCloud outputs (#16038)",
         "a": "jtydhr88",
         "pr": 16038,
-        "ct": 1788348927
+        "ct": 1788348927,
+        "pt": "Annotate temp paths in Preview3DAdvanced / PreviewGaussianSplat / PreviewPointCloud outputs",
+        "pa": "jtydhr88",
+        "av": "https://avatars.githubusercontent.com/u/860985?v=4"
       },
       "prev": "4e024cb1e8423be735b919c585669dc189735c7b",
       "range": {
@@ -8049,7 +8532,10 @@
         "s": "Lower trellis workflow remesh memory usage. (#16034)",
         "a": "comfyanonymous",
         "pr": 16034,
-        "ct": 1788317005
+        "ct": 1788317005,
+        "pt": "Lower trellis workflow remesh memory usage.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
       },
       "prev": "03468f4e3ee82dbbb46f22a9408fe1331d9361c0",
       "range": {
@@ -8098,7 +8584,10 @@
         "s": "chore: update workflow templates to v0.11.52 (#16024)",
         "a": "comfyui-wiki",
         "pr": 16024,
-        "ct": 1788310932
+        "ct": 1788310932,
+        "pt": "Update workflow templates to v0.11.52",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
       },
       "prev": "cf7aedc1e6d6ec1d933efccd39f72108f6f555af",
       "range": {
@@ -8147,7 +8636,10 @@
         "s": "Enable PyTorch SDPA attention and FP8 ops for gfx1170 (#16014)",
         "a": "tvukovic-amd",
         "pr": 16014,
-        "ct": 1788308443
+        "ct": 1788308443,
+        "pt": "Enable PyTorch SDPA attention and FP8 ops for gfx1170",
+        "pa": "tvukovic-amd",
+        "av": "https://avatars.githubusercontent.com/u/127323445?v=4"
       },
       "prev": "02aa70781a8c07c59fd5408fcd50f76a8afcdfa3",
       "range": {
@@ -8196,7 +8688,10 @@
         "s": "Allow using references with MiniMax-H3 Fun Union and fix prefetch race condition (#16020)",
         "a": "kijai",
         "pr": 16020,
-        "ct": 1788304182
+        "ct": 1788304182,
+        "pt": "Allow using references with MiniMax-H3 Fun Union and fix prefetch rac\u2026",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
       },
       "prev": "3216c62e9962c3babd28a4dfea6e5aef50b8fe16",
       "range": {
@@ -8245,7 +8740,10 @@
         "s": "Support SenseNova U1.5 (CORE-411) (#15922)",
         "a": "T8mars",
         "pr": 15922,
-        "ct": 1788231953
+        "ct": 1788231953,
+        "pt": "Support SenseNova U1.5 (CORE-411)",
+        "pa": "T8mars",
+        "av": "https://avatars.githubusercontent.com/u/96167788?v=4"
       },
       "prev": "d3eaf6adb388c27245374ac26e585fef4936c485",
       "range": {
