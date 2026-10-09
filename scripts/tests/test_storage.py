@@ -3,35 +3,7 @@ writers, and recovery from a concurrent publisher."""
 import json
 import subprocess
 
-import pytest
-
 import storage
-
-
-def _git(cwd, *args):
-    return subprocess.run(["git", "-C", str(cwd), *args], check=True,
-                          capture_output=True, text=True).stdout
-
-
-@pytest.fixture
-def remote(tmp_path):
-    """Bare repo whose `results` branch already holds one run and a pointer."""
-    bare = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "-q", "--bare", "-b", "results", str(bare)], check=True)
-    _git(bare, "config", "uploadpack.allowFilter", "true")
-    seed = tmp_path / "seed"
-    subprocess.run(["git", "init", "-q", "-b", "results", str(seed)], check=True)
-    run = seed / "regression" / "runs" / "master" / "aaa"
-    (run / "wf" / "outputs").mkdir(parents=True)
-    (run / "summary.json").write_text(json.dumps({"commit": "aaa", "overall": "pass",
-                                                 "workflows": {"wf": {"verdict": "pass"}}}))
-    (run / "wf" / "outputs" / "wf_00001_.png").write_bytes(b"\x89PNG seed")
-    (seed / "regression" / "latest").mkdir()
-    (seed / "regression" / "latest" / "master.json").write_text(json.dumps({"commit": "aaa"}))
-    _git(seed, "add", "-A")
-    _git(seed, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "seed")
-    _git(seed, "push", "-q", str(bare), "HEAD:refs/heads/results")
-    return bare
 
 
 def _store(tmp_path, remote, name):
@@ -60,6 +32,20 @@ def test_sparse_checkout_materialises_on_demand(tmp_path, remote):
     assert s.list_json("regression/runs/master", "summary.json") == [
         "regression/runs/master/aaa/summary.json"]
     assert s.read_blob_json("regression/runs/master/aaa/summary.json")["commit"] == "aaa"
+
+
+def test_prefetch_batches_blobs_without_materialising(tmp_path, remote):
+    s = _store(tmp_path, remote, "a")
+    paths = ["regression/runs/master/aaa/summary.json",
+             "regression/runs/master/aaa/wf/outputs/wf_00001_.png"]
+    blobs = s.list_blobs("regression/runs/master")
+    assert set(paths) <= set(blobs)
+    s.prefetch(paths)
+    # Objects are now local: reading must not need the remote.
+    s.remote_url = str(tmp_path / "gone")
+    s._git("remote", "set-url", "origin", str(tmp_path / "gone"))
+    assert s.read_blob_json(paths[0])["commit"] == "aaa"
+    assert not (s.workdir / "regression" / "runs").exists()
 
 
 def test_concurrent_publishers_keep_each_others_derived_files(tmp_path, remote):

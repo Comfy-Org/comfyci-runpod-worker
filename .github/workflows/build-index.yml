@@ -1,0 +1,44 @@
+# Rebuild the dashboard's run index for a branch/lane from the committed
+# summaries: the one-off backfill of runs published before the index existed,
+# and the repair tool if an index file ever needs regenerating.
+name: Build run index
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: ComfyUI branch whose runs to index
+        default: master
+      lane:
+        description: lane id from manifest/lanes.json (empty = lane of the default prefix)
+        default: ''
+
+# Own group: the index writes are retry-safe against the cron's publishes, and
+# sharing gpu-regression would let the next cron tick cancel a pending backfill.
+concurrency:
+  group: index-${{ inputs.branch }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  index:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r scripts/requirements.txt
+      - name: Rebuild index
+        # Inputs reach the script through the environment, never through
+        # expression interpolation into the shell.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BRANCH: ${{ inputs.branch }}
+          LANE: ${{ inputs.lane }}
+        run: |
+          args=(--branch "$BRANCH" --results-workdir "$RUNNER_TEMP/results-checkout")
+          if [ -n "$LANE" ]; then args+=(--lane "$LANE"); fi
+          python scripts/build_index.py "${args[@]}"
