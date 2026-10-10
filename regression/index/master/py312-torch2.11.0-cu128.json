@@ -3,20 +3,72 @@
   "branch": "master",
   "lane": "py312-torch2.11.0-cu128",
   "layout": 1,
-  "generated_ts": 1791596259,
-  "count": 265,
+  "generated_ts": 1791601000,
+  "count": 266,
   "shards": [
     "2026-08",
     "2026-09",
     "2026-10"
   ],
   "latest": {
-    "commit": "3a52aae7ca1010c9d05cc70477795e6b5da0ed02",
-    "run_ts": 1791596259,
+    "commit": "ec1537de684cac0785cd682f03db73083efcfe56",
+    "run_ts": 1791600999,
     "overall": "pass"
   },
   "first_bad": {},
   "entries": [
+    {
+      "c": "ec1537de684cac0785cd682f03db73083efcfe56",
+      "t": 1791600999,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.39.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Decode MiniMax H3 single images as the first latent of a clip (#16881)",
+        "a": "kijai",
+        "pr": 16881,
+        "ct": 1791600052,
+        "pt": "Decode MiniMax H3 single images as the first latent of a clip",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
+      },
+      "prev": "3a52aae7ca1010c9d05cc70477795e6b5da0ed02",
+      "range": {
+        "n": 2,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/3a52aae7ca1010c9d05cc70477795e6b5da0ed02...ec1537de684cac0785cd682f03db73083efcfe56"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 111.36,
+          "vram": 22083.5,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 36.57,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
     {
       "c": "3a52aae7ca1010c9d05cc70477795e6b5da0ed02",
       "t": 1791596259,
