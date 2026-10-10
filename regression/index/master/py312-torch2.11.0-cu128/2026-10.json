@@ -5,6 +5,58 @@
   "shard": "2026-10",
   "entries": [
     {
+      "c": "e450673ef21ad87456c138f7cbd1332e296b91a9",
+      "t": 1791593114,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.39.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Add LatentOperationBlend and start/end percent to LatentApplyOperationCFG (#16923)",
+        "a": "comfyanonymous",
+        "pr": 16923,
+        "ct": 1791590725,
+        "pt": "Add LatentOperationBlend and start/end percent to LatentApplyOperatio\u2026",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
+      },
+      "prev": "08ff3c11b3a85eb07c2c06f21cb378ac2e086840",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/08ff3c11b3a85eb07c2c06f21cb378ac2e086840...e450673ef21ad87456c138f7cbd1332e296b91a9"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 125.55,
+          "vram": 21947.9,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 42.66,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
+    {
       "c": "08ff3c11b3a85eb07c2c06f21cb378ac2e086840",
       "t": 1791537740,
       "o": "fail",
