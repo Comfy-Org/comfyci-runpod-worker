@@ -5,6 +5,58 @@
   "shard": "2026-10",
   "entries": [
     {
+      "c": "7f7fd918ed0815c5d5ef2ccfe44bfc8e72cfd217",
+      "t": 1791668544,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.39.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Fix issues with loading half float files with pyav. (#16949)",
+        "a": "comfyanonymous",
+        "pr": 16949,
+        "ct": 1791667913,
+        "pt": "Fix issues with loading half float files with pyav.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
+      },
+      "prev": "0df64eb242b7c5759c3e86afd5d1846d923b1033",
+      "range": {
+        "n": 2,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/0df64eb242b7c5759c3e86afd5d1846d923b1033...7f7fd918ed0815c5d5ef2ccfe44bfc8e72cfd217"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 131.85,
+          "vram": 22059.6,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 38.07,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
+    {
       "c": "0df64eb242b7c5759c3e86afd5d1846d923b1033",
       "t": 1791602580,
       "o": "pass",

@@ -1,0 +1,141 @@
+{
+  "schema_version": 2,
+  "branch": "master",
+  "commit": "7f7fd918ed0815c5d5ef2ccfe44bfc8e72cfd217",
+  "run_ts": 1791668544,
+  "overall": "pass",
+  "has_infra_error": false,
+  "lane": "py312-torch2.11.0-cu128",
+  "commit_meta": {
+    "subject": "Fix issues with loading half float files with pyav. (#16949)",
+    "author": "comfyanonymous",
+    "committed_ts": 1791667913,
+    "parents": [
+      "ad30981c89c6a57035158b6c66e70dc572b2e262"
+    ],
+    "pr": 16949,
+    "pr_title": "Fix issues with loading half float files with pyav.",
+    "pr_author": "comfyanonymous",
+    "pr_avatar": "https://avatars.githubusercontent.com/u/121283862?v=4",
+    "pr_labels": [],
+    "pr_merged_at": 1791667914,
+    "pr_url": "https://github.com/Comfy-Org/ComfyUI/pull/16949"
+  },
+  "tested_range": {
+    "prev": "0df64eb242b7c5759c3e86afd5d1846d923b1033",
+    "commits_between": 2,
+    "compare_url": "https://github.com/Comfy-Org/ComfyUI/compare/0df64eb242b7c5759c3e86afd5d1846d923b1033...7f7fd918ed0815c5d5ef2ccfe44bfc8e72cfd217"
+  },
+  "workflows": {
+    "flux_dev_t2i": {
+      "workflow_id": "flux_dev_t2i",
+      "worker_status": "ok",
+      "verdict": "pass",
+      "detail": null,
+      "vs_golden": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "vs_previous": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "thresholds_used": {
+        "max_mean_mse": 2.0,
+        "min_mean_psnr_db": 45.0,
+        "max_pct_pixels_changed": 1.0
+      },
+      "golden_tag": "v0.38.0",
+      "previous_commit": "0df64eb242b7c5759c3e86afd5d1846d923b1033",
+      "previous_verdict": "pass",
+      "figures": false,
+      "output_sha256": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+      "thumbnail": "flux_dev_t2i_00001_.webp",
+      "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+      "timings": {
+        "checkout_s": 1.8,
+        "pip_s": 13.78,
+        "prompt_exec_s": 131.85,
+        "server_start_s": 11.08
+      },
+      "vram_peak_mb": 22059.6,
+      "rss_peak_mb": 34429.6,
+      "comfy_version": "0.39.0",
+      "torch_version": "2.11.0+cu128",
+      "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+      "prior_verdict": "pass",
+      "prior_commit": "0df64eb242b7c5759c3e86afd5d1846d923b1033"
+    },
+    "sdxl_t2i": {
+      "workflow_id": "sdxl_t2i",
+      "worker_status": "ok",
+      "verdict": "pass",
+      "detail": null,
+      "vs_golden": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "vs_previous": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "thresholds_used": {
+        "max_mean_mse": 2.0,
+        "min_mean_psnr_db": 45.0,
+        "max_pct_pixels_changed": 1.0
+      },
+      "golden_tag": "v0.33.2",
+      "previous_commit": "0df64eb242b7c5759c3e86afd5d1846d923b1033",
+      "previous_verdict": "pass",
+      "figures": false,
+      "output_sha256": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+      "thumbnail": "sdxl_t2i_00001_.webp",
+      "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+      "timings": {
+        "checkout_s": 1.42,
+        "pip_s": 8.61,
+        "prompt_exec_s": 38.07,
+        "server_start_s": 6.22
+      },
+      "vram_peak_mb": 8159.6,
+      "rss_peak_mb": 8920.2,
+      "comfy_version": "0.39.0",
+      "torch_version": "2.11.0+cu128",
+      "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+      "prior_verdict": "pass",
+      "prior_commit": "0df64eb242b7c5759c3e86afd5d1846d923b1033"
+    }
+  }
+}
