@@ -5,6 +5,58 @@
   "shard": "2026-10",
   "entries": [
     {
+      "c": "81100cd83612317fa0cc9edbbcab1b7e2efca986",
+      "t": 1791747673,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.39.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Keep linked repository findings focused (#16920)",
+        "a": "christian-byrne",
+        "pr": 16920,
+        "ct": 1791746340,
+        "pt": "Keep linked repository findings focused",
+        "pa": "christian-byrne",
+        "av": "https://avatars.githubusercontent.com/u/72887196?v=4"
+      },
+      "prev": "7f7fd918ed0815c5d5ef2ccfe44bfc8e72cfd217",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/7f7fd918ed0815c5d5ef2ccfe44bfc8e72cfd217...81100cd83612317fa0cc9edbbcab1b7e2efca986"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 137.68,
+          "vram": 21451.6,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 39.23,
+          "vram": 8159.5,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
+    {
       "c": "7f7fd918ed0815c5d5ef2ccfe44bfc8e72cfd217",
       "t": 1791668544,
       "o": "pass",
