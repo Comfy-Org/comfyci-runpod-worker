@@ -5,6 +5,58 @@
   "shard": "2026-10",
   "entries": [
     {
+      "c": "14c553159994b626738c392eb99d295ea3d683c1",
+      "t": 1791834193,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.39.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Turn the assets system on for the Windows standalone build (#16928)",
+        "a": "synap5e",
+        "pr": 16928,
+        "ct": 1791832825,
+        "pt": "Turn the assets system on for the Windows standalone build",
+        "pa": "synap5e",
+        "av": "https://avatars.githubusercontent.com/u/2515062?v=4"
+      },
+      "prev": "0ebee95bbbdd1c5c983ab46a6a4af1e304b8a744",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/0ebee95bbbdd1c5c983ab46a6a4af1e304b8a744...14c553159994b626738c392eb99d295ea3d683c1"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 137.34,
+          "vram": 22019.5,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 50.98,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
+    {
       "c": "0ebee95bbbdd1c5c983ab46a6a4af1e304b8a744",
       "t": 1791832522,
       "o": "pass",
