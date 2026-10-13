@@ -6,7 +6,7 @@
   "entries": [
     {
       "c": "e0a32bce84f4603f2b61b16b50f8958e68fd6171",
-      "t": 1791923618,
+      "t": 1791925056,
       "o": "fail",
       "infra": false,
       "cv": null,
@@ -48,8 +48,8 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 37.16,
-          "vram": 8159.5,
+          "exec": 44.94,
+          "vram": 8159.6,
           "g": "v0.33.2",
           "th": "sdxl_t2i_00001_.webp"
         }
