@@ -5,6 +5,58 @@
   "shard": "2026-10",
   "entries": [
     {
+      "c": "7bf5df9e38763dbdd94a0f9c939273019025c2bc",
+      "t": 1791915846,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.39.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Bump comfyui-frontend-package to 1.55.17 (#17004)",
+        "a": "AustinMroz",
+        "pr": 17004,
+        "ct": 1791915184,
+        "pt": "Bump comfyui-frontend-package to 1.55.17",
+        "pa": "AustinMroz",
+        "av": "https://avatars.githubusercontent.com/u/4284322?v=4"
+      },
+      "prev": "12081cf9b8cb2c8128e32f689aabc8ac4688fde7",
+      "range": {
+        "n": 3,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/12081cf9b8cb2c8128e32f689aabc8ac4688fde7...7bf5df9e38763dbdd94a0f9c939273019025c2bc"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 117.5,
+          "vram": 21795.5,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 37.2,
+          "vram": 8159.5,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
+    {
       "c": "c21e54799841a3ce634d07bc4b3f93cdcee86911",
       "t": 1791914240,
       "o": "fail",
