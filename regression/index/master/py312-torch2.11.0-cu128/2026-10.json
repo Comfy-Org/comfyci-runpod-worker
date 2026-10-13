@@ -5,6 +5,58 @@
   "shard": "2026-10",
   "entries": [
     {
+      "c": "e0a32bce84f4603f2b61b16b50f8958e68fd6171",
+      "t": 1791923618,
+      "o": "fail",
+      "infra": false,
+      "cv": null,
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Add a core route for the default workflow (#16956)",
+        "a": "alexisrolland",
+        "pr": 16956,
+        "ct": 1791920456,
+        "pt": "feat: Add a core route for the default workflow (CORE-340)",
+        "pa": "alexisrolland",
+        "av": "https://avatars.githubusercontent.com/u/13064696?v=4"
+      },
+      "prev": "1b64c0407d637ab9552380c55b1643bb576be7fa",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/1b64c0407d637ab9552380c55b1643bb576be7fa...e0a32bce84f4603f2b61b16b50f8958e68fd6171"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "execution_error",
+          "d": null,
+          "sha": null,
+          "mse": null,
+          "psnr": null,
+          "pct": null,
+          "pv": null,
+          "exec": null,
+          "vram": null,
+          "g": null,
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 37.16,
+          "vram": 8159.5,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
+    {
       "c": "1b64c0407d637ab9552380c55b1643bb576be7fa",
       "t": 1791920569,
       "o": "pass",
