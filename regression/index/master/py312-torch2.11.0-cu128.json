@@ -3,20 +3,72 @@
   "branch": "master",
   "lane": "py312-torch2.11.0-cu128",
   "layout": 1,
-  "generated_ts": 1791915846,
-  "count": 279,
+  "generated_ts": 1791920570,
+  "count": 280,
   "shards": [
     "2026-08",
     "2026-09",
     "2026-10"
   ],
   "latest": {
-    "commit": "7bf5df9e38763dbdd94a0f9c939273019025c2bc",
-    "run_ts": 1791915846,
+    "commit": "1b64c0407d637ab9552380c55b1643bb576be7fa",
+    "run_ts": 1791920569,
     "overall": "pass"
   },
   "first_bad": {},
   "entries": [
+    {
+      "c": "1b64c0407d637ab9552380c55b1643bb576be7fa",
+      "t": 1791920569,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.40.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Add ImageSDRToHDR node. (#16990)",
+        "a": "comfyanonymous",
+        "pr": 16990,
+        "ct": 1791919598,
+        "pt": "Add ImageSDRToHDR node.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
+      },
+      "prev": "7bf5df9e38763dbdd94a0f9c939273019025c2bc",
+      "range": {
+        "n": 2,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/7bf5df9e38763dbdd94a0f9c939273019025c2bc...1b64c0407d637ab9552380c55b1643bb576be7fa"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 117.46,
+          "vram": 22083.5,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 37.06,
+          "vram": 8159.5,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
     {
       "c": "7bf5df9e38763dbdd94a0f9c939273019025c2bc",
       "t": 1791915846,
