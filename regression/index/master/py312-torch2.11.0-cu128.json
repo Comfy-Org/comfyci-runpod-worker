@@ -3,7 +3,7 @@
   "branch": "master",
   "lane": "py312-torch2.11.0-cu128",
   "layout": 1,
-  "generated_ts": 1791926509,
+  "generated_ts": 1791927596,
   "count": 281,
   "shards": [
     "2026-08",
@@ -12,26 +12,15 @@
   ],
   "latest": {
     "commit": "e0a32bce84f4603f2b61b16b50f8958e68fd6171",
-    "run_ts": 1791926508,
-    "overall": "fail"
+    "run_ts": 1791927595,
+    "overall": "pass"
   },
-  "first_bad": {
-    "sdxl_t2i": {
-      "commit": "e0a32bce84f4603f2b61b16b50f8958e68fd6171",
-      "run_ts": 1791926508,
-      "kind": "execution_error",
-      "prev_good": "1b64c0407d637ab9552380c55b1643bb576be7fa",
-      "pr": 16956,
-      "author": "alexisrolland",
-      "golden": null,
-      "runs": 1
-    }
-  },
+  "first_bad": {},
   "entries": [
     {
       "c": "e0a32bce84f4603f2b61b16b50f8958e68fd6171",
-      "t": 1791926508,
-      "o": "fail",
+      "t": 1791927595,
+      "o": "pass",
       "infra": false,
       "cv": "0.40.0",
       "lane": "py312-torch2.11.0-cu128",
@@ -59,23 +48,23 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 116.07,
-          "vram": 21923.5,
+          "exec": 116.52,
+          "vram": 22019.5,
           "g": "v0.38.0",
           "th": "flux_dev_t2i_00001_.webp"
         },
         "sdxl_t2i": {
-          "v": "execution_error",
+          "v": "pass",
           "d": null,
-          "sha": null,
-          "mse": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
           "psnr": null,
-          "pct": null,
-          "pv": null,
-          "exec": null,
-          "vram": null,
-          "g": null,
-          "th": null
+          "pct": 0.0,
+          "pv": true,
+          "exec": 39.6,
+          "vram": 8157.6,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
         }
       },
       "s": null
