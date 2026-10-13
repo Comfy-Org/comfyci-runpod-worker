@@ -1,0 +1,113 @@
+{
+  "schema_version": 2,
+  "branch": "master",
+  "commit": "c21e54799841a3ce634d07bc4b3f93cdcee86911",
+  "run_ts": 1791914240,
+  "overall": "fail",
+  "has_infra_error": false,
+  "lane": "py312-torch2.11.0-cu128",
+  "commit_meta": {
+    "subject": "Update workflow templates to v0.11.82 (#17001)",
+    "author": "comfyui-wiki",
+    "committed_ts": 1791913023,
+    "parents": [
+      "8b1a8a3cd54672a8f628ea6f0acd52791e55b9df"
+    ],
+    "pr": 17001,
+    "pr_title": "Update workflow templates to v0.11.82",
+    "pr_author": "comfyui-wiki",
+    "pr_avatar": "https://avatars.githubusercontent.com/u/192523189?v=4",
+    "pr_labels": [],
+    "pr_merged_at": 1791913024,
+    "pr_url": "https://github.com/Comfy-Org/ComfyUI/pull/17001"
+  },
+  "tested_range": {
+    "prev": "12081cf9b8cb2c8128e32f689aabc8ac4688fde7",
+    "commits_between": 2,
+    "compare_url": "https://github.com/Comfy-Org/ComfyUI/compare/12081cf9b8cb2c8128e32f689aabc8ac4688fde7...c21e54799841a3ce634d07bc4b3f93cdcee86911"
+  },
+  "workflows": {
+    "flux_dev_t2i": {
+      "workflow_id": "flux_dev_t2i",
+      "worker_status": "timeout",
+      "verdict": "execution_error",
+      "detail": null,
+      "vs_golden": null,
+      "vs_previous": null,
+      "thresholds_used": null,
+      "golden_tag": null,
+      "previous_commit": null,
+      "previous_verdict": null,
+      "figures": false,
+      "output_sha256": null,
+      "thumbnail": null,
+      "gpu_name": null,
+      "timings": {
+        "checkout_s": 2.05,
+        "pip_s": 16.41
+      },
+      "vram_peak_mb": null,
+      "rss_peak_mb": null,
+      "comfy_version": null,
+      "torch_version": null,
+      "python_version": null,
+      "prior_verdict": "pass",
+      "prior_commit": "12081cf9b8cb2c8128e32f689aabc8ac4688fde7"
+    },
+    "sdxl_t2i": {
+      "workflow_id": "sdxl_t2i",
+      "worker_status": "ok",
+      "verdict": "pass",
+      "detail": null,
+      "vs_golden": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "vs_previous": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "thresholds_used": {
+        "max_mean_mse": 2.0,
+        "min_mean_psnr_db": 45.0,
+        "max_pct_pixels_changed": 1.0
+      },
+      "golden_tag": "v0.33.2",
+      "previous_commit": "12081cf9b8cb2c8128e32f689aabc8ac4688fde7",
+      "previous_verdict": "pass",
+      "figures": false,
+      "output_sha256": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+      "thumbnail": "sdxl_t2i_00001_.webp",
+      "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+      "timings": {
+        "checkout_s": 3.32,
+        "pip_s": 24.17,
+        "prompt_exec_s": 48.56,
+        "server_start_s": 12.28
+      },
+      "vram_peak_mb": 8159.6,
+      "rss_peak_mb": 8917.5,
+      "comfy_version": "0.39.0",
+      "torch_version": "2.11.0+cu128",
+      "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+      "prior_verdict": "pass",
+      "prior_commit": "12081cf9b8cb2c8128e32f689aabc8ac4688fde7"
+    }
+  }
+}

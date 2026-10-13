@@ -3,20 +3,83 @@
   "branch": "master",
   "lane": "py312-torch2.11.0-cu128",
   "layout": 1,
-  "generated_ts": 1791908438,
-  "count": 277,
+  "generated_ts": 1791914240,
+  "count": 278,
   "shards": [
     "2026-08",
     "2026-09",
     "2026-10"
   ],
   "latest": {
-    "commit": "12081cf9b8cb2c8128e32f689aabc8ac4688fde7",
-    "run_ts": 1791908438,
-    "overall": "pass"
+    "commit": "c21e54799841a3ce634d07bc4b3f93cdcee86911",
+    "run_ts": 1791914240,
+    "overall": "fail"
   },
-  "first_bad": {},
+  "first_bad": {
+    "flux_dev_t2i": {
+      "commit": "c21e54799841a3ce634d07bc4b3f93cdcee86911",
+      "run_ts": 1791914240,
+      "kind": "execution_error",
+      "prev_good": "12081cf9b8cb2c8128e32f689aabc8ac4688fde7",
+      "pr": 17001,
+      "author": "comfyui-wiki",
+      "golden": null,
+      "runs": 1
+    }
+  },
   "entries": [
+    {
+      "c": "c21e54799841a3ce634d07bc4b3f93cdcee86911",
+      "t": 1791914240,
+      "o": "fail",
+      "infra": false,
+      "cv": null,
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Update workflow templates to v0.11.82 (#17001)",
+        "a": "comfyui-wiki",
+        "pr": 17001,
+        "ct": 1791913023,
+        "pt": "Update workflow templates to v0.11.82",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
+      },
+      "prev": "12081cf9b8cb2c8128e32f689aabc8ac4688fde7",
+      "range": {
+        "n": 2,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/12081cf9b8cb2c8128e32f689aabc8ac4688fde7...c21e54799841a3ce634d07bc4b3f93cdcee86911"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "execution_error",
+          "d": null,
+          "sha": null,
+          "mse": null,
+          "psnr": null,
+          "pct": null,
+          "pv": null,
+          "exec": null,
+          "vram": null,
+          "g": null,
+          "th": null
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 48.56,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
     {
       "c": "12081cf9b8cb2c8128e32f689aabc8ac4688fde7",
       "t": 1791908438,

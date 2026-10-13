@@ -1,0 +1,22 @@
+{
+  "status": "timeout",
+  "error": null,
+  "comfy_version": null,
+  "torch_version": null,
+  "python_version": null,
+  "gpu_name": null,
+  "vram_peak_mb": null,
+  "rss_peak_mb": null,
+  "validation": null,
+  "timings": {
+    "checkout_s": 2.05,
+    "pip_s": 16.41
+  },
+  "commit_checked_out": "c21e54799841a3ce634d07bc4b3f93cdcee86911",
+  "runpod_job_id": "2143be09-2822-4a08-8778-06ca638e5e41-u1",
+  "attempt": 1,
+  "delay_ms": 23653,
+  "delay_s": 23.653,
+  "execution_ms": 930073,
+  "outputs": []
+}
