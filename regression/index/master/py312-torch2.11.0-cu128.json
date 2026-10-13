@@ -3,20 +3,72 @@
   "branch": "master",
   "lane": "py312-torch2.11.0-cu128",
   "layout": 1,
-  "generated_ts": 1791848636,
-  "count": 273,
+  "generated_ts": 1791852398,
+  "count": 274,
   "shards": [
     "2026-08",
     "2026-09",
     "2026-10"
   ],
   "latest": {
-    "commit": "d0ef06b6f6a5a6d9c5e861a438ae2eb4acf0aaaa",
-    "run_ts": 1791848635,
+    "commit": "06c67806bcb36789a1e8e1278c6a764b389ff858",
+    "run_ts": 1791852398,
     "overall": "pass"
   },
   "first_bad": {},
   "entries": [
+    {
+      "c": "06c67806bcb36789a1e8e1278c6a764b389ff858",
+      "t": 1791852398,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.39.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Remove the cryptography package dependency. (#16988)",
+        "a": "comfyanonymous",
+        "pr": 16988,
+        "ct": 1791849818,
+        "pt": "Remove the cryptography package dependency.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
+      },
+      "prev": "d0ef06b6f6a5a6d9c5e861a438ae2eb4acf0aaaa",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/d0ef06b6f6a5a6d9c5e861a438ae2eb4acf0aaaa...06c67806bcb36789a1e8e1278c6a764b389ff858"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 120.3,
+          "vram": 21635.5,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 47.85,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
     {
       "c": "d0ef06b6f6a5a6d9c5e861a438ae2eb4acf0aaaa",
       "t": 1791848635,
