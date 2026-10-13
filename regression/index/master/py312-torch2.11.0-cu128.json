@@ -3,20 +3,72 @@
   "branch": "master",
   "lane": "py312-torch2.11.0-cu128",
   "layout": 1,
-  "generated_ts": 1791875261,
-  "count": 276,
+  "generated_ts": 1791908438,
+  "count": 277,
   "shards": [
     "2026-08",
     "2026-09",
     "2026-10"
   ],
   "latest": {
-    "commit": "8010b48d2c1be986613f8e8c761527d205bd756f",
-    "run_ts": 1791875260,
+    "commit": "12081cf9b8cb2c8128e32f689aabc8ac4688fde7",
+    "run_ts": 1791908438,
     "overall": "pass"
   },
   "first_bad": {},
   "entries": [
+    {
+      "c": "12081cf9b8cb2c8128e32f689aabc8ac4688fde7",
+      "t": 1791908438,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.39.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "feat(assets): previews for EXR assets, written by SaveImageAdvanced for outputs (#16898)",
+        "a": "synap5e",
+        "pr": 16898,
+        "ct": 1791906411,
+        "pt": "feat(assets): previews for EXR assets, written by SaveImageAdvanced for outputs",
+        "pa": "synap5e",
+        "av": "https://avatars.githubusercontent.com/u/2515062?v=4"
+      },
+      "prev": "8010b48d2c1be986613f8e8c761527d205bd756f",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/8010b48d2c1be986613f8e8c761527d205bd756f...12081cf9b8cb2c8128e32f689aabc8ac4688fde7"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 142.61,
+          "vram": 22059.6,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 45.12,
+          "vram": 8157.6,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
     {
       "c": "8010b48d2c1be986613f8e8c761527d205bd756f",
       "t": 1791875260,
