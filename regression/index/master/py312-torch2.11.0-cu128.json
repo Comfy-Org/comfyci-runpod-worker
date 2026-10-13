@@ -3,20 +3,72 @@
   "branch": "master",
   "lane": "py312-torch2.11.0-cu128",
   "layout": 1,
-  "generated_ts": 1791863763,
-  "count": 275,
+  "generated_ts": 1791875261,
+  "count": 276,
   "shards": [
     "2026-08",
     "2026-09",
     "2026-10"
   ],
   "latest": {
-    "commit": "f9c6185d1acc05e0a01166567c8e292c23e8bd2f",
-    "run_ts": 1791863763,
+    "commit": "8010b48d2c1be986613f8e8c761527d205bd756f",
+    "run_ts": 1791875260,
     "overall": "pass"
   },
   "first_bad": {},
   "entries": [
+    {
+      "c": "8010b48d2c1be986613f8e8c761527d205bd756f",
+      "t": 1791875260,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.39.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "[Partner Nodes] feat(Higgsfield): add Genjutsu Motion Transfer node (#16913)",
+        "a": "bigcat88",
+        "pr": 16913,
+        "ct": 1791872946,
+        "pt": "[Partner Nodes] feat(Higgsfield): Genjutsu Motion Transfer node",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
+      },
+      "prev": "f9c6185d1acc05e0a01166567c8e292c23e8bd2f",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/f9c6185d1acc05e0a01166567c8e292c23e8bd2f...8010b48d2c1be986613f8e8c761527d205bd756f"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 136.01,
+          "vram": 20491.6,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 38.72,
+          "vram": 8159.5,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
     {
       "c": "f9c6185d1acc05e0a01166567c8e292c23e8bd2f",
       "t": 1791863763,
