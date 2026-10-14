@@ -5,6 +5,58 @@
   "shard": "2026-10",
   "entries": [
     {
+      "c": "b60ae8ec08fad21dd6a4efa9cc82c6d11cc69cca",
+      "t": 1792021178,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.40.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Disable the LoRA stack nodes until the frontend supports DynamicGroup (#17050)",
+        "a": "jaeone94",
+        "pr": 17050,
+        "ct": 1792020416,
+        "pt": "Disable the LoRA stack nodes until the frontend supports DynamicGroup",
+        "pa": "jaeone94",
+        "av": "https://avatars.githubusercontent.com/u/89377375?v=4"
+      },
+      "prev": "6da3d1a5f5125656a4194a5ac0cef07341d44a83",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/6da3d1a5f5125656a4194a5ac0cef07341d44a83...b60ae8ec08fad21dd6a4efa9cc82c6d11cc69cca"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 119.56,
+          "vram": 21589.6,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 44.47,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
+    {
       "c": "6da3d1a5f5125656a4194a5ac0cef07341d44a83",
       "t": 1792010621,
       "o": "pass",
