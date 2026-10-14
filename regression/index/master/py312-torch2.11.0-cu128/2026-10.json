@@ -5,6 +5,58 @@
   "shard": "2026-10",
   "entries": [
     {
+      "c": "6da3d1a5f5125656a4194a5ac0cef07341d44a83",
+      "t": 1792010621,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.40.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Add ReferenceMultiLatent node. (#17009)",
+        "a": "comfyanonymous",
+        "pr": 17009,
+        "ct": 1792010179,
+        "pt": "Add ReferenceMultiLatent node.",
+        "pa": "comfyanonymous",
+        "av": "https://avatars.githubusercontent.com/u/121283862?v=4"
+      },
+      "prev": "e0a32bce84f4603f2b61b16b50f8958e68fd6171",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/e0a32bce84f4603f2b61b16b50f8958e68fd6171...6da3d1a5f5125656a4194a5ac0cef07341d44a83"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 112.34,
+          "vram": 21187.5,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 59.5,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
+    {
       "c": "e0a32bce84f4603f2b61b16b50f8958e68fd6171",
       "t": 1791927595,
       "o": "pass",
