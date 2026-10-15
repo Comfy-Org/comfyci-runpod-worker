@@ -3,20 +3,72 @@
   "branch": "master",
   "lane": "py312-torch2.11.0-cu128",
   "layout": 1,
-  "generated_ts": 1792027537,
-  "count": 284,
+  "generated_ts": 1792079108,
+  "count": 285,
   "shards": [
     "2026-08",
     "2026-09",
     "2026-10"
   ],
   "latest": {
-    "commit": "ba994879b88d0ebd9950b1e5c1e923d928f216ba",
-    "run_ts": 1792027537,
+    "commit": "20b46065ef7f34fa21e8abebe8d0cca90a904d6d",
+    "run_ts": 1792079107,
     "overall": "pass"
   },
   "first_bad": {},
   "entries": [
+    {
+      "c": "20b46065ef7f34fa21e8abebe8d0cca90a904d6d",
+      "t": 1792079107,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.40.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Support Flux3-image (#17064)",
+        "a": "kijai",
+        "pr": 17064,
+        "ct": 1792077927,
+        "pt": "feat: Add Flux3-image model support (CORE-388)",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
+      },
+      "prev": "ba994879b88d0ebd9950b1e5c1e923d928f216ba",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/ba994879b88d0ebd9950b1e5c1e923d928f216ba...20b46065ef7f34fa21e8abebe8d0cca90a904d6d"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 131.76,
+          "vram": 22059.6,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 39.43,
+          "vram": 8145.6,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
     {
       "c": "ba994879b88d0ebd9950b1e5c1e923d928f216ba",
       "t": 1792027537,
