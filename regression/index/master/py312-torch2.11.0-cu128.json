@@ -3,20 +3,72 @@
   "branch": "master",
   "lane": "py312-torch2.11.0-cu128",
   "layout": 1,
-  "generated_ts": 1792021178,
-  "count": 283,
+  "generated_ts": 1792027537,
+  "count": 284,
   "shards": [
     "2026-08",
     "2026-09",
     "2026-10"
   ],
   "latest": {
-    "commit": "b60ae8ec08fad21dd6a4efa9cc82c6d11cc69cca",
-    "run_ts": 1792021178,
+    "commit": "ba994879b88d0ebd9950b1e5c1e923d928f216ba",
+    "run_ts": 1792027537,
     "overall": "pass"
   },
   "first_bad": {},
   "entries": [
+    {
+      "c": "ba994879b88d0ebd9950b1e5c1e923d928f216ba",
+      "t": 1792027537,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.40.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Add nodes to get Latent Geometries (#16093)",
+        "a": "rattus128",
+        "pr": 16093,
+        "ct": 1792025114,
+        "pt": "Add nodes to get Latent Geometries",
+        "pa": "rattus128",
+        "av": "https://avatars.githubusercontent.com/u/46076784?v=4"
+      },
+      "prev": "b60ae8ec08fad21dd6a4efa9cc82c6d11cc69cca",
+      "range": {
+        "n": 4,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/b60ae8ec08fad21dd6a4efa9cc82c6d11cc69cca...ba994879b88d0ebd9950b1e5c1e923d928f216ba"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 129.42,
+          "vram": 22059.6,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 45.76,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
     {
       "c": "b60ae8ec08fad21dd6a4efa9cc82c6d11cc69cca",
       "t": 1792021178,

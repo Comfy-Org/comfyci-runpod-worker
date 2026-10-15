@@ -1,0 +1,141 @@
+{
+  "schema_version": 2,
+  "branch": "master",
+  "commit": "ba994879b88d0ebd9950b1e5c1e923d928f216ba",
+  "run_ts": 1792027537,
+  "overall": "pass",
+  "has_infra_error": false,
+  "lane": "py312-torch2.11.0-cu128",
+  "commit_meta": {
+    "subject": "Add nodes to get Latent Geometries (#16093)",
+    "author": "rattus128",
+    "committed_ts": 1792025114,
+    "parents": [
+      "1d9cec9e8cab32f26360254031c967d25e3fbc6b"
+    ],
+    "pr": 16093,
+    "pr_title": "Add nodes to get Latent Geometries",
+    "pr_author": "rattus128",
+    "pr_avatar": "https://avatars.githubusercontent.com/u/46076784?v=4",
+    "pr_labels": [],
+    "pr_merged_at": 1792025114,
+    "pr_url": "https://github.com/Comfy-Org/ComfyUI/pull/16093"
+  },
+  "tested_range": {
+    "prev": "b60ae8ec08fad21dd6a4efa9cc82c6d11cc69cca",
+    "commits_between": 4,
+    "compare_url": "https://github.com/Comfy-Org/ComfyUI/compare/b60ae8ec08fad21dd6a4efa9cc82c6d11cc69cca...ba994879b88d0ebd9950b1e5c1e923d928f216ba"
+  },
+  "workflows": {
+    "flux_dev_t2i": {
+      "workflow_id": "flux_dev_t2i",
+      "worker_status": "ok",
+      "verdict": "pass",
+      "detail": null,
+      "vs_golden": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "vs_previous": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "thresholds_used": {
+        "max_mean_mse": 2.0,
+        "min_mean_psnr_db": 45.0,
+        "max_pct_pixels_changed": 1.0
+      },
+      "golden_tag": "v0.38.0",
+      "previous_commit": "b60ae8ec08fad21dd6a4efa9cc82c6d11cc69cca",
+      "previous_verdict": "pass",
+      "figures": false,
+      "output_sha256": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+      "thumbnail": "flux_dev_t2i_00001_.webp",
+      "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+      "timings": {
+        "checkout_s": 2.06,
+        "pip_s": 17.04,
+        "prompt_exec_s": 129.42,
+        "server_start_s": 12.02
+      },
+      "vram_peak_mb": 22059.6,
+      "rss_peak_mb": 34416.9,
+      "comfy_version": "0.40.0",
+      "torch_version": "2.11.0+cu128",
+      "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+      "prior_verdict": "pass",
+      "prior_commit": "b60ae8ec08fad21dd6a4efa9cc82c6d11cc69cca"
+    },
+    "sdxl_t2i": {
+      "workflow_id": "sdxl_t2i",
+      "worker_status": "ok",
+      "verdict": "pass",
+      "detail": null,
+      "vs_golden": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "vs_previous": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "thresholds_used": {
+        "max_mean_mse": 2.0,
+        "min_mean_psnr_db": 45.0,
+        "max_pct_pixels_changed": 1.0
+      },
+      "golden_tag": "v0.33.2",
+      "previous_commit": "b60ae8ec08fad21dd6a4efa9cc82c6d11cc69cca",
+      "previous_verdict": "pass",
+      "figures": false,
+      "output_sha256": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+      "thumbnail": "sdxl_t2i_00001_.webp",
+      "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+      "timings": {
+        "checkout_s": 1.91,
+        "pip_s": 16.88,
+        "prompt_exec_s": 45.76,
+        "server_start_s": 12.09
+      },
+      "vram_peak_mb": 8159.6,
+      "rss_peak_mb": 8919.5,
+      "comfy_version": "0.40.0",
+      "torch_version": "2.11.0+cu128",
+      "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+      "prior_verdict": "pass",
+      "prior_commit": "b60ae8ec08fad21dd6a4efa9cc82c6d11cc69cca"
+    }
+  }
+}
