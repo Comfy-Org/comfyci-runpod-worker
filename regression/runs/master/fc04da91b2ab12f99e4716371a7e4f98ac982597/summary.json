@@ -1,0 +1,141 @@
+{
+  "schema_version": 2,
+  "branch": "master",
+  "commit": "fc04da91b2ab12f99e4716371a7e4f98ac982597",
+  "run_ts": 1792178048,
+  "overall": "pass",
+  "has_infra_error": false,
+  "lane": "py312-torch2.11.0-cu128",
+  "commit_meta": {
+    "subject": "[Partner Nodes] chore(Quiver): remove retired Arrow 1.x models (#17102)",
+    "author": "bigcat88",
+    "committed_ts": 1792177639,
+    "parents": [
+      "e087d8f6cb7c6cdb11b59dc7c9bf17c79f8d877d"
+    ],
+    "pr": 17102,
+    "pr_title": "[Partner Nodes] chore(Quiver): remove retired Arrow 1.x models",
+    "pr_author": "bigcat88",
+    "pr_avatar": "https://avatars.githubusercontent.com/u/13381981?v=4",
+    "pr_labels": [],
+    "pr_merged_at": 1792177639,
+    "pr_url": "https://github.com/Comfy-Org/ComfyUI/pull/17102"
+  },
+  "tested_range": {
+    "prev": "e087d8f6cb7c6cdb11b59dc7c9bf17c79f8d877d",
+    "commits_between": 1,
+    "compare_url": "https://github.com/Comfy-Org/ComfyUI/compare/e087d8f6cb7c6cdb11b59dc7c9bf17c79f8d877d...fc04da91b2ab12f99e4716371a7e4f98ac982597"
+  },
+  "workflows": {
+    "flux_dev_t2i": {
+      "workflow_id": "flux_dev_t2i",
+      "worker_status": "ok",
+      "verdict": "pass",
+      "detail": null,
+      "vs_golden": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "vs_previous": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "thresholds_used": {
+        "max_mean_mse": 2.0,
+        "min_mean_psnr_db": 45.0,
+        "max_pct_pixels_changed": 1.0
+      },
+      "golden_tag": "v0.38.0",
+      "previous_commit": "e087d8f6cb7c6cdb11b59dc7c9bf17c79f8d877d",
+      "previous_verdict": "pass",
+      "figures": false,
+      "output_sha256": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+      "thumbnail": "flux_dev_t2i_00001_.webp",
+      "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+      "timings": {
+        "checkout_s": 1.6,
+        "pip_s": 13.94,
+        "prompt_exec_s": 112.9,
+        "server_start_s": 6.62
+      },
+      "vram_peak_mb": 21717.6,
+      "rss_peak_mb": 34421.7,
+      "comfy_version": "0.41.0",
+      "torch_version": "2.11.0+cu128",
+      "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+      "prior_verdict": "pass",
+      "prior_commit": "e087d8f6cb7c6cdb11b59dc7c9bf17c79f8d877d"
+    },
+    "sdxl_t2i": {
+      "workflow_id": "sdxl_t2i",
+      "worker_status": "ok",
+      "verdict": "pass",
+      "detail": null,
+      "vs_golden": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "vs_previous": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "thresholds_used": {
+        "max_mean_mse": 2.0,
+        "min_mean_psnr_db": 45.0,
+        "max_pct_pixels_changed": 1.0
+      },
+      "golden_tag": "v0.33.2",
+      "previous_commit": "e087d8f6cb7c6cdb11b59dc7c9bf17c79f8d877d",
+      "previous_verdict": "pass",
+      "figures": false,
+      "output_sha256": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+      "thumbnail": "sdxl_t2i_00001_.webp",
+      "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+      "timings": {
+        "checkout_s": 0,
+        "pip_s": 0.5,
+        "prompt_exec_s": 38.12,
+        "server_start_s": 4.41
+      },
+      "vram_peak_mb": 8145.6,
+      "rss_peak_mb": 8930,
+      "comfy_version": "0.41.0",
+      "torch_version": "2.11.0+cu128",
+      "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+      "prior_verdict": "pass",
+      "prior_commit": "e087d8f6cb7c6cdb11b59dc7c9bf17c79f8d877d"
+    }
+  }
+}
