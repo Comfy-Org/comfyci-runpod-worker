@@ -5,6 +5,58 @@
   "shard": "2026-10",
   "entries": [
     {
+      "c": "bdc63e72f5ab29fde448c161db3057827148c0ef",
+      "t": 1792125908,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.41.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "chore: update workflow templates to v0.11.86 (#17083)",
+        "a": "comfyui-wiki",
+        "pr": 17083,
+        "ct": 1792124853,
+        "pt": "Update workflow templates to v0.11.86",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
+      },
+      "prev": "5a665890ded5020c282f63c4ea2dd9e083e025ff",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/5a665890ded5020c282f63c4ea2dd9e083e025ff...bdc63e72f5ab29fde448c161db3057827148c0ef"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 118.13,
+          "vram": 22069.6,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 45.74,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
+    {
       "c": "5a665890ded5020c282f63c4ea2dd9e083e025ff",
       "t": 1792113871,
       "o": "pass",
