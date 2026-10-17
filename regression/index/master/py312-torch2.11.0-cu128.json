@@ -3,20 +3,72 @@
   "branch": "master",
   "lane": "py312-torch2.11.0-cu128",
   "layout": 1,
-  "generated_ts": 1792207089,
-  "count": 293,
+  "generated_ts": 1792210674,
+  "count": 294,
   "shards": [
     "2026-08",
     "2026-09",
     "2026-10"
   ],
   "latest": {
-    "commit": "4d7b594592c0c4ff1b95c6dbb5783a308797bd90",
-    "run_ts": 1792207088,
+    "commit": "5cc4b870094c89090db54bd8d12649dcaf89f2ba",
+    "run_ts": 1792210674,
     "overall": "pass"
   },
   "first_bad": {},
   "entries": [
+    {
+      "c": "5cc4b870094c89090db54bd8d12649dcaf89f2ba",
+      "t": 1792210674,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.41.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "chore: update workflow templates to v0.11.87 (#17110)",
+        "a": "comfyui-wiki",
+        "pr": 17110,
+        "ct": 1792208606,
+        "pt": "Update workflow templates to v0.11.87",
+        "pa": "comfyui-wiki",
+        "av": "https://avatars.githubusercontent.com/u/192523189?v=4"
+      },
+      "prev": "4d7b594592c0c4ff1b95c6dbb5783a308797bd90",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/4d7b594592c0c4ff1b95c6dbb5783a308797bd90...5cc4b870094c89090db54bd8d12649dcaf89f2ba"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 129.39,
+          "vram": 21737.6,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 35.32,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
     {
       "c": "4d7b594592c0c4ff1b95c6dbb5783a308797bd90",
       "t": 1792207088,
