@@ -3,20 +3,72 @@
   "branch": "master",
   "lane": "py312-torch2.11.0-cu128",
   "layout": 1,
-  "generated_ts": 1792205155,
-  "count": 292,
+  "generated_ts": 1792207089,
+  "count": 293,
   "shards": [
     "2026-08",
     "2026-09",
     "2026-10"
   ],
   "latest": {
-    "commit": "a639f187a9f6abfecbda9673034f2045148b6d85",
-    "run_ts": 1792205154,
+    "commit": "4d7b594592c0c4ff1b95c6dbb5783a308797bd90",
+    "run_ts": 1792207088,
     "overall": "pass"
   },
   "first_bad": {},
   "entries": [
+    {
+      "c": "4d7b594592c0c4ff1b95c6dbb5783a308797bd90",
+      "t": 1792207088,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.41.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Performance improvements for qwen 3.x (Part 2) (#17007)",
+        "a": "rattus128",
+        "pr": 17007,
+        "ct": 1792206386,
+        "pt": "Performance improvements for qwen 3.x (Part 2)",
+        "pa": "rattus128",
+        "av": "https://avatars.githubusercontent.com/u/46076784?v=4"
+      },
+      "prev": "a639f187a9f6abfecbda9673034f2045148b6d85",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/a639f187a9f6abfecbda9673034f2045148b6d85...4d7b594592c0c4ff1b95c6dbb5783a308797bd90"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 121.73,
+          "vram": 22059.6,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 43.43,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
     {
       "c": "a639f187a9f6abfecbda9673034f2045148b6d85",
       "t": 1792205154,
