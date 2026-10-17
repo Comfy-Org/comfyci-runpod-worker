@@ -3,20 +3,72 @@
   "branch": "master",
   "lane": "py312-torch2.11.0-cu128",
   "layout": 1,
-  "generated_ts": 1792178049,
-  "count": 291,
+  "generated_ts": 1792205155,
+  "count": 292,
   "shards": [
     "2026-08",
     "2026-09",
     "2026-10"
   ],
   "latest": {
-    "commit": "fc04da91b2ab12f99e4716371a7e4f98ac982597",
-    "run_ts": 1792178048,
+    "commit": "a639f187a9f6abfecbda9673034f2045148b6d85",
+    "run_ts": 1792205154,
     "overall": "pass"
   },
   "first_bad": {},
   "entries": [
+    {
+      "c": "a639f187a9f6abfecbda9673034f2045148b6d85",
+      "t": 1792205154,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.41.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Use fused situ with MOSS-image (#17099)",
+        "a": "kijai",
+        "pr": 17099,
+        "ct": 1792203672,
+        "pt": "Use fused situ with MOSS-image",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
+      },
+      "prev": "fc04da91b2ab12f99e4716371a7e4f98ac982597",
+      "range": {
+        "n": 2,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/fc04da91b2ab12f99e4716371a7e4f98ac982597...a639f187a9f6abfecbda9673034f2045148b6d85"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 125.56,
+          "vram": 21867.6,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 44.18,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
     {
       "c": "fc04da91b2ab12f99e4716371a7e4f98ac982597",
       "t": 1792178048,
