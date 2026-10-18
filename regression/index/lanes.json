@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_ts": 1792359535,
+  "generated_ts": 1792362369,
   "primary": "py312-torch2.11.0-cu128",
   "lanes": {
     "py312-torch2.11.0-cu128": {
@@ -36,6 +36,18 @@
         "sdxl_t2i": {
           "tag": "v0.33.2",
           "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260"
+        },
+        "krea2_turbo_t2i": {
+          "tag": "v0.42.0",
+          "sha": "aee96126190a3f72e4716baa1ca98338fa1ddc3a5d6d839f525551e9f2b50350"
+        },
+        "qwen_image_2_1_edit": {
+          "tag": "v0.42.0",
+          "sha": "7ed110b317b4e4b0a4f6b52da86bcd9a4e39eec0689c4e0f404cc9e68782f312"
+        },
+        "z_image_turbo_t2i": {
+          "tag": "v0.42.0",
+          "sha": "d92d0fb9c7af9bc27e3ee1d86c723bf17281f3318dffb47ac48345f6331e1a6f"
         }
       }
     }

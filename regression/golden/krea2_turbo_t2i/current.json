@@ -1,0 +1,10 @@
+{
+  "tag": "v0.42.0",
+  "commit": "355cd6b14c92c19ac3188fe528e47a3f21ef5178",
+  "blessed_by": "marawan206",
+  "blessed_ts": 1792362369,
+  "reason": "First baseline for the three image-model workflows staged in #5. Generated twice at v0.42.0 (run 39171392479) with an identical noise floor; outputs are byte-identical to the v0.39.2 candidates from 2026-10-09, so the 90 commits in between did not move these models.",
+  "supersedes": null,
+  "source": "golden_run",
+  "output_sha256": "aee96126190a3f72e4716baa1ca98338fa1ddc3a5d6d839f525551e9f2b50350"
+}
