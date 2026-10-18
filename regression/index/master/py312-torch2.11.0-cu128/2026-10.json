@@ -5,6 +5,58 @@
   "shard": "2026-10",
   "entries": [
     {
+      "c": "872eb6a3a5497721f53ebe82c0da9a3ba3414c13",
+      "t": 1792337941,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.41.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "add support for loading embeddings models onto Qwen3.5 (#17159)",
+        "a": "silveroxides",
+        "pr": 17159,
+        "ct": 1792337690,
+        "pt": "add support for loading embeddings models onto Qwen3.5",
+        "pa": "silveroxides",
+        "av": "https://avatars.githubusercontent.com/u/65376327?v=4"
+      },
+      "prev": "6607f36b53c7b695b160ac5b52d595e9e3752a2d",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/6607f36b53c7b695b160ac5b52d595e9e3752a2d...872eb6a3a5497721f53ebe82c0da9a3ba3414c13"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 112.76,
+          "vram": 21507.6,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 44.18,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
+    {
       "c": "6607f36b53c7b695b160ac5b52d595e9e3752a2d",
       "t": 1792330742,
       "o": "pass",
