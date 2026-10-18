@@ -63,7 +63,7 @@
       "golden_tag": null
     },
     "krea2_turbo_t2i": {
-      "enabled": false,
+      "enabled": true,
       "workflow_path": "manifest/workflows/krea2_turbo_t2i_api.json",
       "seed_overrides": {
         "30:3": { "seed": 594361197674106 }
@@ -94,7 +94,7 @@
       "golden_tag": null
     },
     "z_image_turbo_t2i": {
-      "enabled": false,
+      "enabled": true,
       "workflow_path": "manifest/workflows/z_image_turbo_t2i_api.json",
       "seed_overrides": {
         "57:3": { "seed": 0 }
@@ -124,7 +124,7 @@
       "golden_tag": null
     },
     "qwen_image_2_1_edit": {
-      "enabled": false,
+      "enabled": true,
       "workflow_path": "manifest/workflows/qwen_image_2_1_edit_api.json",
       "seed_overrides": {
         "459:458": { "seed": 891836227295375 }
