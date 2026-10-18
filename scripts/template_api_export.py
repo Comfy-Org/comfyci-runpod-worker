@@ -45,8 +45,9 @@ VIRTUAL_VALUE = {"PrimitiveNode"}
 MODE_ALWAYS, MODE_NEVER, MODE_BYPASS = 0, 2, 4
 
 SWITCH_NODE = "ComfySwitchNode"
-# Preview nodes are output nodes, but a corpus run compares saved files; keeping
-# them as roots would pull whole unused branches (and their models) into the run.
+# Preview nodes are real output nodes, kept here so the conversion stays
+# faithful to the frontend's export. Dropping them is a corpus decision, and
+# `import_template.collapse_previews` is where that decision is made.
 PREVIEW_PREFIXES = ("Preview", "SaveImageWebsocket")
 
 OUTPUT_PREFIXES = (
@@ -178,20 +179,28 @@ class FlatGraph:
         }
         self.nodes: dict[str, dict[str, Any]] = {}
         self.instances: dict[str, str] = {}  # flat id -> subgraph uuid
+        # Flat ids of subgraph instances that do not run, so the nodes inside
+        # them are not emitted as if the template had them enabled.
+        self.inactive_instances: set[str] = set()
         self.in_edge: dict[tuple[str, int], tuple[str, int]] = {}
         self._walk(workflow, prefix="")
 
     def _flat(self, prefix: str, node_id: Any) -> str:
         return f"{prefix}{node_id}"
 
-    def _walk(self, graph: dict[str, Any], prefix: str) -> None:
+    def _walk(self, graph: dict[str, Any], prefix: str, inactive: bool = False) -> None:
         for node in graph.get("nodes") or []:
             flat_id = self._flat(prefix, node["id"])
             self.nodes[flat_id] = node
             uuid = node.get("type")
             if uuid in self.subgraphs:
                 self.instances[flat_id] = uuid
-                self._walk(self.subgraphs[uuid], prefix=f"{flat_id}:")
+                within = inactive or node.get("mode") in (MODE_NEVER, MODE_BYPASS)
+                if within:
+                    self.inactive_instances.add(flat_id)
+                self._walk(
+                    self.subgraphs[uuid], prefix=f"{flat_id}:", inactive=within
+                )
 
         for _lid, origin, oslot, target, tslot in _normalise_links(graph):
             self.in_edge[(self._flat(prefix, target), tslot)] = (
@@ -214,6 +223,14 @@ class FlatGraph:
 
     def _subgraph_inputs(self, instance_id: str) -> list[dict[str, Any]]:
         return self.subgraphs[self.instances[instance_id]].get("inputs") or []
+
+    def inside_inactive_instance(self, flat_id: str) -> bool:
+        """Whether a node sits inside a subgraph instance that does not run."""
+        parts = flat_id.split(":")
+        for depth in range(1, len(parts)):
+            if ":".join(parts[:depth]) in self.inactive_instances:
+                return True
+        return False
 
     def _promoted_widget_index(self, instance_id: str, index: int) -> int | None:
         """Position of subgraph input ``index`` in the instance's widget array.
@@ -281,8 +298,18 @@ class FlatGraph:
                 cursor = (instance_id, outer)
                 continue
 
-            if origin_id in self.instances:  # subgraph output boundary, step in
-                cursor = (f"{origin_id}:-20", origin_slot)
+            if origin_id in self.instances:  # subgraph output boundary
+                mode = self.nodes[origin_id].get("mode")
+                if mode == MODE_NEVER:
+                    return None
+                if mode == MODE_BYPASS:
+                    # A bypassed instance forwards like any other node: its
+                    # inner nodes do not run.
+                    cursor = self._bypass_input(origin_id, origin_slot)
+                    if cursor is None:
+                        return None
+                    continue
+                cursor = (f"{origin_id}:-20", origin_slot)  # step in
                 continue
 
             node = self.nodes.get(origin_id)
@@ -343,6 +370,8 @@ class Converter:
         for flat_id, node in graph.nodes.items():
             node_type = node.get("type")
             if flat_id in graph.instances:
+                continue
+            if graph.inside_inactive_instance(flat_id):
                 continue
             if node_type in FRONTEND_ONLY or node_type in PASSTHROUGH:
                 continue
@@ -532,8 +561,6 @@ class Converter:
                 del prompt[node_id]
 
     def _is_output(self, node_type: str) -> bool:
-        if node_type.startswith(PREVIEW_PREFIXES):
-            return False
         if node_type.startswith(OUTPUT_PREFIXES):
             return True
         return bool(self.object_info.get(node_type, {}).get("output_node"))

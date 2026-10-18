@@ -73,6 +73,15 @@ def test_a_plain_save_just_gets_the_workflow_id_as_its_prefix():
     [
         ({"format": "exr", "images": ["8", 0]}, "8-bit PNG"),
         ({"format": "png", "format.bit_depth": "16-bit", "images": ["8", 0]}, "8-bit PNG"),
+        (
+            {
+                "format": "png",
+                "format.bit_depth": "8-bit",
+                "format.input_color_space": "HDR",
+                "images": ["8", 0],
+            },
+            "8-bit PNG",
+        ),
         ({"format": "png", "format.bit_depth": "8-bit"}, "no images input"),
     ],
 )
@@ -109,8 +118,21 @@ def test_each_loaded_file_is_mapped_to_the_models_subdirectory_comfyui_searches(
 
 def test_a_loader_input_with_no_known_directory_is_refused_rather_than_guessed():
     prompt = {"1": {"class_type": "SomeLoader", "inputs": {"mystery_name": "m.safetensors"}}}
-    with pytest.raises(ConversionError, match="DIRECTORY_BY_INPUT"):
+    with pytest.raises(ConversionError, match="DIRECTORY_BY_LOADER_INPUT"):
         loaded_files(prompt)
+
+
+def test_the_same_input_name_on_a_different_loader_gets_its_own_directory():
+    """CLIPLoader.clip_name reads text_encoders/, CLIPVisionLoader.clip_name
+    reads clip_vision/: keying on the name alone would sync one to the other."""
+    prompt = {
+        "1": {"class_type": "CLIPLoader", "inputs": {"clip_name": "t.safetensors"}},
+        "2": {"class_type": "CLIPVisionLoader", "inputs": {"clip_name": "v.safetensors"}},
+    }
+    assert loaded_files(prompt) == {
+        "t.safetensors": "text_encoders",
+        "v.safetensors": "clip_vision",
+    }
 
 
 def test_download_links_are_read_from_notes_at_both_graph_levels():

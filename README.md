@@ -74,7 +74,9 @@ this repo per template.
    It refuses rather than guess. A template whose widget layout lives on the
    node instance, or one that needs custom nodes, has to be exported by hand
    from ComfyUI (**Workflow → Export (API)**) instead; `scripts/tests/test_template_api_export.py`
-   documents which conversion rules are covered.
+   documents which conversion rules are covered. A loader whose models/
+   subdirectory it does not know is also a refusal, not a guess: add the
+   `(class_type, input name)` pair to `DIRECTORY_BY_LOADER_INPUT`.
 
 2. Paste the entry under `workflows` in `manifest/workflows.json` and choose a
    `timeout_s` the model can finish in. Leave `"enabled": false`.

@@ -7,7 +7,7 @@ image for months.
 """
 import pytest
 
-from template_api_export import ConversionError, Converter
+from template_api_export import ConversionError, Converter, FlatGraph
 
 # A node definition set small enough to read, covering every input kind the
 # conversion has to handle.
@@ -369,6 +369,43 @@ def test_a_promoted_widget_wired_from_outside_becomes_a_link():
     prompt = convert(workflow)
     assert prompt["7:3"]["inputs"]["width"] == ["8", 0]
     assert prompt["7:3"]["inputs"]["height"] == 768
+
+
+def test_a_muted_subgraph_instance_does_not_run_the_nodes_inside_it():
+    """Mode lives on the instance, not on its inner nodes: without checking it,
+    a disabled refiner group runs anyway and pulls its models into the entry."""
+    workflow = subgraph_workflow([1024, 768], [])
+    workflow["nodes"][0]["mode"] = 2
+    prompt = convert(workflow)
+    assert sorted(prompt) == ["99"]
+    assert "images" not in prompt["99"]["inputs"]
+
+
+def test_a_bypassed_subgraph_instance_forwards_instead_of_running():
+    workflow = subgraph_workflow(
+        [1024, 768],
+        [{"name": "passthrough", "type": "LATENT", "link": 5}],
+        instance_links=[[5, 8, 0, 7, 0, "LATENT"]],
+    )
+    workflow["nodes"][0]["mode"] = 4
+    workflow["nodes"][0]["outputs"] = [
+        {"name": "LATENT", "type": "LATENT", "links": [1]}
+    ]
+    workflow["nodes"].append(
+        node(8, "KSampler", outputs=[{"name": "LATENT", "type": "LATENT", "links": [5]}])
+    )
+    prompt = convert(workflow)
+    assert "7:3" not in prompt
+    assert prompt["99"]["inputs"]["images"] == ["8", 0]
+
+
+def test_a_node_inside_a_muted_subgraph_instance_is_not_emitted():
+    """Even when something else still references it, the instance's mode wins."""
+    workflow = subgraph_workflow([1024, 768], [])
+    workflow["nodes"][0]["mode"] = 2
+    graph = FlatGraph(workflow)
+    assert graph.inside_inactive_instance("7:3")
+    assert not graph.inside_inactive_instance("99")
 
 
 def test_socket_typed_subgraph_inputs_do_not_consume_a_widget_value():

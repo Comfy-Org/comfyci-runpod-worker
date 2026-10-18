@@ -61,20 +61,35 @@ MODEL_SUFFIXES = (".safetensors", ".sft", ".ckpt", ".pt", ".pth", ".bin", ".gguf
 MARKDOWN_LINK = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
 
 # ComfyUI's models/ subdirectory for each loader input, so the entry says where
-# the worker must put the file. Anything else has to be named on the CLI.
-DIRECTORY_BY_INPUT = {
-    "ckpt_name": "checkpoints",
-    "unet_name": "diffusion_models",
-    "clip_name": "text_encoders",
-    "clip_name1": "text_encoders",
-    "clip_name2": "text_encoders",
-    "clip_name3": "text_encoders",
-    "vae_name": "vae",
-    "lora_name": "loras",
-    "control_net_name": "controlnet",
-    "model_name": "upscale_models",
-    "style_model_name": "style_models",
-    "clip_vision_name": "clip_vision",
+# the worker must put the file. Keyed by loader *and* input name, because the
+# name alone is ambiguous: CLIPLoader.clip_name reads text_encoders/ while
+# CLIPVisionLoader.clip_name reads clip_vision/.
+DIRECTORY_BY_LOADER_INPUT = {
+    ("CheckpointLoader", "ckpt_name"): "checkpoints",
+    ("CheckpointLoaderSimple", "ckpt_name"): "checkpoints",
+    ("unCLIPCheckpointLoader", "ckpt_name"): "checkpoints",
+    ("UNETLoader", "unet_name"): "diffusion_models",
+    ("CLIPLoader", "clip_name"): "text_encoders",
+    ("DualCLIPLoader", "clip_name1"): "text_encoders",
+    ("DualCLIPLoader", "clip_name2"): "text_encoders",
+    ("TripleCLIPLoader", "clip_name1"): "text_encoders",
+    ("TripleCLIPLoader", "clip_name2"): "text_encoders",
+    ("TripleCLIPLoader", "clip_name3"): "text_encoders",
+    ("QuadrupleCLIPLoader", "clip_name1"): "text_encoders",
+    ("QuadrupleCLIPLoader", "clip_name2"): "text_encoders",
+    ("QuadrupleCLIPLoader", "clip_name3"): "text_encoders",
+    ("QuadrupleCLIPLoader", "clip_name4"): "text_encoders",
+    ("CLIPVisionLoader", "clip_name"): "clip_vision",
+    ("VAELoader", "vae_name"): "vae",
+    ("LoraLoader", "lora_name"): "loras",
+    ("LoraLoaderModelOnly", "lora_name"): "loras",
+    ("ControlNetLoader", "control_net_name"): "controlnet",
+    ("DiffControlNetLoader", "control_net_name"): "controlnet",
+    ("UpscaleModelLoader", "model_name"): "upscale_models",
+    ("StyleModelLoader", "style_model_name"): "style_models",
+    ("GLIGENLoader", "gligen_name"): "gligen",
+    ("HypernetworkLoader", "hypernetwork_name"): "hypernetworks",
+    ("PhotoMakerLoader", "photomaker_model_name"): "photomaker",
 }
 
 
@@ -123,11 +138,17 @@ def normalise_save(prompt: dict[str, dict[str, Any]], workflow_id: str) -> None:
     images = node["inputs"].get("images")
     if images is None:
         raise ConversionError(f"save node {saves[0]} has no images input")
-    bit_depth = node["inputs"].get("format.bit_depth", "8-bit")
-    if node["inputs"].get("format", "png") != "png" or bit_depth != "8-bit":
+    written = (
+        node["inputs"].get("format", "png"),
+        node["inputs"].get("format.bit_depth", "8-bit"),
+        node["inputs"].get("format.input_color_space", "sRGB"),
+    )
+    if written != ("png", "8-bit", "sRGB"):
         raise ConversionError(
-            f"save node {saves[0]} writes {node['inputs'].get('format')}/{bit_depth}, "
-            "but comparison needs 8-bit PNG"
+            f"save node {saves[0]} writes {'/'.join(map(str, written))}, but "
+            "comparison needs 8-bit PNG in sRGB: rewriting it to SaveImage would "
+            "silently drop that setting and compare a file the template does not "
+            "produce"
         )
     node["class_type"] = SAVE_IMAGE
     node["inputs"] = {"filename_prefix": workflow_id, "images": images}
@@ -137,15 +158,16 @@ def loaded_files(prompt: dict[str, dict[str, Any]]) -> dict[str, str]:
     """Model file name -> the models/ subdirectory it belongs in."""
     found: dict[str, str] = {}
     for node in prompt.values():
+        class_type = node["class_type"]
         for name, value in node["inputs"].items():
             if not isinstance(value, str) or not value.endswith(MODEL_SUFFIXES):
                 continue
-            directory = DIRECTORY_BY_INPUT.get(name)
+            directory = DIRECTORY_BY_LOADER_INPUT.get((class_type, name))
             if directory is None:
                 raise ConversionError(
-                    f"{node['class_type']}.{name} loads {value}, but which models/ "
-                    "subdirectory it lives in is not known: add it to "
-                    "DIRECTORY_BY_INPUT"
+                    f"{class_type}.{name} loads {value}, but which models/ "
+                    "subdirectory it lives in is not known: add "
+                    f"(\"{class_type}\", \"{name}\") to DIRECTORY_BY_LOADER_INPUT"
                 )
             found[value] = directory
     return found
