@@ -5,6 +5,55 @@
   "shard": "2026-10",
   "entries": [
     {
+      "c": "355cd6b14c92c19ac3188fe528e47a3f21ef5178",
+      "t": 1792359534,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.42.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "ComfyUI v0.42.0",
+        "a": "comfyanonymous",
+        "pr": null,
+        "ct": 1792357989
+      },
+      "prev": "18fe3e66d9db8f850df7279000572dd564a1e422",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/18fe3e66d9db8f850df7279000572dd564a1e422...355cd6b14c92c19ac3188fe528e47a3f21ef5178"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 119.57,
+          "vram": 22083.6,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 41.07,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
+    {
       "c": "18fe3e66d9db8f850df7279000572dd564a1e422",
       "t": 1792357999,
       "o": "pass",
