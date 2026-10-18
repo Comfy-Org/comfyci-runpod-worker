@@ -42,39 +42,72 @@ pick with `--storage` / `REGRESSION_STORAGE`):
 | `manifest/lanes.json` | Environment lanes (python / torch / cuda / GPU, cadence, storage prefix) published to the dashboard through the run index |
 | `.github/workflows/build-index.yml` | Backfills or repairs the run index for a branch/lane (workflow_dispatch) |
 | `scripts/` | Orchestration run on the (CPU) CI runner: submit/poll, compare, publish, golden generation |
+| `scripts/template_api_export.py`, `scripts/import_template.py` | Turn a workflow template into a corpus entry (see [Adding a workflow](#adding-a-workflow)) |
 | `.github/workflows/regression.yml` | Scheduled poller that tests each new master commit (interim, until the core CI job below) |
 | `action.yml` | Composite action for ComfyUI's `test-ci.yml` (GCS phase) |
 
 ## Adding a workflow
 
-One PR to this repo:
+Templates are the corpus's main source: a template that stops producing its
+image is a release blocker, and the comparison here is what notices. One PR to
+this repo per template.
 
-1. Export the workflow from ComfyUI via **Workflow → Export (API)** and save it
-   as `manifest/workflows/<id>_api.json`. Make sure it ends in a `SaveImage`
-   node (PNG output — lossless is what gets compared) with
-   `filename_prefix: <id>`. Fix all seeds in the JSON. For template
-   workflows, resolve switch nodes to their default branch and drop the
-   unused branch and preview-only nodes, so only the models that actually run
-   need syncing.
-2. Add an entry under `workflows` in `manifest/workflows.json`:
-   - `workflow_path`, `seed_overrides` (node id → input patch, belt-and-braces
-     for the seed), `models` (name + download url + ComfyUI models
-     subdirectory, plus `sha256` when the host publishes one), and optionally
-     `timeout_s`, `gpu_type`, `thresholds`, `comfy_flags`.
-   - Input images for `LoadImage` nodes are listed under `models` too, with
-     `"directory": "input"` (pin the url to a commit, not a branch), and the
-     entry sets `"comfy_flags": ["--input-directory", "/runpod-volume/models/input"]`
-     so ComfyUI reads them from the volume.
-   - Start with `"enabled": false`.
-   - `python -m pytest scripts/tests -q` lints the manifest against every
-     workflow it references (loaded files and `models` match both ways, every
-     node feeds the `SaveImage`, seed override targets, model folders,
-     `SaveImage` prefix = workflow id).
-3. Merge. `sync-models.yml` downloads the new models onto the network volume
+1. Dump `/object_info` from the ComfyUI version the corpus runs against, with
+   the template's models present so their combo values resolve, and import the
+   template from a [workflow_templates](https://github.com/Comfy-Org/workflow_templates)
+   checkout:
+
+   ```
+   curl -s http://127.0.0.1:8188/object_info > object_info.json
+   python scripts/import_template.py image_pixeldit_t2i \
+       --templates-dir ../workflow_templates/templates \
+       --object-info object_info.json --id pixeldit_t2i
+   ```
+
+   That writes `manifest/workflows/<id>_api.json` and prints the manifest entry.
+   It converts the template the way the frontend's Export (API) does, picks the
+   branch a constant switch selects (so the other branch's models never have to
+   be synced), drops preview nodes, normalises the output to a `SaveImage` PNG
+   prefixed with the workflow id, and fills `models` from the download links in
+   the template's own model-links note, with the sha256 ComfyUI publishes.
+
+   It refuses rather than guess. A template whose widget layout lives on the
+   node instance, or one that needs custom nodes, has to be exported by hand
+   from ComfyUI (**Workflow → Export (API)**) instead; `scripts/tests/test_template_api_export.py`
+   documents which conversion rules are covered.
+
+2. Paste the entry under `workflows` in `manifest/workflows.json` and choose a
+   `timeout_s` the model can finish in. Leave `"enabled": false`.
+
+   For a hand-exported workflow, the entry needs the same shape: `workflow_path`,
+   `seed_overrides` (node id → input patch, belt-and-braces for the seed),
+   `models` (name + download url + ComfyUI models subdirectory, plus `sha256`
+   when the host publishes one), and optionally `gpu_type`, `thresholds`,
+   `comfy_flags`. Input images for `LoadImage` nodes are listed under `models`
+   too, with `"directory": "input"` (pin the url to a commit, not a branch), and
+   the entry sets `"comfy_flags": ["--input-directory", "/runpod-volume/models/input"]`
+   so ComfyUI reads them from the volume.
+
+3. Check it. `python -m pytest scripts/tests -q` lints the manifest against
+   every workflow it references (loaded files and `models` match both ways,
+   every node feeds the `SaveImage`, seed override targets, model folders,
+   `SaveImage` prefix = workflow id). Then confirm a real server accepts the
+   prompt, which is what catches a conversion that produced a valid-looking
+   file with the wrong input names:
+
+   ```
+   curl -sS -X POST http://127.0.0.1:8188/prompt -H 'Content-Type: application/json' \
+       -d "{\"prompt\": $(cat manifest/workflows/pixeldit_t2i_api.json)}"
+   ```
+
+   A 200 means every node, input and link survived; the run can then fail on
+   missing weights without telling you anything new.
+
+4. Merge. `sync-models.yml` downloads the new models onto the network volume
    automatically.
-4. Generate + bless a golden for it: run the **Golden baselines** workflow with
+5. Generate + bless a golden for it: run the **Golden baselines** workflow with
    the current release tag and `workflows: <id>`, inspect, bless.
-5. Flip `"enabled": true` in a follow-up PR.
+6. Flip `"enabled": true` in a follow-up PR.
 
 ## Verdicts
 

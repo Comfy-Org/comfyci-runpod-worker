@@ -22,8 +22,10 @@ OPTIONAL_ENTRY_KEYS = {"comfy_flags"}
 FILE_INPUT = re.compile(r"^(ckpt|unet|clip|vae|lora)_name\d*$")
 # Any other loader (control_net_name, upscale model_name, ...) is caught by extension.
 FILE_EXT = re.compile(r"\.(safetensors|sft|ckpt|pt|pth|bin|gguf|onnx)$", re.I)
-# Loader filenames that ship with ComfyUI itself rather than the volume.
-BUILTIN_FILES: set[str] = set()
+# Loader values ComfyUI offers without a file behind them, so the volume has
+# nothing to sync: nodes.VAELoader appends "pixel_space" to its combo for
+# pixel-space models (PixelDiT), which have no VAE weights at all.
+BUILTIN_FILES = {"pixel_space"}
 # LoadImage files come from the volume's input/ folder via --input-directory.
 INPUT_DIR = "/runpod-volume/models/input"
 ENDPOINT_EXEC_TIMEOUT_S = 3600
@@ -172,6 +174,14 @@ def test_shared_model_keys_agree():
                     f"{key} differs between {other_id} and {wf_id}"
             else:
                 seen[key] = (wf_id, m)
+
+
+def test_builtin_loader_values_need_no_model_entry():
+    wf = {
+        "1": {"class_type": "VAELoader", "inputs": {"vae_name": "pixel_space"}},
+        "2": {"class_type": "SaveImage", "inputs": {"filename_prefix": "x", "images": ["1", 0]}},
+    }
+    assert _referenced_files(wf) - BUILTIN_FILES == set()
 
 
 def test_referenced_files_helper():
