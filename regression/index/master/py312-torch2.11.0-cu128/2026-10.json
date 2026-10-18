@@ -5,6 +5,58 @@
   "shard": "2026-10",
   "entries": [
     {
+      "c": "ce42de5f64ac1d421e304ab7b6c0b3d2f0dde1f6",
+      "t": 1792345111,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.41.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "Support models with PDD baked in (#17157)",
+        "a": "kijai",
+        "pr": 17157,
+        "ct": 1792344759,
+        "pt": "Support models with PDD baked in",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
+      },
+      "prev": "872eb6a3a5497721f53ebe82c0da9a3ba3414c13",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/872eb6a3a5497721f53ebe82c0da9a3ba3414c13...ce42de5f64ac1d421e304ab7b6c0b3d2f0dde1f6"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 115.44,
+          "vram": 21443.6,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 44.39,
+          "vram": 8159.6,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
+    {
       "c": "872eb6a3a5497721f53ebe82c0da9a3ba3414c13",
       "t": 1792337941,
       "o": "pass",
