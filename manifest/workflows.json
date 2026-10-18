@@ -181,7 +181,7 @@
       "golden_tag": null
     },
     "qwen_image_2_1_t2i": {
-      "enabled": false,
+      "enabled": true,
       "workflow_path": "manifest/workflows/qwen_image_2_1_t2i_api.json",
       "seed_overrides": {
         "459:458": {
@@ -214,7 +214,7 @@
       "golden_tag": null
     },
     "qwen_image_2_1_turbo_t2i": {
-      "enabled": false,
+      "enabled": true,
       "workflow_path": "manifest/workflows/qwen_image_2_1_turbo_t2i_api.json",
       "seed_overrides": {
         "459:488": {
@@ -247,7 +247,7 @@
       "golden_tag": null
     },
     "mage_flow_t2i_int8": {
-      "enabled": false,
+      "enabled": true,
       "workflow_path": "manifest/workflows/mage_flow_t2i_int8_api.json",
       "seed_overrides": {
         "12:6": {
@@ -280,7 +280,7 @@
       "golden_tag": null
     },
     "pixeldit_t2i": {
-      "enabled": false,
+      "enabled": true,
       "workflow_path": "manifest/workflows/pixeldit_t2i_api.json",
       "seed_overrides": {
         "44:42": {
