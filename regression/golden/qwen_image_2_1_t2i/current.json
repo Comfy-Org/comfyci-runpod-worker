@@ -1,0 +1,10 @@
+{
+  "tag": "v0.42.0",
+  "commit": "355cd6b14c92c19ac3188fe528e47a3f21ef5178",
+  "blessed_by": "marawan206",
+  "blessed_ts": 1792365890,
+  "reason": "First baseline for the four template workflows from #8 (qwen_image_2_1_t2i, qwen_image_2_1_turbo_t2i, mage_flow_t2i_int8, pixeldit_t2i). Generated twice at v0.42.0 (run 39175491009) with an identical noise floor; outputs inspected and match their template prompts.",
+  "supersedes": null,
+  "source": "golden_run",
+  "output_sha256": "9600706e86efe85401ce391816cfc6957dfffea0ac5f7934a6e598a73a8b8586"
+}

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_ts": 1792365202,
+  "generated_ts": 1792365890,
   "primary": "py312-torch2.11.0-cu128",
   "lanes": {
     "py312-torch2.11.0-cu128": {
@@ -48,6 +48,22 @@
         "z_image_turbo_t2i": {
           "tag": "v0.42.0",
           "sha": "d92d0fb9c7af9bc27e3ee1d86c723bf17281f3318dffb47ac48345f6331e1a6f"
+        },
+        "mage_flow_t2i_int8": {
+          "tag": "v0.42.0",
+          "sha": "d6f2fc7a8a4d0ae38119c7c65ce05d37a5618ee2709b1fb6e533f0346582b5a4"
+        },
+        "pixeldit_t2i": {
+          "tag": "v0.42.0",
+          "sha": "25bb183d1d80cd8dee71ef2a59724ef479e883082f596e222981fe174b55670c"
+        },
+        "qwen_image_2_1_t2i": {
+          "tag": "v0.42.0",
+          "sha": "9600706e86efe85401ce391816cfc6957dfffea0ac5f7934a6e598a73a8b8586"
+        },
+        "qwen_image_2_1_turbo_t2i": {
+          "tag": "v0.42.0",
+          "sha": "e489a013f070829be4a0220256a23427627084b7f1b6331f3a47406d332fa19f"
         }
       }
     }
