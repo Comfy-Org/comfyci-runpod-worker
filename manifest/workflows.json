@@ -15,7 +15,9 @@
       "enabled": true,
       "workflow_path": "manifest/workflows/sdxl_t2i_api.json",
       "seed_overrides": {
-        "3": { "seed": 123456789 }
+        "3": {
+          "seed": 123456789
+        }
       },
       "models": [
         {
@@ -33,7 +35,9 @@
       "enabled": true,
       "workflow_path": "manifest/workflows/flux_dev_t2i_api.json",
       "seed_overrides": {
-        "16": { "noise_seed": 987654321 }
+        "16": {
+          "noise_seed": 987654321
+        }
       },
       "models": [
         {
@@ -66,7 +70,9 @@
       "enabled": false,
       "workflow_path": "manifest/workflows/krea2_turbo_t2i_api.json",
       "seed_overrides": {
-        "30:3": { "seed": 594361197674106 }
+        "30:3": {
+          "seed": 594361197674106
+        }
       },
       "models": [
         {
@@ -97,7 +103,9 @@
       "enabled": false,
       "workflow_path": "manifest/workflows/z_image_turbo_t2i_api.json",
       "seed_overrides": {
-        "57:3": { "seed": 0 }
+        "57:3": {
+          "seed": 0
+        }
       },
       "models": [
         {
@@ -127,7 +135,9 @@
       "enabled": false,
       "workflow_path": "manifest/workflows/qwen_image_2_1_edit_api.json",
       "seed_overrides": {
-        "459:458": { "seed": 891836227295375 }
+        "459:458": {
+          "seed": 891836227295375
+        }
       },
       "models": [
         {
@@ -161,9 +171,138 @@
           "sha256": "5f8d348aa0079922743e53ab687ba5661c57696d373a0113cc61dae9a36761a3"
         }
       ],
-      "comfy_flags": ["--input-directory", "/runpod-volume/models/input"],
+      "comfy_flags": [
+        "--input-directory",
+        "/runpod-volume/models/input"
+      ],
       "gpu_type": null,
       "timeout_s": 2400,
+      "thresholds": null,
+      "golden_tag": null
+    },
+    "qwen_image_2_1_t2i": {
+      "enabled": false,
+      "workflow_path": "manifest/workflows/qwen_image_2_1_t2i_api.json",
+      "seed_overrides": {
+        "459:458": {
+          "seed": 447606998181262
+        }
+      },
+      "models": [
+        {
+          "name": "qwen3vl_8b_int8_convrot.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/text_encoders/qwen3vl_8b_int8_convrot.safetensors",
+          "directory": "text_encoders",
+          "sha256": "8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f"
+        },
+        {
+          "name": "qwen_image_2.1_int8_convrot.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
+          "directory": "diffusion_models",
+          "sha256": "cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d"
+        },
+        {
+          "name": "qwen_image_2.1_vae_bf16.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/vae/qwen_image_2.1_vae_bf16.safetensors",
+          "directory": "vae",
+          "sha256": "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9"
+        }
+      ],
+      "gpu_type": null,
+      "timeout_s": 1800,
+      "thresholds": null,
+      "golden_tag": null
+    },
+    "qwen_image_2_1_turbo_t2i": {
+      "enabled": false,
+      "workflow_path": "manifest/workflows/qwen_image_2_1_turbo_t2i_api.json",
+      "seed_overrides": {
+        "459:488": {
+          "noise_seed": 531123706903762
+        }
+      },
+      "models": [
+        {
+          "name": "qwen3vl_8b_int8_convrot.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/text_encoders/qwen3vl_8b_int8_convrot.safetensors",
+          "directory": "text_encoders",
+          "sha256": "8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f"
+        },
+        {
+          "name": "qwen_image_2.1_turbo_int8_convrot.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/diffusion_models/qwen_image_2.1_turbo_int8_convrot.safetensors",
+          "directory": "diffusion_models",
+          "sha256": "8144a0182964aa8403ad6dbc011db837304167d235161b9aabaa8532e967314c"
+        },
+        {
+          "name": "qwen_image_2.1_vae_bf16.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/vae/qwen_image_2.1_vae_bf16.safetensors",
+          "directory": "vae",
+          "sha256": "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9"
+        }
+      ],
+      "gpu_type": null,
+      "timeout_s": 1200,
+      "thresholds": null,
+      "golden_tag": null
+    },
+    "mage_flow_t2i_int8": {
+      "enabled": false,
+      "workflow_path": "manifest/workflows/mage_flow_t2i_int8_api.json",
+      "seed_overrides": {
+        "12:6": {
+          "seed": 499442600682718
+        }
+      },
+      "models": [
+        {
+          "name": "mage_flow_int8_convrot.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/Mage-Flow/resolve/main/diffusion_models/mage_flow_int8_convrot.safetensors",
+          "directory": "diffusion_models",
+          "sha256": "e081068163d7793b7e0d54ae2a773d3ac1c0d5b099c09b69dcbff36448485ae8"
+        },
+        {
+          "name": "mage_flow_vae_bf16.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/Mage-Flow/resolve/main/vae/mage_flow_vae_bf16.safetensors",
+          "directory": "vae",
+          "sha256": "34e076dc1e8a15321e1e07be5111d59cf16dd10b804b7c7e20b4de29013427e0"
+        },
+        {
+          "name": "qwen3vl_4b_bf16.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/Mage-Flow/resolve/main/text_encoders/qwen3vl_4b_bf16.safetensors",
+          "directory": "text_encoders",
+          "sha256": "36f3ff447ef59201722e8f9ce6020c9819fdcfba6aa2608c4e09b1c0ce114e34"
+        }
+      ],
+      "gpu_type": null,
+      "timeout_s": 1200,
+      "thresholds": null,
+      "golden_tag": null
+    },
+    "pixeldit_t2i": {
+      "enabled": false,
+      "workflow_path": "manifest/workflows/pixeldit_t2i_api.json",
+      "seed_overrides": {
+        "44:42": {
+          "seed": 59233627785266
+        }
+      },
+      "models": [
+        {
+          "name": "gemma_2_2b_it_elm_bf16.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/PixelDiT/resolve/main/text_encoders/gemma_2_2b_it_elm_bf16.safetensors",
+          "directory": "text_encoders",
+          "sha256": "e7ae59c203c392db4aa4e27783e924ec3225eb563392260cf747e1130ffcdb88"
+        },
+        {
+          "name": "pixeldit_1300m_1024px_bf16.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/PixelDiT/resolve/main/diffusion_models/pixeldit_1300m_1024px_bf16.safetensors",
+          "directory": "diffusion_models",
+          "sha256": "d904bae12526c48a522a503b80668fbd45bae6398e9d6f3c2a3e76629552d4ff"
+        }
+      ],
+      "gpu_type": null,
+      "timeout_s": 900,
       "thresholds": null,
       "golden_tag": null
     }
