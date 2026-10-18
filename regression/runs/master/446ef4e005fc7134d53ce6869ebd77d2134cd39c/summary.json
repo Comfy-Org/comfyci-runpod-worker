@@ -1,0 +1,141 @@
+{
+  "schema_version": 2,
+  "branch": "master",
+  "commit": "446ef4e005fc7134d53ce6869ebd77d2134cd39c",
+  "run_ts": 1792348982,
+  "overall": "pass",
+  "has_infra_error": false,
+  "lane": "py312-torch2.11.0-cu128",
+  "commit_meta": {
+    "subject": "Make NAF neighborhood attention work per LR cell (#17155)",
+    "author": "kijai",
+    "committed_ts": 1792348595,
+    "parents": [
+      "ce42de5f64ac1d421e304ab7b6c0b3d2f0dde1f6"
+    ],
+    "pr": 17155,
+    "pr_title": "Make NAF neighborhood attention work per LR cell",
+    "pr_author": "kijai",
+    "pr_avatar": "https://avatars.githubusercontent.com/u/40791699?v=4",
+    "pr_labels": [],
+    "pr_merged_at": 1792348596,
+    "pr_url": "https://github.com/Comfy-Org/ComfyUI/pull/17155"
+  },
+  "tested_range": {
+    "prev": "ce42de5f64ac1d421e304ab7b6c0b3d2f0dde1f6",
+    "commits_between": 1,
+    "compare_url": "https://github.com/Comfy-Org/ComfyUI/compare/ce42de5f64ac1d421e304ab7b6c0b3d2f0dde1f6...446ef4e005fc7134d53ce6869ebd77d2134cd39c"
+  },
+  "workflows": {
+    "flux_dev_t2i": {
+      "workflow_id": "flux_dev_t2i",
+      "worker_status": "ok",
+      "verdict": "pass",
+      "detail": null,
+      "vs_golden": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "vs_previous": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "thresholds_used": {
+        "max_mean_mse": 2.0,
+        "min_mean_psnr_db": 45.0,
+        "max_pct_pixels_changed": 1.0
+      },
+      "golden_tag": "v0.38.0",
+      "previous_commit": "ce42de5f64ac1d421e304ab7b6c0b3d2f0dde1f6",
+      "previous_verdict": "pass",
+      "figures": false,
+      "output_sha256": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+      "thumbnail": "flux_dev_t2i_00001_.webp",
+      "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+      "timings": {
+        "checkout_s": 1.49,
+        "pip_s": 10.51,
+        "prompt_exec_s": 134.44,
+        "server_start_s": 7.23
+      },
+      "vram_peak_mb": 21795.6,
+      "rss_peak_mb": 34435,
+      "comfy_version": "0.41.0",
+      "torch_version": "2.11.0+cu128",
+      "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+      "prior_verdict": "pass",
+      "prior_commit": "ce42de5f64ac1d421e304ab7b6c0b3d2f0dde1f6"
+    },
+    "sdxl_t2i": {
+      "workflow_id": "sdxl_t2i",
+      "worker_status": "ok",
+      "verdict": "pass",
+      "detail": null,
+      "vs_golden": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "vs_previous": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "thresholds_used": {
+        "max_mean_mse": 2.0,
+        "min_mean_psnr_db": 45.0,
+        "max_pct_pixels_changed": 1.0
+      },
+      "golden_tag": "v0.33.2",
+      "previous_commit": "ce42de5f64ac1d421e304ab7b6c0b3d2f0dde1f6",
+      "previous_verdict": "pass",
+      "figures": false,
+      "output_sha256": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+      "thumbnail": "sdxl_t2i_00001_.webp",
+      "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+      "timings": {
+        "checkout_s": 1.94,
+        "pip_s": 17.89,
+        "prompt_exec_s": 44.74,
+        "server_start_s": 10.88
+      },
+      "vram_peak_mb": 8159.6,
+      "rss_peak_mb": 8921.9,
+      "comfy_version": "0.41.0",
+      "torch_version": "2.11.0+cu128",
+      "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+      "prior_verdict": "pass",
+      "prior_commit": "ce42de5f64ac1d421e304ab7b6c0b3d2f0dde1f6"
+    }
+  }
+}
