@@ -2,7 +2,7 @@
   "schema_version": 2,
   "branch": "master",
   "commit": "8f04fd6ecf4a548937971e840af2a985529fab76",
-  "run_ts": 1792365202,
+  "run_ts": 1792367354,
   "overall": "pass",
   "has_infra_error": false,
   "lane": "py312-torch2.11.0-cu128",
@@ -21,11 +21,7 @@
     "pr_merged_at": 1792364785,
     "pr_url": "https://github.com/Comfy-Org/ComfyUI/pull/16943"
   },
-  "tested_range": {
-    "prev": "b9b290e43f1eb379946dfeb013faf9bbefa1a618",
-    "commits_between": 1,
-    "compare_url": "https://github.com/Comfy-Org/ComfyUI/compare/b9b290e43f1eb379946dfeb013faf9bbefa1a618...8f04fd6ecf4a548937971e840af2a985529fab76"
-  },
+  "tested_range": null,
   "workflows": {
     "flux_dev_t2i": {
       "workflow_id": "flux_dev_t2i",
@@ -44,7 +40,39 @@
         "mean_pct_pixels_changed": 0.0,
         "worst_frame_index": 0
       },
-      "vs_previous": {
+      "vs_previous": null,
+      "thresholds_used": {
+        "max_mean_mse": 2.0,
+        "min_mean_psnr_db": 45.0,
+        "max_pct_pixels_changed": 1.0
+      },
+      "golden_tag": "v0.38.0",
+      "previous_commit": null,
+      "previous_verdict": null,
+      "figures": false,
+      "output_sha256": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+      "thumbnail": "flux_dev_t2i_00001_.webp",
+      "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+      "timings": {
+        "checkout_s": 1.5,
+        "pip_s": 8.71,
+        "prompt_exec_s": 165.68,
+        "server_start_s": 6.63
+      },
+      "vram_peak_mb": 22083.6,
+      "rss_peak_mb": 34437,
+      "comfy_version": "0.42.0",
+      "torch_version": "2.11.0+cu128",
+      "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+      "prior_verdict": "pass",
+      "prior_commit": "b9b290e43f1eb379946dfeb013faf9bbefa1a618"
+    },
+    "krea2_turbo_t2i": {
+      "workflow_id": "krea2_turbo_t2i",
+      "worker_status": "ok",
+      "verdict": "pass",
+      "detail": null,
+      "vs_golden": {
         "frames_compared": 1,
         "frame_count_ref": 1,
         "frame_count_cand": 1,
@@ -56,31 +84,252 @@
         "mean_pct_pixels_changed": 0.0,
         "worst_frame_index": 0
       },
+      "vs_previous": null,
       "thresholds_used": {
         "max_mean_mse": 2.0,
         "min_mean_psnr_db": 45.0,
         "max_pct_pixels_changed": 1.0
       },
-      "golden_tag": "v0.38.0",
-      "previous_commit": "b9b290e43f1eb379946dfeb013faf9bbefa1a618",
-      "previous_verdict": "pass",
+      "golden_tag": "v0.42.0",
+      "previous_commit": null,
+      "previous_verdict": null,
       "figures": false,
-      "output_sha256": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
-      "thumbnail": "flux_dev_t2i_00001_.webp",
+      "output_sha256": "aee96126190a3f72e4716baa1ca98338fa1ddc3a5d6d839f525551e9f2b50350",
+      "thumbnail": "krea2_turbo_t2i_00001_.webp",
       "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
       "timings": {
-        "checkout_s": 1.47,
-        "pip_s": 9.01,
-        "prompt_exec_s": 109.42,
-        "server_start_s": 6.61
+        "checkout_s": 0,
+        "pip_s": 0.55,
+        "prompt_exec_s": 62.63,
+        "server_start_s": 5.21
       },
-      "vram_peak_mb": 21505.6,
-      "rss_peak_mb": 34430.9,
+      "vram_peak_mb": 18541.6,
+      "rss_peak_mb": 19172.3,
       "comfy_version": "0.42.0",
       "torch_version": "2.11.0+cu128",
       "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
-      "prior_verdict": "pass",
-      "prior_commit": "b9b290e43f1eb379946dfeb013faf9bbefa1a618"
+      "prior_verdict": null,
+      "prior_commit": null
+    },
+    "mage_flow_t2i_int8": {
+      "workflow_id": "mage_flow_t2i_int8",
+      "worker_status": "ok",
+      "verdict": "pass",
+      "detail": null,
+      "vs_golden": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "vs_previous": null,
+      "thresholds_used": {
+        "max_mean_mse": 2.0,
+        "min_mean_psnr_db": 45.0,
+        "max_pct_pixels_changed": 1.0
+      },
+      "golden_tag": "v0.42.0",
+      "previous_commit": null,
+      "previous_verdict": null,
+      "figures": false,
+      "output_sha256": "d6f2fc7a8a4d0ae38119c7c65ce05d37a5618ee2709b1fb6e533f0346582b5a4",
+      "thumbnail": "mage_flow_t2i_int8_00001_.webp",
+      "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+      "timings": {
+        "checkout_s": 0.01,
+        "pip_s": 0.93,
+        "prompt_exec_s": 63.35,
+        "server_start_s": 8.23
+      },
+      "vram_peak_mb": 13505.6,
+      "rss_peak_mb": 14075.1,
+      "comfy_version": "0.42.0",
+      "torch_version": "2.11.0+cu128",
+      "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+      "prior_verdict": null,
+      "prior_commit": null
+    },
+    "pixeldit_t2i": {
+      "workflow_id": "pixeldit_t2i",
+      "worker_status": "ok",
+      "verdict": "pass",
+      "detail": null,
+      "vs_golden": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "vs_previous": null,
+      "thresholds_used": {
+        "max_mean_mse": 2.0,
+        "min_mean_psnr_db": 45.0,
+        "max_pct_pixels_changed": 1.0
+      },
+      "golden_tag": "v0.42.0",
+      "previous_commit": null,
+      "previous_verdict": null,
+      "figures": false,
+      "output_sha256": "25bb183d1d80cd8dee71ef2a59724ef479e883082f596e222981fe174b55670c",
+      "thumbnail": "pixeldit_t2i_00001_.webp",
+      "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+      "timings": {
+        "checkout_s": 0.01,
+        "pip_s": 0.96,
+        "prompt_exec_s": 35.25,
+        "server_start_s": 8.23
+      },
+      "vram_peak_mb": 9045.6,
+      "rss_peak_mb": 9752.3,
+      "comfy_version": "0.42.0",
+      "torch_version": "2.11.0+cu128",
+      "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+      "prior_verdict": null,
+      "prior_commit": null
+    },
+    "qwen_image_2_1_edit": {
+      "workflow_id": "qwen_image_2_1_edit",
+      "worker_status": "ok",
+      "verdict": "pass",
+      "detail": null,
+      "vs_golden": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "vs_previous": null,
+      "thresholds_used": {
+        "max_mean_mse": 2.0,
+        "min_mean_psnr_db": 45.0,
+        "max_pct_pixels_changed": 1.0
+      },
+      "golden_tag": "v0.42.0",
+      "previous_commit": null,
+      "previous_verdict": null,
+      "figures": false,
+      "output_sha256": "7ed110b317b4e4b0a4f6b52da86bcd9a4e39eec0689c4e0f404cc9e68782f312",
+      "thumbnail": "qwen_image_2_1_edit_00001_.webp",
+      "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+      "timings": {
+        "checkout_s": 0,
+        "pip_s": 0.46,
+        "prompt_exec_s": 76.79,
+        "server_start_s": 4.41
+      },
+      "vram_peak_mb": 14603.6,
+      "rss_peak_mb": 18314.2,
+      "comfy_version": "0.42.0",
+      "torch_version": "2.11.0+cu128",
+      "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+      "prior_verdict": null,
+      "prior_commit": null
+    },
+    "qwen_image_2_1_t2i": {
+      "workflow_id": "qwen_image_2_1_t2i",
+      "worker_status": "ok",
+      "verdict": "pass",
+      "detail": null,
+      "vs_golden": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "vs_previous": null,
+      "thresholds_used": {
+        "max_mean_mse": 2.0,
+        "min_mean_psnr_db": 45.0,
+        "max_pct_pixels_changed": 1.0
+      },
+      "golden_tag": "v0.42.0",
+      "previous_commit": null,
+      "previous_verdict": null,
+      "figures": false,
+      "output_sha256": "9600706e86efe85401ce391816cfc6957dfffea0ac5f7934a6e598a73a8b8586",
+      "thumbnail": "qwen_image_2_1_t2i_00001_.webp",
+      "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+      "timings": {
+        "checkout_s": 2.07,
+        "pip_s": 0.93,
+        "prompt_exec_s": 84.48,
+        "server_start_s": 8.23
+      },
+      "vram_peak_mb": 16327.6,
+      "rss_peak_mb": 17061.3,
+      "comfy_version": "0.42.0",
+      "torch_version": "2.11.0+cu128",
+      "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+      "prior_verdict": null,
+      "prior_commit": null
+    },
+    "qwen_image_2_1_turbo_t2i": {
+      "workflow_id": "qwen_image_2_1_turbo_t2i",
+      "worker_status": "ok",
+      "verdict": "pass",
+      "detail": null,
+      "vs_golden": {
+        "frames_compared": 1,
+        "frame_count_ref": 1,
+        "frame_count_cand": 1,
+        "identical": true,
+        "mean_mse": 0.0,
+        "mean_psnr_db": null,
+        "min_psnr_db": null,
+        "max_abs_diff": 0,
+        "mean_pct_pixels_changed": 0.0,
+        "worst_frame_index": 0
+      },
+      "vs_previous": null,
+      "thresholds_used": {
+        "max_mean_mse": 2.0,
+        "min_mean_psnr_db": 45.0,
+        "max_pct_pixels_changed": 1.0
+      },
+      "golden_tag": "v0.42.0",
+      "previous_commit": null,
+      "previous_verdict": null,
+      "figures": false,
+      "output_sha256": "e489a013f070829be4a0220256a23427627084b7f1b6331f3a47406d332fa19f",
+      "thumbnail": "qwen_image_2_1_turbo_t2i_00001_.webp",
+      "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+      "timings": {
+        "checkout_s": 0.01,
+        "pip_s": 0.98,
+        "prompt_exec_s": 63.75,
+        "server_start_s": 8.03
+      },
+      "vram_peak_mb": 16329.6,
+      "rss_peak_mb": 17071.9,
+      "comfy_version": "0.42.0",
+      "torch_version": "2.11.0+cu128",
+      "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+      "prior_verdict": null,
+      "prior_commit": null
     },
     "sdxl_t2i": {
       "workflow_id": "sdxl_t2i",
@@ -99,7 +348,39 @@
         "mean_pct_pixels_changed": 0.0,
         "worst_frame_index": 0
       },
-      "vs_previous": {
+      "vs_previous": null,
+      "thresholds_used": {
+        "max_mean_mse": 2.0,
+        "min_mean_psnr_db": 45.0,
+        "max_pct_pixels_changed": 1.0
+      },
+      "golden_tag": "v0.33.2",
+      "previous_commit": null,
+      "previous_verdict": null,
+      "figures": false,
+      "output_sha256": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+      "thumbnail": "sdxl_t2i_00001_.webp",
+      "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+      "timings": {
+        "checkout_s": 0,
+        "pip_s": 0.55,
+        "prompt_exec_s": 36.19,
+        "server_start_s": 5.01
+      },
+      "vram_peak_mb": 8159.6,
+      "rss_peak_mb": 8927.4,
+      "comfy_version": "0.42.0",
+      "torch_version": "2.11.0+cu128",
+      "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+      "prior_verdict": "pass",
+      "prior_commit": "b9b290e43f1eb379946dfeb013faf9bbefa1a618"
+    },
+    "z_image_turbo_t2i": {
+      "workflow_id": "z_image_turbo_t2i",
+      "worker_status": "ok",
+      "verdict": "pass",
+      "detail": null,
+      "vs_golden": {
         "frames_compared": 1,
         "frame_count_ref": 1,
         "frame_count_cand": 1,
@@ -111,31 +392,32 @@
         "mean_pct_pixels_changed": 0.0,
         "worst_frame_index": 0
       },
+      "vs_previous": null,
       "thresholds_used": {
         "max_mean_mse": 2.0,
         "min_mean_psnr_db": 45.0,
         "max_pct_pixels_changed": 1.0
       },
-      "golden_tag": "v0.33.2",
-      "previous_commit": "b9b290e43f1eb379946dfeb013faf9bbefa1a618",
-      "previous_verdict": "pass",
+      "golden_tag": "v0.42.0",
+      "previous_commit": null,
+      "previous_verdict": null,
       "figures": false,
-      "output_sha256": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
-      "thumbnail": "sdxl_t2i_00001_.webp",
+      "output_sha256": "d92d0fb9c7af9bc27e3ee1d86c723bf17281f3318dffb47ac48345f6331e1a6f",
+      "thumbnail": "z_image_turbo_t2i_00001_.webp",
       "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
       "timings": {
-        "checkout_s": 1.43,
-        "pip_s": 9,
-        "prompt_exec_s": 48.1,
-        "server_start_s": 7.23
+        "checkout_s": 1.49,
+        "pip_s": 9.16,
+        "prompt_exec_s": 67.63,
+        "server_start_s": 6.22
       },
-      "vram_peak_mb": 8159.6,
-      "rss_peak_mb": 8933.4,
+      "vram_peak_mb": 21105.6,
+      "rss_peak_mb": 21799.7,
       "comfy_version": "0.42.0",
       "torch_version": "2.11.0+cu128",
       "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
-      "prior_verdict": "pass",
-      "prior_commit": "b9b290e43f1eb379946dfeb013faf9bbefa1a618"
+      "prior_verdict": null,
+      "prior_commit": null
     }
   }
 }
