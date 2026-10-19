@@ -305,6 +305,111 @@
       "timeout_s": 900,
       "thresholds": null,
       "golden_tag": null
+    },
+    "kjnodes_sdxl_t2i": {
+      "enabled": false,
+      "workflow_path": "manifest/workflows/kjnodes_sdxl_t2i_api.json",
+      "seed_overrides": {
+        "3": {
+          "seed": 20250901
+        }
+      },
+      "models": [
+        {
+          "name": "sd_xl_base_1.0.safetensors",
+          "url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors",
+          "directory": "checkpoints"
+        }
+      ],
+      "custom_nodes": [
+        "ComfyUI-KJNodes"
+      ],
+      "lanes": [
+        "py313-torch2.14.1-cu130"
+      ],
+      "gpu_type": null,
+      "timeout_s": null,
+      "thresholds": null,
+      "golden_tag": null
+    },
+    "vhs_video_roundtrip": {
+      "enabled": false,
+      "workflow_path": "manifest/workflows/vhs_video_roundtrip_api.json",
+      "seed_overrides": {},
+      "models": [
+        {
+          "name": "plain_video.mp4",
+          "url": "https://raw.githubusercontent.com/Comfy-Org/ComfyUI_frontend/ad63f7cb9bd0f4b2b4a7c6b3599291cd8fe36051/browser_tests/assets/plain_video.mp4",
+          "directory": "input",
+          "sha256": "ab3896e8a35d2be240b4c48c3fb034c449f4381e6518789dd2080ec998476439"
+        }
+      ],
+      "comfy_flags": [
+        "--input-directory",
+        "/runpod-volume/models/input"
+      ],
+      "custom_nodes": [
+        "ComfyUI-VideoHelperSuite"
+      ],
+      "lanes": [
+        "py313-torch2.14.1-cu130"
+      ],
+      "gpu_type": null,
+      "timeout_s": null,
+      "thresholds": null,
+      "golden_tag": null
+    },
+    "impact_sdxl_detailer": {
+      "enabled": false,
+      "workflow_path": "manifest/workflows/impact_sdxl_detailer_api.json",
+      "seed_overrides": {
+        "3": {
+          "seed": 777000111
+        },
+        "12": {
+          "seed": 777000222
+        }
+      },
+      "models": [
+        {
+          "name": "sd_xl_base_1.0.safetensors",
+          "url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors",
+          "directory": "checkpoints"
+        },
+        {
+          "name": "bbox/face_yolov8m.pt",
+          "url": "https://huggingface.co/Bingsu/adetailer/resolve/main/face_yolov8m.pt",
+          "directory": "ultralytics",
+          "sha256": "717923c19b3f4bbf5250b728f1fa6b2cb72a33aed1d236ea9caf0e21ad943e5f"
+        }
+      ],
+      "custom_nodes": [
+        "ComfyUI-Impact-Pack",
+        "ComfyUI-Impact-Subpack"
+      ],
+      "lanes": [
+        "py313-torch2.14.1-cu130"
+      ],
+      "gpu_type": null,
+      "timeout_s": 900,
+      "thresholds": null,
+      "golden_tag": null
+    },
+    "manager_import_smoke": {
+      "enabled": false,
+      "workflow_path": "manifest/workflows/manager_import_smoke_api.json",
+      "seed_overrides": {},
+      "models": [],
+      "custom_nodes": [
+        "ComfyUI-Manager"
+      ],
+      "lanes": [
+        "py313-torch2.14.1-cu130"
+      ],
+      "gpu_type": null,
+      "timeout_s": null,
+      "thresholds": null,
+      "golden_tag": null
     }
   }
 }

@@ -24,6 +24,9 @@ COPY --from=ghcr.io/astral-sh/uv:0.13.1 /uv /usr/local/bin/uv
 
 # All python/pip below resolve to this venv, including the handler's runtime
 # `pip install -r requirements.txt` when a commit changes requirements.
+# SAM2_BUILD_CUDA: sam2 (an Impact-Pack requirement) must not try to build its
+# CUDA extension, there is no nvcc here. YOLO_OFFLINE: ultralytics never phones
+# home or checks for updates while a detector runs.
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     UV_PYTHON_INSTALL_DIR=/opt/uv/python \
@@ -32,6 +35,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
     BAKED_REQ_HASH_FILE=/comfy-config/requirements.sha256 \
     COMFY_CONSTRAINTS_FILE=/comfy-config/constraints.txt \
     IMAGE_INFO_FILE=/comfy-config/image.json \
+    CUSTOM_NODES_CACHE=/comfy-cache/custom_nodes \
+    BAKED_CUSTOM_NODES_DIR=/comfy-config/custom_nodes \
+    PACK_CONSTRAINTS_FILE=/comfy-config/constraints-packs.txt \
+    SAM2_BUILD_CUDA=0 \
+    YOLO_OFFLINE=true \
     VIRTUAL_ENV=/opt/venv \
     PATH=/opt/venv/bin:$PATH
 
@@ -39,8 +47,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # bmm_outer_product the Qwen3 and Gemma text encoders hit) to Triton kernels, and
 # Triton builds its CUDA driver shim with the system C compiler on first use.
 # Without one every such workflow fails with "Failed to find C compiler".
+# libgl1 + libglib2.0-0: the custom-node packs pull in opencv-python (VideoHelperSuite,
+# ultralytics) next to opencv-python-headless, and the non-headless cv2 links libGL.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git curl ca-certificates gcc libc6-dev \
+        git curl ca-certificates gcc libc6-dev libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # The lane's interpreter and a seeded venv (pip stays available for the runtime
@@ -65,9 +75,23 @@ RUN git clone --depth 50 https://github.com/Comfy-Org/ComfyUI ${COMFY_ROOT} \
 # Pinned: SDK behaviour around handler outputs changed between releases.
 RUN pip install runpod==1.12.0 nvidia-ml-py
 
+# Custom-node packs (manifest/custom_nodes.json): every pack is fetched at its
+# pinned sha into the cache the worker installs from, and its requirements are
+# installed under the torch pins plus the registry's own pins. The requirements
+# hash (or pip pin) each pack was baked with is recorded, so a pin bump without
+# a rebuild falls back to a job-time pip (src/custom_nodes.py). setuptools and
+# wheel: uv seeds only pip on 3.12+, and sam2 builds without isolation. Only
+# these two files invalidate this layer.
+COPY manifest/custom_nodes.json /comfy-config/custom_nodes.json
+COPY src/custom_nodes.py /comfy-config/bake_custom_nodes.py
+RUN pip install setuptools wheel \
+    && python /comfy-config/bake_custom_nodes.py bake --manifest /comfy-config/custom_nodes.json \
+    && sha256sum /comfy-config/custom_nodes.json | cut -d' ' -f1 > /comfy-config/custom_nodes.sha256
+
 # What this image is, echoed into every run record as its `env` block.
-RUN printf '{"image": "%s", "image_sha": "%s", "python": "%s", "cuda": "%s", "torch_spec": "%s", "torch_index": "%s"}\n' \
+RUN printf '{"image": "%s", "image_sha": "%s", "python": "%s", "cuda": "%s", "torch_spec": "%s", "torch_index": "%s", "custom_nodes_sha256": "%s"}\n' \
         "${IMAGE_ID}" "${IMAGE_SHA}" "${PYTHON_VERSION}" "${CUDA_VERSION}" "${TORCH_SPEC}" "${TORCH_INDEX}" \
+        "$(cat /comfy-config/custom_nodes.sha256)" \
         > ${IMAGE_INFO_FILE}
 
 COPY docker/extra_model_paths.yaml /comfy-config/extra_model_paths.yaml

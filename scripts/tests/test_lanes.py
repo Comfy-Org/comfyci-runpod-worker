@@ -12,15 +12,19 @@ import runpod_endpoints
 
 ROOT = Path(__file__).resolve().parents[2]
 REGISTRY = json.loads((ROOT / "manifest" / "lanes.json").read_text(encoding="utf-8"))
+MANIFEST = json.loads((ROOT / "manifest" / "workflows.json").read_text(encoding="utf-8"))
+PACKS = json.loads((ROOT / "manifest" / "custom_nodes.json").read_text(encoding="utf-8"))
 # The committed registry provisions lanes over time; these tests want one lane that is
 # declared but not yet provisioned, whatever the file says today.
 NEW = "py313-torch2.14.1-cu130"
+LEGACY = "py312-torch2.11.0-cu128"
 PENDING = copy.deepcopy(REGISTRY)
 PENDING["lanes"][NEW]["endpoint_id"] = None
 
 
 def test_the_committed_registry_is_consistent():
     assert lanes_mod.validate(REGISTRY) == []
+    assert lanes_mod.validate(REGISTRY, MANIFEST, PACKS) == []
     assert REGISTRY["schema_version"] == 2
 
 
@@ -45,6 +49,48 @@ def test_validate_rejects_a_second_legacy_layout_and_prefix_reuse():
     problems = "\n".join(lanes_mod.validate(bad))
     assert "only one lane may use the legacy layout 1" in problems
     assert "already used by" in problems
+
+
+def test_validate_checks_lane_filters_and_the_pack_lane_rule():
+    manifest = {"workflows": {
+        "typo": {"enabled": True, "lanes": ["nope"]},
+        "empty": {"enabled": True, "lanes": []},
+        "unrestricted_pack": {"enabled": True, "custom_nodes": ["ComfyUI-KJNodes"]},
+        "legacy_pack": {"enabled": True, "custom_nodes": ["ComfyUI-KJNodes"], "lanes": [LEGACY]},
+        "ghost_pack": {"enabled": True, "custom_nodes": ["ComfyUI-Ghost"], "lanes": [NEW]},
+        "fine": {"enabled": True, "custom_nodes": ["ComfyUI-KJNodes"], "lanes": [NEW]},
+        "plain": {"enabled": True},
+    }}
+    problems = lanes_mod.validate(REGISTRY, manifest, PACKS)
+    text = "\n".join(problems)
+    assert "workflow typo: lanes names unknown lane 'nope'" in text
+    assert "workflow empty: lanes must be null or a non-empty list" in text
+    assert "workflow unrestricted_pack: needs custom node packs" in text
+    assert f"workflow legacy_pack: lane {LEGACY} runs image cu128-t2110, which is never rebuilt" in text
+    assert "workflow ghost_pack: custom node pack 'ComfyUI-Ghost' is not in" in text
+    assert not [p for p in problems if p.startswith("workflow fine") or p.startswith("workflow plain")]
+    # Without the pack registry, unknown pack names are not checked here.
+    assert "ComfyUI-Ghost" not in "\n".join(lanes_mod.validate(REGISTRY, manifest))
+
+
+def test_workflow_lane_filter():
+    assert lanes_mod.workflow_runs_on_lane({"lanes": None}, "any")
+    assert lanes_mod.workflow_runs_on_lane({}, "any")
+    assert lanes_mod.workflow_runs_on_lane({"lanes": [NEW]}, NEW)
+    assert not lanes_mod.workflow_runs_on_lane({"lanes": [NEW]}, LEGACY)
+    manifest = {"workflows": {
+        "a": {"enabled": True},
+        "b": {"enabled": True, "lanes": [NEW]},
+        "c": {"enabled": False, "lanes": [NEW]},
+        "d": {"enabled": True, "lanes": [LEGACY]},
+    }}
+    assert lanes_mod.workflows_for_lane(manifest, NEW) == ["a", "b"]
+    assert lanes_mod.workflows_for_lane(manifest, LEGACY) == ["a", "d"]
+    assert lanes_mod.workflows_for_lane(manifest, NEW, enabled_only=False) == ["a", "b", "c"]
+    # The committed pack workflows are restricted to the baking lane.
+    for wf_id, entry in MANIFEST["workflows"].items():
+        if entry.get("custom_nodes"):
+            assert not lanes_mod.workflow_runs_on_lane(entry, LEGACY), wf_id
 
 
 def test_image_matrix_skips_unbuilt_images_unless_asked_for():
@@ -73,6 +119,14 @@ def test_per_commit_matrix_only_lists_provisioned_lanes():
             "endpoint_id": "abc123"} in rows
     assert [r["lane"] for r in lanes_mod.per_commit_matrix(provisioned, "py313-torch2.14.1-cu130")] == [
         "py313-torch2.14.1-cu130"]
+
+
+def test_per_commit_matrix_lists_each_lanes_workflows_with_the_manifest():
+    manifest = {"workflows": {"a": {"enabled": True}, "b": {"enabled": True, "lanes": [NEW]},
+                              "c": {"enabled": False}}}
+    rows = {r["lane"]: r for r in lanes_mod.per_commit_matrix(REGISTRY, manifest=manifest)}
+    assert rows[LEGACY]["workflows"] == "a"
+    assert rows[NEW]["workflows"] == "a,b"
 
 
 def test_lanes_on_image_never_moves_the_legacy_lane():
@@ -160,6 +214,17 @@ def test_dockerfile_takes_every_build_arg_the_workflow_passes():
     for field, arg in (("python", "PYTHON_VERSION"), ("cuda", "CUDA_VERSION"),
                        ("torch_index", "TORCH_INDEX"), ("torch_spec", "TORCH_SPEC")):
         assert f"{arg}=${{{{ matrix.{field} }}}}" in workflow
+
+
+def test_dockerfile_bakes_the_pack_registry():
+    """The image carries the registry and the bake step, and a registry change
+    (a pin bump) triggers a rebuild."""
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "COPY manifest/custom_nodes.json /comfy-config/custom_nodes.json" in dockerfile
+    assert "bake --manifest /comfy-config/custom_nodes.json" in dockerfile
+    assert "libgl1" in dockerfile and "SAM2_BUILD_CUDA=0" in dockerfile
+    build = (ROOT / ".github" / "workflows" / "build-image.yml").read_text(encoding="utf-8")
+    assert "- manifest/custom_nodes.json" in build
 
 
 def test_workflows_derive_their_matrices_from_the_registry():

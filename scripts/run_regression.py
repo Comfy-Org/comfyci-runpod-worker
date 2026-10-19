@@ -27,11 +27,16 @@ from pathlib import Path
 import commit_meta
 import compare
 import index_builder
+import lanes as lanes_mod
+import packs
 import storage
 from submit_and_poll import INFRA_STATUSES, RunPodClient, run_workflow_job
 
 HERE = Path(__file__).resolve().parent
-EXEC_FAIL_STATUSES = {"execution_error", "validation_error", "timeout", "prompt_rejected"}
+# custom_node_error: a custom-node pack the workflow requested did not import on
+# the commit under test (whether or not the workflow uses any of its nodes).
+EXEC_FAIL_STATUSES = {"execution_error", "validation_error", "timeout", "prompt_rejected",
+                      "custom_node_error"}
 
 
 def load_manifest(path: Path) -> dict:
@@ -143,7 +148,9 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
 
     endpoint_id = entry.get("endpoint_id") or args.endpoint_id
     client = RunPodClient(endpoint_id)
-    print(f"[{wf_id}] submitting to RunPod (endpoint {endpoint_id}, lane {args.lane_id})")
+    pack_records = packs.records_for(entry, repo_root)
+    print(f"[{wf_id}] submitting to RunPod (endpoint {endpoint_id}, lane {args.lane_id}"
+          + (f", packs {', '.join(r['name'] for r in pack_records)}" if pack_records else "") + ")")
     run_rec = run_workflow_job(
         client, wf_id, workflow,
         comfy_commit=args.commit,
@@ -153,6 +160,7 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
         workdir=workdir,
         comfy_repo=args.repo_url,
         lane=args.lane_id,
+        custom_nodes=pack_records,
     )
     published = {k: v for k, v in run_rec.items() if k != "outputs_dir"}  # runner-local path
     (workdir / "run.json").write_text(json.dumps(published, indent=2), encoding="utf-8")
@@ -255,7 +263,8 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
             "comfy_version": run_rec.get("comfy_version"),
             "torch_version": run_rec.get("torch_version"),
             "python_version": run_rec.get("python_version"),
-            "env": run_rec.get("env")}
+            "env": run_rec.get("env"),
+            "custom_nodes": run_rec.get("custom_nodes")}
 
 
 def write_summary(path: Path, summary: dict):
@@ -322,8 +331,15 @@ def main():
         if (entry.get("enabled") if args.workflows == "all"
             else wf_id in args.workflows.split(","))
     }
+    # The lane filter is hard: a workflow restricted to other lanes (its packs
+    # are only baked there) is skipped even when named explicitly, and the
+    # dashboard shows its cell as not run.
+    for wf_id in [w for w, e in selected.items() if not lanes_mod.workflow_runs_on_lane(e, lane_id)]:
+        print(f"[{wf_id}] not run on lane {lane_id} (manifest lanes: "
+              f"{', '.join(selected[wf_id]['lanes'])})")
+        del selected[wf_id]
     if not selected:
-        print("no workflows selected; nothing to do")
+        print(f"no workflows selected for lane {lane_id}; nothing to do")
         return 0
 
     if not args.skip_publish:

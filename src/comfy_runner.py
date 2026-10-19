@@ -5,6 +5,16 @@ server with an isolated output directory, wait for /system_stats, validate the
 workflow against /object_info (recording every adaptation so schema drift is
 visible), POST /prompt, poll /history until completed or errored, inventory the
 PNG outputs with sha256 hashes.
+
+When the job installed custom-node packs, the server log is read once the
+server is up: a requested pack that ComfyUI did not import (its summary says
+IMPORT FAILED, or it has no line at all) fails the run as custom_node_error
+before the workflow is even validated, so a broken pack is reported as such
+and not as a missing node class. A server that dies or never answers is
+reported the same way only when the log proves a pack is at fault (the import
+summary was printed and the pack is not ok in it, or ComfyUI said a pip pack
+is absent); a log that never reached pack loading keeps the infrastructure
+status, with the packs' status attached as detail.
 """
 from __future__ import annotations
 
@@ -22,8 +32,13 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import custom_nodes
+
 COMFY_ROOT = Path(os.environ.get("COMFY_ROOT", "/comfyui"))
 EXTRA_MODEL_PATHS = os.environ.get("EXTRA_MODEL_PATHS", "/comfy-config/extra_model_paths.yaml")
+# Failures that happen while the server is coming up: when the log proves a
+# requested pack did not load, the pack is the explanation, not the infrastructure.
+STARTUP_FAILURES = ("server_died", "server_start_timeout")
 
 
 class ExecutionFailure(RuntimeError):
@@ -219,24 +234,25 @@ def collect_outputs(output_dir: Path) -> list[dict]:
 
 
 def execute(workflow: dict, timeout_s: float = 600, extra_flags: list[str] | None = None,
-            port: int = 8199) -> dict:
+            port: int = 8199, required_custom_nodes: list[dict] | None = None) -> dict:
     """Run one workflow on a fresh server. Returns the run record; outputs stay on disk."""
     run_uuid = uuid.uuid4().hex[:12]
     output_dir = Path(f"/tmp/comfyci-out-{run_uuid}")
     output_dir.mkdir(parents=True, exist_ok=True)
     log_path = Path(f"/tmp/comfyci-log-{run_uuid}.log")
+    required = list(required_custom_nodes or [])
 
     record: dict = {"output_dir": str(output_dir), "log_path": str(log_path)}
     t_spawn = time.monotonic()
     proc, log_f = start_comfy(port, output_dir, log_path, extra_flags or [])
     try:
-        _execute(port, proc, workflow, timeout_s, record, t_spawn)
+        _execute(port, proc, workflow, timeout_s, record, t_spawn, log_path, required)
     except ExecutionFailure as e:
         # Whatever went wrong, the server log says why: stop the server so the log
         # is complete, then carry its tail with the failure.
         kill_comfy(proc)
         log_f.close()
-        e.detail = {**e.detail, "log_tail": log_tail(log_path)}
+        explain_failure(e, log_path, required)
         raise
     finally:
         kill_comfy(proc)
@@ -252,15 +268,40 @@ def execute(workflow: dict, timeout_s: float = 600, extra_flags: list[str] | Non
     return record
 
 
-def log_tail(log_path: Path, chars: int = 6000) -> str:
+def explain_failure(e: ExecutionFailure, log_path: Path, required: list[dict]) -> None:
+    """Attach the log tail and, when packs were requested, their import status
+    to a failure. A startup failure (server died or never answered) becomes
+    custom_node_error only when the log proves a requested pack is at fault
+    (custom_nodes.startup_blame); a server that fell over before loading packs
+    keeps its infrastructure status so the orchestrator retries it."""
+    e.detail = {**e.detail, "log_tail": log_tail(log_path)}
+    if not required or "custom_nodes" in e.detail:
+        return
+    text = log_text(log_path)
+    status = custom_nodes.import_status(text, required)
+    e.detail["custom_nodes"] = status
+    if e.status in STARTUP_FAILURES:
+        blamed = custom_nodes.startup_blame(text, required, status)
+        if blamed:
+            e.detail["message"] = custom_nodes.describe(status, blamed)
+            e.detail["startup_failure"] = e.status
+            e.status = "custom_node_error"
+
+
+def log_text(log_path: Path) -> str:
     try:
-        return log_path.read_text(errors="replace")[-chars:]
+        return log_path.read_text(errors="replace")
     except Exception:
         return ""
 
 
+def log_tail(log_path: Path, chars: int = 6000) -> str:
+    return log_text(log_path)[-chars:]
+
+
 def _execute(port: int, proc: subprocess.Popen, workflow: dict, timeout_s: float,
-             record: dict, t_spawn: float) -> None:
+             record: dict, t_spawn: float, log_path: Path,
+             required_custom_nodes: list[dict]) -> None:
     """Drive the already-started server through one workflow, filling `record`."""
     t_ready = wait_server_ready(port, proc)
     record["server_start_s"] = round(t_ready - t_spawn, 2)
@@ -275,6 +316,16 @@ def _execute(port: int, proc: subprocess.Popen, workflow: dict, timeout_s: float
             record["gpu_name"] = devices[0].get("name")
     except Exception:
         pass
+
+    if required_custom_nodes:
+        # Custom nodes are imported before the server binds, so the summary is
+        # in the log by now; a requested pack that did not load fails the run
+        # here, whether or not the workflow uses any of its nodes.
+        status = custom_nodes.check_imports(log_path, required_custom_nodes)
+        record["custom_nodes"] = status
+        if custom_nodes.failed_packs(status):
+            raise ExecutionFailure("custom_node_error", {"message": custom_nodes.describe(status),
+                                                         "custom_nodes": status})
 
     record["validation"] = validate_workflow(port, workflow)
     if not record["validation"]["ok"]:

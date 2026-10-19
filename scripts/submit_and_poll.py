@@ -19,9 +19,11 @@ POLL_INTERVAL_S = 10
 QUEUE_DEADLINE_S = 600
 COLD_START_ALLOWANCE_S = 900
 
+# custom_node_install_error: a pack could not be fetched or its requirements
+# could not be pip-installed on the worker (network, not the commit under test).
 INFRA_STATUSES = {"checkout_error", "missing_model", "server_start_timeout",
                   "server_died", "worker_error", "infra_error", "no_outputs",
-                  "bad_request"}
+                  "bad_request", "custom_node_install_error"}
 # bad_request is a deterministic orchestrator/handler contract error: retrying
 # it would only buy a second identical failure.
 RETRYABLE_STATUSES = INFRA_STATUSES - {"bad_request"}
@@ -116,13 +118,16 @@ def _write_outputs(output_entries: list[dict], dest: Path) -> list[dict]:
 def run_workflow_job(client: RunPodClient, workflow_id: str, workflow_json: dict,
                      comfy_commit: str, models: list[dict], timeout_s: float,
                      comfy_flags: list[str], workdir: Path,
-                     comfy_repo: str | None = None, lane: str | None = None) -> dict:
+                     comfy_repo: str | None = None, lane: str | None = None,
+                     custom_nodes: list[dict] | None = None) -> dict:
     """Submit + poll one workflow with a single retry on infra flakes.
 
     Returns a run record: {"status": ..., "outputs_dir": ..., worker fields...}.
     Worker-reported statuses pass through; transport/queue problems become
     "infra_error". `lane` is echoed by the worker so a record names the lane
-    it was produced for.
+    it was produced for. `custom_nodes` are the pack records (scripts/packs.py)
+    the worker installs before the server starts; the record carries the
+    worker's per-pack install and import report under the same key.
     """
     job_input = {
         "mode": "run",
@@ -134,6 +139,7 @@ def run_workflow_job(client: RunPodClient, workflow_id: str, workflow_json: dict
         "timeout_s": timeout_s,
         "comfy_flags": comfy_flags,
         "lane": lane,
+        "custom_nodes": list(custom_nodes or []),
     }
     last_err = None
     for attempt in (1, 2):
@@ -150,7 +156,7 @@ def run_workflow_job(client: RunPodClient, workflow_id: str, workflow_json: dict
         record = {k: out.get(k) for k in
                   ("status", "error", "comfy_version", "torch_version", "python_version",
                    "gpu_name", "vram_peak_mb", "rss_peak_mb", "validation", "timings",
-                   "commit_checked_out", "env", "lane")}
+                   "commit_checked_out", "env", "lane", "custom_nodes")}
         # The worker reports failure detail under `failure` (a top-level `error`
         # makes the RunPod SDK fail the job and drop a dict detail). Older images
         # still use `error`, which the SDK may lift to the job level: read all three.

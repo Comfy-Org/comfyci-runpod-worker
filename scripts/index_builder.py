@@ -150,6 +150,10 @@ def entry_from_summary(summary: dict, lane: str, layout: int,
             "g": wr.get("golden_tag"),
             "th": wr.get("thumbnail"),
         }
+        if wr.get("custom_nodes"):
+            # Per custom-node pack the run requested: whether ComfyUI imported it.
+            w[wf_id]["cn"] = {name: (info or {}).get("import")
+                              for name, info in wr["custom_nodes"].items()}
 
     verdicts = [x["v"] for x in w.values()]
     return {

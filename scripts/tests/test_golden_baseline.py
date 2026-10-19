@@ -180,3 +180,25 @@ def test_bless_only_validates_every_workflow_first(tmp_path, capsys):
     check = _clone(tmp_path, remote, "check2")
     current = json.loads((check / "regression/golden/flux/current.json").read_text())
     assert current["tag"] == "v0.33.2" and current["reason"] == "re-point"
+
+
+def test_blessed_record_keeps_the_packs_a_golden_was_generated_with():
+    packs = {"ComfyUI-KJNodes": {"sha": "e" * 40, "source": "cache", "import": "ok", "seconds": 1.2}}
+    rec = golden_baseline.blessed_record("v1", COMMIT, {**RUN, "custom_nodes": packs}, "lane", "golden_run",
+                                         "dev", None, None)
+    assert rec["custom_nodes"] == packs
+    assert golden_baseline.blessed_record("v1", COMMIT, RUN, "lane", "golden_run", "dev", None,
+                                          None)["custom_nodes"] is None
+
+
+def test_lane_filter_skips_workflows_restricted_to_other_lanes(tmp_path, capsys):
+    """A workflow whose packs are only baked on another lane is skipped on this
+    one, bless-only included, and nothing is left to do when all are skipped."""
+    remote = _remote(tmp_path)
+    root = _manifest(tmp_path)
+    manifest = json.loads((root / "manifest" / "workflows.json").read_text())
+    manifest["workflows"]["flux"]["lanes"] = ["elsewhere"]
+    (root / "manifest" / "workflows.json").write_text(json.dumps(manifest))
+    with pytest.raises(SystemExit, match="no workflows selected for lane legacy"):
+        _run_main(tmp_path, remote, root, "--ref", "v0.33.2", "--workflows", "flux", "--bless-only")
+    assert "[flux] not run on lane legacy (manifest lanes: elsewhere); skipped" in capsys.readouterr().out

@@ -4,7 +4,8 @@
 # are always pinned to a sha). Uses the workflow's GITHUB_TOKEN for GHCR.
 # NOTE: a torch/CUDA change in an image shifts the determinism noise floor —
 # regenerate and re-bless that lane's goldens (golden-baseline.yml) after any
-# such rebuild.
+# such rebuild. A custom-node pin bump (manifest/custom_nodes.json) rebuilds too;
+# re-bless the pack workflows afterwards.
 name: Build worker images
 on:
   push:
@@ -14,6 +15,7 @@ on:
       - 'src/**'
       - 'docker/**'
       - manifest/lanes.json
+      - manifest/custom_nodes.json
       - '.github/workflows/build-image.yml'
   workflow_dispatch:
     inputs:

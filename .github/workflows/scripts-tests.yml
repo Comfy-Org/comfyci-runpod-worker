@@ -1,12 +1,13 @@
 # Unit tests for the CPU-side orchestration scripts (no RunPod, no network),
-# plus the manifest lint that checks every workflow against its model list.
+# the manifest lint that checks every workflow against its model list, and the
+# worker's custom-node pack module (install bookkeeping and log parsing).
 name: Script tests
 on:
   pull_request:
-    paths: ['scripts/**', 'manifest/**', 'docker/extra_model_paths.yaml', '.github/workflows/scripts-tests.yml']
+    paths: ['scripts/**', 'src/custom_nodes.py', 'manifest/**', 'docker/extra_model_paths.yaml', '.github/workflows/scripts-tests.yml']
   push:
     branches: [main]
-    paths: ['scripts/**', 'manifest/**', 'docker/extra_model_paths.yaml', '.github/workflows/scripts-tests.yml']
+    paths: ['scripts/**', 'src/custom_nodes.py', 'manifest/**', 'docker/extra_model_paths.yaml', '.github/workflows/scripts-tests.yml']
 
 permissions:
   contents: read

@@ -1,0 +1,102 @@
+{
+  "4": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "sd_xl_base_1.0.safetensors"
+    }
+  },
+  "5": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "studio portrait photograph of an old fisherman with a weathered face and a grey beard, warm golden hour light, harbour in the background, sharp focus, 85mm lens",
+      "clip": ["4", 1]
+    }
+  },
+  "7": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "blurry, low quality, deformed, watermark, text, oversaturated",
+      "clip": ["4", 1]
+    }
+  },
+  "3": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 20250901,
+      "steps": 20,
+      "cfg": 7.0,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1.0,
+      "model": ["4", 0],
+      "positive": ["6", 0],
+      "negative": ["7", 0],
+      "latent_image": ["5", 0]
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["3", 0],
+      "vae": ["4", 2]
+    }
+  },
+  "10": {
+    "class_type": "ImageResizeKJv2",
+    "inputs": {
+      "image": ["8", 0],
+      "width": 768,
+      "height": 768,
+      "upscale_method": "lanczos",
+      "keep_proportion": "resize",
+      "pad_color": "0, 0, 0",
+      "crop_position": "center",
+      "divisible_by": 2,
+      "device": "cpu"
+    }
+  },
+  "11": {
+    "class_type": "ImageCrop",
+    "inputs": {
+      "image": ["10", 0],
+      "width": 384,
+      "height": 768,
+      "x": 0,
+      "y": 0
+    }
+  },
+  "12": {
+    "class_type": "ColorMatchV2",
+    "inputs": {
+      "image_target": ["10", 0],
+      "image_ref": ["11", 0],
+      "method": "mkl",
+      "strength": 1.0,
+      "multithread": false
+    }
+  },
+  "13": {
+    "class_type": "ImageConcanate",
+    "inputs": {
+      "image1": ["10", 0],
+      "image2": ["12", 0],
+      "direction": "right",
+      "match_image_size": false
+    }
+  },
+  "14": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "kjnodes_sdxl_t2i",
+      "images": ["13", 0]
+    }
+  }
+}

@@ -129,3 +129,50 @@ def test_summary_out_is_not_written_when_publishing_fails(tmp_path, monkeypatch)
         run_regression.main()
     # No summary, so no PR comment linking to results that were never published.
     assert not out.exists()
+
+
+def test_lane_filter_skips_workflows_restricted_to_other_lanes(tmp_path, monkeypatch, capsys):
+    """A workflow restricted to another lane is skipped on this one even when
+    named explicitly; the summary simply has no cell for it."""
+    import json
+    import sys
+    import commit_meta
+    import storage
+    manifest = tmp_path / "manifest" / "workflows.json"
+    manifest.parent.mkdir()
+    manifest.write_text(json.dumps({
+        "defaults": {"timeout_s": 600, "comfy_flags": [], "thresholds": {}},
+        "workflows": {
+            "sdxl_t2i": {"enabled": True, "workflow_path": "x", "models": []},
+            "kjnodes_sdxl_t2i": {"enabled": True, "workflow_path": "x", "models": [],
+                                 "custom_nodes": ["ComfyUI-KJNodes"],
+                                 "lanes": ["py313-torch2.14.1-cu130"]},
+        }}))
+    monkeypatch.setattr(storage, "from_args", lambda args: FakeStore({}))
+    monkeypatch.setattr(commit_meta, "fetch_commit_meta", lambda sha: None)
+    ran = []
+    monkeypatch.setattr(run_regression, "process_workflow",
+                        lambda wf_id, *a: ran.append(wf_id) or {"workflow_id": wf_id, "worker_status": "ok",
+                                                                "verdict": "pass", "detail": None})
+    out = tmp_path / "summary.json"
+    monkeypatch.setattr(sys, "argv", ["run_regression.py", "--manifest", str(manifest), "--commit", "new",
+                                      "--branch", "master", "--lane", "py312-torch2.11.0-cu128",
+                                      "--workflows", "sdxl_t2i,kjnodes_sdxl_t2i",
+                                      "--skip-publish", "--summary-out", str(out)])
+    assert run_regression.main() == 0
+    assert ran == ["sdxl_t2i"]
+    assert set(json.loads(out.read_text())["workflows"]) == {"sdxl_t2i"}
+    assert "[kjnodes_sdxl_t2i] not run on lane py312-torch2.11.0-cu128" in capsys.readouterr().out
+
+    monkeypatch.setattr(sys, "argv", ["run_regression.py", "--manifest", str(manifest), "--commit", "new",
+                                      "--branch", "master", "--lane", "py312-torch2.11.0-cu128",
+                                      "--workflows", "kjnodes_sdxl_t2i", "--skip-publish"])
+    assert run_regression.main() == 0
+    assert ran == ["sdxl_t2i"]
+    assert "no workflows selected for lane" in capsys.readouterr().out
+
+
+def test_custom_node_errors_are_execution_failures():
+    assert "custom_node_error" in run_regression.EXEC_FAIL_STATUSES
+    assert "custom_node_install_error" in run_regression.INFRA_STATUSES
+    assert not run_regression.EXEC_FAIL_STATUSES & run_regression.INFRA_STATUSES
