@@ -116,12 +116,13 @@ def _write_outputs(output_entries: list[dict], dest: Path) -> list[dict]:
 def run_workflow_job(client: RunPodClient, workflow_id: str, workflow_json: dict,
                      comfy_commit: str, models: list[dict], timeout_s: float,
                      comfy_flags: list[str], workdir: Path,
-                     comfy_repo: str | None = None) -> dict:
+                     comfy_repo: str | None = None, lane: str | None = None) -> dict:
     """Submit + poll one workflow with a single retry on infra flakes.
 
     Returns a run record: {"status": ..., "outputs_dir": ..., worker fields...}.
     Worker-reported statuses pass through; transport/queue problems become
-    "infra_error".
+    "infra_error". `lane` is echoed by the worker so a record names the lane
+    it was produced for.
     """
     job_input = {
         "mode": "run",
@@ -132,6 +133,7 @@ def run_workflow_job(client: RunPodClient, workflow_id: str, workflow_json: dict
         "models": models,
         "timeout_s": timeout_s,
         "comfy_flags": comfy_flags,
+        "lane": lane,
     }
     last_err = None
     for attempt in (1, 2):
@@ -148,9 +150,12 @@ def run_workflow_job(client: RunPodClient, workflow_id: str, workflow_json: dict
         record = {k: out.get(k) for k in
                   ("status", "error", "comfy_version", "torch_version", "python_version",
                    "gpu_name", "vram_peak_mb", "rss_peak_mb", "validation", "timings",
-                   "commit_checked_out")}
-        # The RunPod SDK lifts a handler's `error` key to the job level, so
-        # fall back to it or the worker's failure detail is lost.
+                   "commit_checked_out", "env", "lane")}
+        # The worker reports failure detail under `failure` (a top-level `error`
+        # makes the RunPod SDK fail the job and drop a dict detail). Older images
+        # still use `error`, which the SDK may lift to the job level: read all three.
+        if record.get("error") is None:
+            record["error"] = out.get("failure")
         if record.get("error") is None and st.get("error") is not None:
             record["error"] = _error_detail(st.get("error"))
         record["runpod_job_id"] = job_id

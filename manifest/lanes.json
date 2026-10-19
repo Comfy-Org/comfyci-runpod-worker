@@ -1,6 +1,50 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "primary": "py312-torch2.11.0-cu128",
+  "endpoint_defaults": {
+    "gpu_pools": [
+      "ADA_24"
+    ],
+    "gpu_count": 1,
+    "workers": {
+      "min": 0,
+      "max": 3,
+      "idleTimeout": 20
+    },
+    "scaling": {
+      "type": "QUEUE_DELAY",
+      "queueDelay": 4
+    },
+    "timeout_ms": 3600000,
+    "flashboot": "FLASHBOOT",
+    "disk_gb": 40,
+    "network_volumes": [
+      "n0xnkwnogx"
+    ],
+    "data_center_ids": [
+      "EU-RO-1"
+    ],
+    "registry": "cmszcugyp001tfk7ooe7rtp4d",
+    "env": {
+      "RUNPOD_INIT_TIMEOUT": "800"
+    }
+  },
+  "images": {
+    "cu128-t2110": {
+      "python": "3.12",
+      "cuda": "12.8",
+      "torch_index": "https://download.pytorch.org/whl/cu128",
+      "torch_spec": "torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0",
+      "build": false,
+      "note": "Built before images were data; its endpoint stays on the sha tag it runs today (5564e37) until the lane retires, so it is not rebuilt."
+    },
+    "cu130-t2141": {
+      "python": "3.13",
+      "cuda": "13.0",
+      "torch_index": "https://download.pytorch.org/whl/cu130",
+      "torch_spec": "torch==2.14.1 torchvision==0.29.1"
+    }
+  },
   "lanes": {
     "py312-torch2.11.0-cu128": {
       "label": "py3.12 / torch 2.11.0 / cu128 / RTX 4090",
@@ -12,7 +56,24 @@
       "blocking": true,
       "role": "primary",
       "layout": 1,
-      "prefix": "regression"
+      "prefix": "regression",
+      "image": "cu128-t2110",
+      "endpoint_id": "xwdhxbhd9qixjj"
+    },
+    "py313-torch2.14.1-cu130": {
+      "label": "py3.13 / torch 2.14.1 / cu130 / RTX 4090",
+      "python": "3.13",
+      "torch": "2.14.1",
+      "cuda": "13.0",
+      "gpu": "RTX 4090",
+      "cadence": "per-commit",
+      "blocking": false,
+      "role": "lane",
+      "layout": 2,
+      "prefix": "regression/lanes/py313-torch2.14.1-cu130",
+      "image": "cu130-t2141",
+      "endpoint_id": "2192t0ar23kdb5",
+      "min_cuda_driver": "13.0"
     }
   }
 }

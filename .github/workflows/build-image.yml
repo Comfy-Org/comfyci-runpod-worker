@@ -1,8 +1,11 @@
-# Build and push the worker image to GHCR (no registry secrets needed — uses
-# the workflow's GITHUB_TOKEN). NOTE: a torch/CUDA change in this image shifts
-# the determinism noise floor — regenerate and re-bless goldens
-# (golden-baseline.yml) after any such rebuild.
-name: Build worker image
+# Build and push one worker image per torch build declared under `images` in
+# manifest/lanes.json, tagged :<image> and :<image>-<sha>, then point the lanes
+# that run the image at the new sha tag (RunPod caches a moving tag, so endpoints
+# are always pinned to a sha). Uses the workflow's GITHUB_TOKEN for GHCR.
+# NOTE: a torch/CUDA change in an image shifts the determinism noise floor —
+# regenerate and re-bless that lane's goldens (golden-baseline.yml) after any
+# such rebuild.
+name: Build worker images
 on:
   push:
     branches: [main]
@@ -10,15 +13,53 @@ on:
       - Dockerfile
       - 'src/**'
       - 'docker/**'
+      - manifest/lanes.json
       - '.github/workflows/build-image.yml'
   workflow_dispatch:
+    inputs:
+      images:
+        description: csv of image ids from manifest/lanes.json (empty = every buildable image)
+        default: ''
+      repoint:
+        description: point the lanes running each built image at the new tag
+        type: boolean
+        default: true
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - id: plan
+        env:
+          IMAGES: ${{ inputs.images }}
+        run: |
+          cd scripts
+          if [ -n "$IMAGES" ]; then
+            matrix=$(python lanes.py images --only "$IMAGES")
+          else
+            matrix=$(python lanes.py images)
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "$matrix" | python -m json.tool
+
   build:
+    needs: plan
+    if: needs.plan.outputs.matrix != '[]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.matrix) }}
+    name: ${{ matrix.image }}
     steps:
       - uses: actions/checkout@v4
       - name: Free runner disk space (torch layers are large)
@@ -37,8 +78,31 @@ jobs:
         with:
           context: .
           push: true
+          build-args: |
+            IMAGE_ID=${{ matrix.image }}
+            PYTHON_VERSION=${{ matrix.python }}
+            CUDA_VERSION=${{ matrix.cuda }}
+            TORCH_INDEX=${{ matrix.torch_index }}
+            TORCH_SPEC=${{ matrix.torch_spec }}
+            IMAGE_SHA=${{ github.sha }}
           tags: |
-            ghcr.io/comfy-org/comfyci-runpod-worker:latest
-            ghcr.io/comfy-org/comfyci-runpod-worker:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            ghcr.io/comfy-org/comfyci-runpod-worker:${{ matrix.image }}
+            ghcr.io/comfy-org/comfyci-runpod-worker:${{ matrix.image }}-${{ github.sha }}
+          # One cache per image in the registry: the 10 GB Actions cache cannot
+          # hold several torch builds.
+          cache-from: type=registry,ref=ghcr.io/comfy-org/comfyci-runpod-worker:buildcache-${{ matrix.image }}
+          cache-to: type=registry,ref=ghcr.io/comfy-org/comfyci-runpod-worker:buildcache-${{ matrix.image }},mode=max
+      - uses: actions/setup-python@v5
+        if: github.event_name == 'push' || inputs.repoint
+        with:
+          python-version: '3.12'
+      - name: Point lanes at the new image
+        if: github.event_name == 'push' || inputs.repoint
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          IMAGE: ${{ matrix.image }}
+          TAG: ${{ matrix.image }}-${{ github.sha }}
+        run: |
+          pip install -r scripts/requirements.txt
+          cd scripts
+          python runpod_endpoints.py set-image --image "$IMAGE" --tag "$TAG"

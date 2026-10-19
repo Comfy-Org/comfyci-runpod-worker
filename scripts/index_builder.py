@@ -20,6 +20,7 @@ other's entries.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -33,6 +34,26 @@ LANES_FILE = Path(__file__).resolve().parents[1] / "manifest" / "lanes.json"
 
 def load_lanes(path: Path | None = None) -> dict:
     return json.loads(Path(path or LANES_FILE).read_text(encoding="utf-8"))
+
+
+def lane_config(lanes: dict, lane_id: str) -> dict:
+    """One lane's entry from the registry ({} when unknown)."""
+    return (lanes.get("lanes") or {}).get(lane_id) or {}
+
+
+def lane_endpoint(lanes: dict, lane_id: str, env: dict | None = None) -> str | None:
+    """The RunPod endpoint a lane submits to.
+
+    A lane that names its endpoint in lanes.json uses that one. A lane that lists
+    `"endpoint_id": null` has not been provisioned yet and gets None, never the
+    RUNPOD_ENDPOINT_ID fallback: that would quietly run it on another lane's
+    image and file the results under this lane. Only a lane with no endpoint_id
+    key at all (older registries) falls back to the environment.
+    """
+    cfg = lane_config(lanes, lane_id)
+    if "endpoint_id" in cfg:
+        return cfg["endpoint_id"] or None
+    return (os.environ if env is None else env).get("RUNPOD_ENDPOINT_ID") or None
 
 
 def lane_for_prefix(lanes: dict, prefix: str) -> str | None:

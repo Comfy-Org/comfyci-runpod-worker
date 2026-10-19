@@ -184,6 +184,8 @@ def main():
         if not lane:
             raise SystemExit(f"no lane in manifest/lanes.json has prefix {args.prefix!r}; pass --lane")
     layout = lanes["lanes"][lane].get("layout", 1)
+    # Generating runs on the lane's own endpoint; blessing and promoting touch storage only.
+    default_endpoint = index_builder.lane_endpoint(lanes, lane)
     store = storage.from_args(args)
 
     manifest_path = Path(args.manifest).resolve()
@@ -249,6 +251,10 @@ def main():
         return finish(f"golden {tag} from {args.from_run[:20]} ({', '.join(sorted(selected))})",
                       failed)
 
+    if not default_endpoint:
+        raise SystemExit(f"lane {lane!r} has no endpoint (endpoint_id is null in "
+                         "manifest/lanes.json): create one for its image and commit the id "
+                         "before generating goldens for it")
     commit = resolve_ref(args.repo_url, args.ref)
     print(f"golden ref {args.ref} -> {commit}")
 
@@ -259,18 +265,18 @@ def main():
             continue
         workflow = json.loads((repo_root / entry["workflow_path"]).read_text(encoding="utf-8"))
         workflow = apply_seed_overrides(workflow, entry.get("seed_overrides"))
-        endpoint_id = entry.get("endpoint_id") or os.environ["RUNPOD_ENDPOINT_ID"]
+        endpoint_id = entry.get("endpoint_id") or default_endpoint
         client = RunPodClient(endpoint_id)
         wf_dir = Path(args.workdir) / wf_id
         runs = {}
         for r in (1, 2):
-            print(f"[{wf_id}] golden run r{r} @ {args.ref}")
+            print(f"[{wf_id}] golden run r{r} @ {args.ref} (lane {lane}, endpoint {endpoint_id})")
             rec = run_workflow_job(
                 client, wf_id, workflow, comfy_commit=commit,
                 models=entry.get("models", []),
                 timeout_s=entry_value(entry, defaults, "timeout_s"),
                 comfy_flags=entry_value(entry, defaults, "comfy_flags"),
-                workdir=wf_dir / f"r{r}", comfy_repo=args.repo_url)
+                workdir=wf_dir / f"r{r}", comfy_repo=args.repo_url, lane=lane)
             runs[r] = rec
             if rec.get("status") != "ok":
                 print(f"::error::[{wf_id}] golden r{r} failed: {rec.get('status')} "

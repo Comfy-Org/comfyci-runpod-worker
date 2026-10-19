@@ -55,6 +55,22 @@ def test_first_attempt_record_decodes_dict_errors(tmp_path):
     assert rec["delay_s"] == 7.325 and rec["delay_ms"] == 7325 and rec["execution_ms"] == 907
 
 
+def test_failure_detail_is_read_from_the_workers_failure_key(tmp_path):
+    # The worker reports under `failure`: a top-level `error` makes the RunPod SDK
+    # fail the job-done call and the detail vanishes from the stored output.
+    detail = {"node_id": "44:2", "node_type": "UNETLoader", "message": "boom", "log_tail": "..."}
+    client = FakeClient([
+        {"status": "COMPLETED", "delayTime": 10, "executionTime": 900,
+         "output": {"status": "execution_error", "failure": detail, "timings": {},
+                    "env": {"image": "cu130-t2141"}, "lane": "py313-torch2.14.1-cu130"}},
+    ])
+    rec = _job(client, tmp_path)
+    assert client.runs == 1
+    assert rec["status"] == "execution_error"
+    assert rec["error"] == detail
+    assert rec["env"] == {"image": "cu130-t2141"} and rec["lane"] == "py313-torch2.14.1-cu130"
+
+
 def test_bad_request_is_infra_but_not_retried(tmp_path):
     client = FakeClient([
         {"status": "COMPLETED", "output": {"status": "bad_request",
