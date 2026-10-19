@@ -12,6 +12,11 @@ import runpod_endpoints
 
 ROOT = Path(__file__).resolve().parents[2]
 REGISTRY = json.loads((ROOT / "manifest" / "lanes.json").read_text(encoding="utf-8"))
+# The committed registry provisions lanes over time; these tests want one lane that is
+# declared but not yet provisioned, whatever the file says today.
+NEW = "py313-torch2.14.1-cu130"
+PENDING = copy.deepcopy(REGISTRY)
+PENDING["lanes"][NEW]["endpoint_id"] = None
 
 
 def test_the_committed_registry_is_consistent():
@@ -54,13 +59,13 @@ def test_image_matrix_skips_unbuilt_images_unless_asked_for():
 
 
 def test_per_commit_matrix_only_lists_provisioned_lanes():
-    rows = lanes_mod.per_commit_matrix(REGISTRY)
+    rows = lanes_mod.per_commit_matrix(PENDING)
     ids = [r["lane"] for r in rows]
-    assert "py312-torch2.11.0-cu128" in ids
+    assert "py312-torch2.11.0-cu128" in ids and NEW not in ids
     for row in rows:
         assert row["endpoint_id"]
         assert row["prefix"]
-    provisioned = copy.deepcopy(REGISTRY)
+    provisioned = copy.deepcopy(PENDING)
     provisioned["lanes"]["py313-torch2.14.1-cu130"]["endpoint_id"] = "abc123"
     rows = lanes_mod.per_commit_matrix(provisioned)
     assert {"lane": "py313-torch2.14.1-cu130",
@@ -71,9 +76,9 @@ def test_per_commit_matrix_only_lists_provisioned_lanes():
 
 
 def test_lanes_on_image_never_moves_the_legacy_lane():
-    assert lanes_mod.lanes_on_image(REGISTRY, "cu128-t2110") == []
-    assert lanes_mod.lanes_on_image(REGISTRY, "cu130-t2141") == []  # not provisioned yet
-    provisioned = copy.deepcopy(REGISTRY)
+    assert lanes_mod.lanes_on_image(PENDING, "cu128-t2110") == []
+    assert lanes_mod.lanes_on_image(PENDING, "cu130-t2141") == []  # not provisioned yet
+    provisioned = copy.deepcopy(PENDING)
     provisioned["lanes"]["py313-torch2.14.1-cu130"]["endpoint_id"] = "abc123"
     assert lanes_mod.lanes_on_image(provisioned, "cu130-t2141") == ["py313-torch2.14.1-cu130"]
 
@@ -90,7 +95,7 @@ def test_lane_endpoint_never_falls_back_for_an_unprovisioned_lane():
 
 
 def test_set_image_plans_one_patch_per_provisioned_lane_and_refuses_foreign_tags():
-    reg = copy.deepcopy(REGISTRY)
+    reg = copy.deepcopy(PENDING)
     reg["lanes"]["py313-torch2.14.1-cu130"]["endpoint_id"] = "abc123"
     plan = runpod_endpoints.plan_set_image(reg, "cu130-t2141-deadbeef", image_id="cu130-t2141")
     assert plan == [("py313-torch2.14.1-cu130", "abc123",
@@ -106,7 +111,7 @@ def test_set_image_plans_one_patch_per_provisioned_lane_and_refuses_foreign_tags
 
 
 def test_endpoint_body_comes_from_defaults_plus_the_lane():
-    body = runpod_endpoints.endpoint_body(REGISTRY, "py313-torch2.14.1-cu130", "cu130-t2141-abc")
+    body = runpod_endpoints.endpoint_body(PENDING, "py313-torch2.14.1-cu130", "cu130-t2141-abc")
     assert body["name"] == "comfyci-cu130-t2141"
     assert body["type"] == "QUEUE"
     assert body["image"] == "ghcr.io/comfy-org/comfyci-runpod-worker:cu130-t2141-abc"
@@ -121,24 +126,24 @@ def test_endpoint_body_comes_from_defaults_plus_the_lane():
     with pytest.raises(SystemExit, match="already has endpoint"):
         runpod_endpoints.endpoint_body(REGISTRY, "py312-torch2.11.0-cu128", "cu128-t2110-abc")
     with pytest.raises(SystemExit, match="not a build of image"):
-        runpod_endpoints.endpoint_body(REGISTRY, "py313-torch2.14.1-cu130", "cu128-t2110-abc")
-    lane = copy.deepcopy(REGISTRY)
+        runpod_endpoints.endpoint_body(PENDING, "py313-torch2.14.1-cu130", "cu128-t2110-abc")
+    lane = copy.deepcopy(PENDING)
     lane["lanes"]["py313-torch2.14.1-cu130"]["workers_max"] = 1
     assert runpod_endpoints.endpoint_body(lane, "py313-torch2.14.1-cu130", "cu130-t2141")["workers"]["max"] == 1
 
 
 def test_write_endpoint_id_updates_only_that_lane(tmp_path):
     path = tmp_path / "lanes.json"
-    path.write_text(json.dumps(REGISTRY, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(PENDING, indent=2), encoding="utf-8")
     runpod_endpoints.write_endpoint_id("py313-torch2.14.1-cu130", "ep999", path)
     after = json.loads(path.read_text(encoding="utf-8"))
     assert after["lanes"]["py313-torch2.14.1-cu130"]["endpoint_id"] == "ep999"
     after["lanes"]["py313-torch2.14.1-cu130"]["endpoint_id"] = None
-    assert after == REGISTRY
+    assert after == PENDING
 
 
 def test_set_image_dry_run_sends_nothing(capsys):
-    reg = copy.deepcopy(REGISTRY)
+    reg = copy.deepcopy(PENDING)
     reg["lanes"]["py313-torch2.14.1-cu130"]["endpoint_id"] = "abc123"
     assert runpod_endpoints.set_image(reg, "cu130-t2141-1", None, "cu130-t2141", None, True) == 0
     assert "would PATCH abc123" in capsys.readouterr().out
