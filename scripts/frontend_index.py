@@ -89,6 +89,9 @@ CI_BRANCH = "main"
 CI_HEAD_LIMIT = 300
 CI_PAGE_LIMIT = 5
 BACKFILL_PAGE_LIMIT = 10
+# A backfill window that holds more runs than BACKFILL_PAGE_LIMIT pages can
+# list is halved until it fits or is this wide; narrower is never needed.
+MIN_WINDOW_S = 3600
 META_UPGRADES_PER_TICK = 25
 UNSETTLED_AGE_S = 3 * 3600
 LOOKBACK_S = 6 * 3600
@@ -677,9 +680,13 @@ def _iso(ts: int) -> str:
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def list_runs(api: GitHubApi, repo: str, params: dict, page_limit: int) -> tuple[list, bool]:
+def list_runs(api: GitHubApi, repo: str, params: dict, page_limit: int,
+              force: bool = False) -> tuple[list, bool]:
     """Pages of a runs listing: (runs, complete). Incomplete when a page
-    failed or the page limit was hit."""
+    failed or the page limit was hit. Unless `force`, a listing whose
+    total_count already exceeds what the page limit can hold stops after
+    the first page, so the caller can narrow the window instead of paging
+    a result the API would truncate anyway."""
     runs: list[dict] = []
     for page in range(1, page_limit + 1):
         data = api.get(f"{GITHUB_API}/repos/{repo}/actions/runs",
@@ -688,6 +695,8 @@ def list_runs(api: GitHubApi, repo: str, params: dict, page_limit: int) -> tuple
             return runs, False
         items = data.get("workflow_runs") or []
         runs.extend(items)
+        if page == 1 and not force and (data.get("total_count") or 0) > page_limit * 100:
+            return runs, False
         if len(items) < 100:
             return runs, True
     return runs, False
@@ -740,12 +749,28 @@ def _coverage(head: dict, now: int) -> dict:
 
 def _window(api: GitHubApi, repo: str, fetch: CiFetch, start: int, end: int) -> bool:
     """List the runs created in one window into `fetch`; True when the
-    window listed completely."""
-    runs, complete = list_runs(
-        api, repo, {**_base_params(), "created": f"{_iso(start)}..{_iso(end)}"},
-        BACKFILL_PAGE_LIMIT)
+    window is covered. A window holding more runs than BACKFILL_PAGE_LIMIT
+    pages can list (a busy day on main) is halved until it fits or is
+    MIN_WINDOW_S wide; an hour that still overflows is paged to the limit
+    and its tail dropped with a warning, so a backfill never stalls on it."""
+    params = {**_base_params(), "created": f"{_iso(start)}..{_iso(end)}"}
+    if end - start > MIN_WINDOW_S:
+        runs, complete = list_runs(api, repo, params, BACKFILL_PAGE_LIMIT)
+        if complete:
+            fetch.merge(ci_entries(runs, fetch.columns))
+            return True
+        if api.stopped:
+            return False
+        mid = start + (end - start) // 2
+        return _window(api, repo, fetch, start, mid) and _window(api, repo, fetch, mid, end)
+    runs, complete = list_runs(api, repo, params, BACKFILL_PAGE_LIMIT, force=True)
     fetch.merge(ci_entries(runs, fetch.columns))
-    return complete
+    if api.stopped:
+        return False
+    if not complete:
+        print(f"::warning::frontend-index: ci: more than {BACKFILL_PAGE_LIMIT * 100} runs "
+              f"between {_iso(start)} and {_iso(end)}; the listing was truncated")
+    return True
 
 
 def collect_ci(api: GitHubApi, repo: str, head: dict, now: int,

@@ -770,6 +770,51 @@ def test_backfill_merges_into_existing_shards_without_duplicates(tmp_path, remot
         "from_ts": NOW - 4 * day, "to_ts": NOW, "partial": False}
 
 
+def test_backfill_splits_a_window_with_more_than_a_thousand_runs(tmp_path, remote, monkeypatch):
+    fake = FakeApi(monkeypatch)
+    perf_api(fake, [])
+    gate_api(fake, [], {}, {})
+    fake.on("/actions/runs", runs_page(commit_runs(SHA_C, NOW - H)))
+    commit_api(fake, SHA_C, NOW - H)
+    fi.run(args(), store=_store(tmp_path, remote, "a"), now=NOW)
+
+    # The day window reports 1,500 runs (more than ten pages hold): it is split
+    # in half after its first page instead of being paged and dropped, and the
+    # halves list completely, so the backfill reaches its target.
+    day = 86400
+    fake = FakeApi(monkeypatch)
+    perf_api(fake, [])
+    gate_api(fake, [], {}, {})
+    fake.on("/actions/runs", runs_page(commit_runs(SHA_C, NOW - H)), created=f">={iso(NOW - 6 * H)}")
+    fake.on("/actions/runs", Resp(200, {"total_count": 1500, "workflow_runs": []}),
+            created=f"{iso(NOW - day)}..{iso(NOW - 6 * H)}")
+    fake.on("/actions/runs", runs_page(commit_runs(SHA_A, NOW - 20 * H)),
+            created=f"{iso(NOW - day)}..{iso(NOW - 15 * H)}")
+    fake.on("/actions/runs", runs_page(commit_runs(SHA_B, NOW - 10 * H)),
+            created=f"{iso(NOW - 15 * H)}..{iso(NOW - 6 * H)}")
+    commit_api(fake, SHA_A, NOW - 20 * H)
+    commit_api(fake, SHA_B, NOW - 10 * H)
+    fi.run(args(backfill_days=1), store=_store(tmp_path, remote, "b"), now=NOW)
+    assert fake.count("/actions/runs?") == 4
+    ci = remote_json(remote, "frontend/ci/main.json")
+    assert [e["c"] for e in ci["entries"]] == [SHA_C, SHA_B, SHA_A]
+    assert ci["coverage"] == {"from_ts": NOW - day, "to_ts": NOW, "partial": False}
+
+
+def test_window_truncates_an_hour_that_still_overflows(monkeypatch, capsys):
+    fake = FakeApi(monkeypatch)
+    full_page = [ci_run("ci-tests-unit.yaml", SHA_A, NOW - 2 * H, run_id=1000 + i) for i in range(100)]
+    fake.on("/actions/runs", Resp(200, {"total_count": 1500, "workflow_runs": full_page}),
+            created=f"{iso(NOW - 2 * H)}..{iso(NOW - 2 * H + 1800)}")
+    api = fi.GitHubApi(None, reserve=150)
+    fetch = fi.CiFetch(fi.known_columns({}))
+    # Half an hour cannot be split further: it is paged to the limit, what was
+    # listed is kept, and the window still counts as covered.
+    assert fi._window(api, REPO, fetch, NOW - 2 * H, NOW - 2 * H + 1800) is True
+    assert fake.count("/actions/runs?") == fi.BACKFILL_PAGE_LIMIT and SHA_A in fetch.entries
+    assert "truncated" in capsys.readouterr().out
+
+
 def test_cursor_follows_the_last_complete_listing_across_long_gaps(tmp_path, remote, monkeypatch,
                                                                    capsys):
     day = 86400
