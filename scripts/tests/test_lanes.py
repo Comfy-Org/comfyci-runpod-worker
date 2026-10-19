@@ -105,6 +105,38 @@ def test_set_image_plans_one_patch_per_provisioned_lane_and_refuses_foreign_tags
     assert runpod_endpoints.plan_set_image(reg, "cu128-t2110-deadbeef", image_id="cu128-t2110") == []
 
 
+def test_endpoint_body_comes_from_defaults_plus_the_lane():
+    body = runpod_endpoints.endpoint_body(REGISTRY, "py313-torch2.14.1-cu130", "cu130-t2141-abc")
+    assert body["name"] == "comfyci-cu130-t2141"
+    assert body["type"] == "QUEUE"
+    assert body["image"] == "ghcr.io/comfy-org/comfyci-runpod-worker:cu130-t2141-abc"
+    assert body["gpu"] == {"pools": ["ADA_24"], "count": 1, "minCudaVersion": "13.0"}
+    assert body["workers"] == {"min": 0, "max": 3, "idleTimeout": 20}
+    assert body["scaling"] == {"type": "QUEUE_DELAY", "queueDelay": 4}
+    assert body["timeout"] == 3600000 and body["flashboot"] == "FLASHBOOT" and body["disk"] == 40
+    assert body["networkVolumes"] == ["n0xnkwnogx"] and body["dataCenterIds"] == ["EU-RO-1"]
+    assert body["registry"] == "cmszcugyp001tfk7ooe7rtp4d"
+    assert body["env"] == {"RUNPOD_INIT_TIMEOUT": "800"}
+    # An already provisioned lane is never created twice, and a foreign tag is refused.
+    with pytest.raises(SystemExit, match="already has endpoint"):
+        runpod_endpoints.endpoint_body(REGISTRY, "py312-torch2.11.0-cu128", "cu128-t2110-abc")
+    with pytest.raises(SystemExit, match="not a build of image"):
+        runpod_endpoints.endpoint_body(REGISTRY, "py313-torch2.14.1-cu130", "cu128-t2110-abc")
+    lane = copy.deepcopy(REGISTRY)
+    lane["lanes"]["py313-torch2.14.1-cu130"]["workers_max"] = 1
+    assert runpod_endpoints.endpoint_body(lane, "py313-torch2.14.1-cu130", "cu130-t2141")["workers"]["max"] == 1
+
+
+def test_write_endpoint_id_updates_only_that_lane(tmp_path):
+    path = tmp_path / "lanes.json"
+    path.write_text(json.dumps(REGISTRY, indent=2), encoding="utf-8")
+    runpod_endpoints.write_endpoint_id("py313-torch2.14.1-cu130", "ep999", path)
+    after = json.loads(path.read_text(encoding="utf-8"))
+    assert after["lanes"]["py313-torch2.14.1-cu130"]["endpoint_id"] == "ep999"
+    after["lanes"]["py313-torch2.14.1-cu130"]["endpoint_id"] = None
+    assert after == REGISTRY
+
+
 def test_set_image_dry_run_sends_nothing(capsys):
     reg = copy.deepcopy(REGISTRY)
     reg["lanes"]["py313-torch2.14.1-cu130"]["endpoint_id"] = "abc123"

@@ -242,13 +242,21 @@ Adding a lane:
 2. `build-image.yml` builds every buildable image on push to main (or dispatch
    it from the branch with the image id) and tags it `:<image>` and
    `:<image>-<sha>`.
-3. Create the serverless endpoint from the `:<image>-<sha>` tag: pool `ADA_24`,
-   `minCudaVersion` at the lane's CUDA, the models volume attached, data
-   center `EU-RO-1`, 0-3 workers, idle 20-60 s, execution timeout 3600 s,
-   flashboot, the GHCR registry credential. This is the one billable, manual
-   step; commit the returned id as the lane's `endpoint_id`. From then on
-   `build-image.yml` repoints the lane at each new sha tag
-   (`scripts/runpod_endpoints.py set-image`); the legacy lane is never moved.
+3. Create the serverless endpoint from the `:<image>-<sha>` tag, once, by hand
+   (it is the one billable step; idle endpoints cost nothing at 0 minimum
+   workers):
+
+   ```
+   RUNPOD_API_KEY=... python scripts/runpod_endpoints.py create \
+       --lane <lane id> --tag <image>-<sha> --write
+   ```
+
+   The request comes from `endpoint_defaults` in `lanes.json` (pool, workers,
+   volume, data center, registry credential, timeouts) plus the lane's CUDA
+   floor; `--dry-run` prints it, `--write` records the new id as the lane's
+   `endpoint_id`. Commit that. From then on `build-image.yml` repoints the lane
+   at each new sha tag (`runpod_endpoints.py set-image`); the legacy lane is
+   never moved.
 4. Generate and bless goldens for the lane: **Golden baselines** with the
    current release tag, `workflows: all`, `lane: <lane id>`, inspect, then
    `bless_only`.
