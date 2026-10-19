@@ -87,6 +87,19 @@ def test_fetch_commit_meta_falls_back_to_the_subject_when_pulls_fail(monkeypatch
     assert commit_meta.fetch_commit_meta(SHA)["pr"] is None
 
 
+def test_fetch_commit_meta_takes_the_merge_base_for_repos_that_merge_to_main(monkeypatch):
+    # ComfyUI_frontend merges to main: with the default base its PRs are dropped.
+    frontend = "Comfy-Org/ComfyUI_frontend"
+    calls = mock_api(monkeypatch, {f"/commits/{SHA}": Resp(200, COMMIT),
+                                   f"/commits/{SHA}/pulls": Resp(200, [_pr(21295, base="main")])})
+    meta = commit_meta.fetch_commit_meta(SHA, frontend, base="main")
+    assert calls[0].endswith(f"/repos/{frontend}/commits/{SHA}")
+    assert meta["pr"] == 21295 and meta["pr_title"] == "PR 21295" and meta["pr_author"] == "kijai"
+    assert commit_meta.fetch_commit_meta(SHA, frontend)["pr_title"] is None
+    assert commit_meta.fetch_pr_for_commit(SHA, frontend, base="main")["number"] == 21295
+    assert commit_meta.fetch_pr_for_commit(SHA, frontend) is None
+
+
 def test_fetch_commit_meta_is_none_when_the_commit_lookup_fails(monkeypatch):
     calls = mock_api(monkeypatch, {})
     assert commit_meta.fetch_commit_meta(SHA) is None

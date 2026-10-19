@@ -71,22 +71,24 @@ def merged_pr(pulls, sha: str, base: str = "master") -> dict | None:
     return (exact or merged or [None])[0]
 
 
-def fetch_pr_for_commit(sha: str, repo: str = DEFAULT_REPO) -> dict | None:
-    return merged_pr(_get(f"{GITHUB_API}/repos/{repo}/commits/{sha}/pulls"), sha)
+def fetch_pr_for_commit(sha: str, repo: str = DEFAULT_REPO, base: str = "master") -> dict | None:
+    """The merged PR that landed `sha` on `base` (ComfyUI merges to master,
+    ComfyUI_frontend to main)."""
+    return merged_pr(_get(f"{GITHUB_API}/repos/{repo}/commits/{sha}/pulls"), sha, base)
 
 
-def fetch_commit_meta(sha: str, repo: str = DEFAULT_REPO) -> dict | None:
+def fetch_commit_meta(sha: str, repo: str = DEFAULT_REPO, base: str = "master") -> dict | None:
     """{subject, author, committed_ts, parents, pr, pr_title, pr_author,
     pr_avatar, pr_labels, pr_merged_at, pr_url} for a commit, or None. The
-    pr_* keys are null when no merged PR is found (a direct push); `pr` then
-    falls back to the '(#N)' suffix of the subject."""
+    pr_* keys are null when no PR merged into `base` is found (a direct
+    push); `pr` then falls back to the '(#N)' suffix of the subject."""
     data = _get(f"{GITHUB_API}/repos/{repo}/commits/{sha}")
     if not data:
         return None
     commit = data.get("commit") or {}
     subject = (commit.get("message") or "").split("\n", 1)[0].strip()
     author = (data.get("author") or {}).get("login") or (commit.get("author") or {}).get("name")
-    pr = fetch_pr_for_commit(sha, repo) or {}
+    pr = fetch_pr_for_commit(sha, repo, base) or {}
     user = pr.get("user") or {}
     return {
         "subject": subject[:200],

@@ -43,7 +43,9 @@ class Storage:
     def download_json(self, path: str) -> dict | None:
         raise NotImplementedError
 
-    def upload_json(self, path: str, obj: dict):
+    def upload_json(self, path: str, obj: dict, compact: bool = False):
+        """Write `obj` as JSON; `compact` drops the indentation and spaces
+        (for files the dashboard fetches whole, like the frontend index)."""
         raise NotImplementedError
 
     def upload_dir(self, blob_prefix: str, local_dir: Path):
@@ -214,11 +216,12 @@ class GitHubStorage(Storage):
         f = self._p(path)
         return json.loads(f.read_text(encoding="utf-8")) if f.exists() else None
 
-    def upload_json(self, path: str, obj: dict):
+    def upload_json(self, path: str, obj: dict, compact: bool = False):
         self._ensure_dir(self._parent(path))
         f = self._p(path)
         f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(json.dumps(obj, indent=2), encoding="utf-8")
+        text = json.dumps(obj, separators=(",", ":")) if compact else json.dumps(obj, indent=2)
+        f.write_text(text, encoding="utf-8")
         self._written.append(path)
 
     def upload_dir(self, blob_prefix: str, local_dir: Path):
@@ -368,8 +371,8 @@ class GcsStorage(Storage):
     def download_json(self, path: str) -> dict | None:
         return self._g.download_json(self.bucket, path)
 
-    def upload_json(self, path: str, obj: dict):
-        self._g.upload_json(self.bucket, path, obj)
+    def upload_json(self, path: str, obj: dict, compact: bool = False):
+        self._g.upload_json(self.bucket, path, obj)  # the bucket layout is not size-bound
 
     def upload_dir(self, blob_prefix: str, local_dir: Path):
         self._g.upload_dir(self.bucket, blob_prefix, Path(local_dir))

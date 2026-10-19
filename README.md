@@ -264,6 +264,88 @@ Adding a lane:
    `endpoint_id` is skipped), and ci.comfy.org lists it in the lane selector
    after the first publish.
 
+## Frontend CI index
+
+`frontend-index.yml` (cron `13,43 * * * *`, offset from the regression cron)
+runs `scripts/frontend_index.py`, which turns three public data sources of
+`Comfy-Org/ComfyUI_frontend` into compact static JSON under `frontend/` on
+the `results` branch, next to `regression/`. ci.comfy.org's Frontend tab
+reads only these files (`NEXT_PUBLIC_FRONTEND_BASE`, default
+`https://raw.githubusercontent.com/Comfy-Org/comfyci-runpod-worker/results/frontend`).
+
+```
+frontend/
+  perf/head.json             metric registry, rule, scenarios, newest 100 entries, latest comparison
+  perf/<YYYY-MM>.json        complete monthly shards (newest first)
+  ci/main.json               column registry, newest 300 main commits, first_bad, coverage
+  ci/main/<YYYY-MM>.json     complete monthly shards
+  ci/custom-nodes.json       newest 90 custom-nodes gate runs with shard rows, core pin, streak
+```
+
+All times are UTC epoch seconds, every file has `schema_version: 1` and every
+head carries `updated_ts`. A tick is a fetch phase, budgeted by the API's
+`X-RateLimit-Remaining` with a 150-request reserve, then a write phase: the
+three writers are derived writers (re-run on the freshest tree when a push
+retries behind a concurrent publisher), merge by key and only write a file
+whose content changed, so a tick with nothing new pushes nothing.
+
+**Perf** (`perf-data` branch, `baselines/perf-<ts>-<sha8>.json`, of which the
+frontend keeps only the newest 20): one entry per baseline, kept forever.
+
+| key | meaning |
+|---|---|
+| `id`, `c`, `t` | `<ts>-<sha8>` (the file is `baselines/perf-<id>.json`), commit, baseline time |
+| `n`, `nx` | samples per scenario; `nx` lists the scenarios with a different count |
+| `s` | per scenario, the mean of each sample metric in `metrics` order (8 significant digits, bytes as integers, null when absent) |
+| `cls` | per scenario, one letter per metric: `r` regression, `i` improvement, `n` neutral, `x` noisy (CV > 50 %), `-` fewer than two history values |
+| head `metrics`, `targets`, `window`, `rule`, `stats` | the frontend's 12 reported metrics with label, unit and `min_abs_delta`; `p5_fps: 52`; the 20-run window; the z > 2 / CV > 50 % rule; current = median, history = mean, sample stddev, delta against the history mean |
+| head `latest.cmp` | per scenario, `[current median, history mean, history stddev, history n, z, cls]` per metric for the newest baseline |
+
+`cls` is computed once, at ingest, with the frontend's own rule
+(`scripts/perf-stats.ts`, `scripts/perf-report.ts`): the baseline's medians
+against the means of the up to 20 entries preceding it by time, so every
+historical point carries the badge the frontend would have shown.
+
+**CI on main** (push runs of every `CI:` workflow): one entry per commit.
+
+| key | meaning |
+|---|---|
+| `c`, `ct`, `o` | commit, commit time, rollup of the core columns (`failure`, `pending`, `cancelled`, `success`; skipped never blocks) |
+| `m`, `mi` | subject, author, PR, PR title/author/avatar; `mi: true` while `m` is provisional (from the run's `head_commit`, upgraded with the commits API at 25 commits per tick, newest first, monthly shards included) |
+| `w` | per column id: `{id: run id, c: conclusion, s: status while not completed, t: start, d: duration s, a: attempt when > 1}` |
+| head `columns` | ordered registry `{id, label, paths, name, group}`, groups core / website / billing / validation; lint matches both lint files; any other `CI:` workflow seen on a main push is appended as group `other` |
+| head `first_bad` | per column, the start of the open failing chain (red opens, success closes, cancelled/pending/missing neither) |
+| head `coverage` | `from_ts`, `to_ts`: the index is complete for runs created between them (`to_ts` is the tick time of the last complete listing, as of the last write: a tick that learns nothing else is not written); `partial`: the last backfill stopped short (budget) |
+
+Incremental ticks list runs created since the oldest unsettled commit (a
+cell still running, or a core column missing on a commit younger than 3 h),
+at least 6 h back and never later than `coverage.to_ts`, so a stalled cron
+or a broken tick leaves no hole. When that listing overflows its five pages
+(days away), the gap above `to_ts` is closed in day windows while the
+budget lasts and the next tick continues from where it stopped. Reruns of
+commits older than 6 h are only caught by a backfill (the API cannot sort
+by `updated_at`). Dispatch the workflow with `backfill_days` to walk day
+windows back from `coverage.from_ts` (a 90-day backfill is about 500
+requests plus metadata upgrades spread over the following ticks); `only`
+(csv of `perf`, `ci`, `gate`) limits a run.
+
+**Custom-nodes gate** (`ci-tests-custom-nodes.yaml`, scheduled daily against
+a pinned ComfyUI core, plus manual dispatches; PR runs are excluded):
+
+| key | meaning |
+|---|---|
+| `id`, `t`, `ev`, `c`, `d`, `s`, `a` | run id, start, event, conclusion, duration, status while running, attempt when > 1 |
+| `sha`, `pin`, `ref`, `rs` | frontend commit, `COMFYUI_PIN` read from the workflow file at that commit (null until read; a read skipped by the budget or failed is repaired on a later tick, one request per sha), the core ref the run used (`pin` for scheduled runs; unknown for dispatches until phase 2), `pin` or `dispatch` |
+| `rows`, `fs`, `final`, `jobs` | `rows[proof_row][shard]` job conclusions (`"0"` are the clean shards, other rows are detection proofs), failed step per non-green job, the verdict job's conclusion, `[matrix jobs, red jobs]` |
+| head `pin`, `streak` | the newest pin; `{state, since, days, runs, capped}` over the clean rows (`capped` when the streak reaches the oldest stored run) |
+
+Steady state costs 5-9 requests per tick (3 when nothing is new) against the
+Actions token's 1,000 per hour. `FRONTEND_GH_TOKEN` (a fine-grained PAT
+with Actions read on the frontend repo) is optional and reserved for phase 2
+(dispatching the gate, reading run logs and artifacts); without it the
+`GITHUB_TOKEN` is used. Local dry run, nothing pushed:
+`python scripts/frontend_index.py --skip-publish --results-workdir /tmp/results`.
+
 ## One-time infrastructure setup
 
 1. **Docker images**: `build-image.yml` pushes one image per entry in
@@ -323,6 +405,12 @@ regression/
   index/lanes.json                         # lane registry + per-branch latest + golden shas
   index/<branch>/<lane>.json               # newest 500 runs + first bad commit per workflow
   index/<branch>/<lane>/<YYYY-MM>.json     # complete monthly shards
+frontend/                                  # ComfyUI_frontend CI index (see above)
+  perf/head.json                           # perf metric registry, newest 100 baselines, latest comparison
+  perf/<YYYY-MM>.json                      # complete monthly shards
+  ci/main.json                             # column registry, newest 300 main commits, first_bad, coverage
+  ci/main/<YYYY-MM>.json                   # complete monthly shards
+  ci/custom-nodes.json                     # newest 90 custom-nodes gate runs, core pin, streak
 ```
 
 Run outputs also carry 256-px WebP previews under `<workflow_id>/outputs/thumbs/`
