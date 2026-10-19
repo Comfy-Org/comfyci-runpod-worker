@@ -6,7 +6,7 @@
   "python_version": "3.13.16 (main, Oct 14 2026, 01:04:01) [Clang 23.1.3 ]",
   "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
   "vram_peak_mb": 8157.6,
-  "rss_peak_mb": 8997.5,
+  "rss_peak_mb": 9037.7,
   "validation": {
     "filled_defaults": [],
     "missing_nodes": [],
@@ -16,22 +16,23 @@
   "timings": {
     "checkout_s": 0,
     "pip_s": 0,
-    "prompt_exec_s": 29.57,
-    "server_start_s": 4.01
+    "prompt_exec_s": 32.34,
+    "server_start_s": 5.01
   },
   "commit_checked_out": "a2440bc77cba0bee44b00cee40e9997bb18eb850",
   "env": {
     "cuda": "13.0",
+    "custom_nodes_sha256": "01270854f40fe8a184f0615ce3c843b0c7491733a9d1adfd4f1c91134fdf9fac",
     "driver_version": "595.91.07",
     "image": "cu130-t2141",
-    "image_sha": "be445ef5187c6505b3fd91ad4cd10ad424a8ca66",
+    "image_sha": "8718304972ba3869024ec49c0b61b4ab58ba2374",
     "python": "3.13.16 (main, Oct 14 2026, 01:04:01) [Clang 23.1.3 ]",
     "runtime_backends": [
-      "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend cuda: {'available': True, 'disabled': False, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope1_', 'apply_rope_",
-      "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend eager: {'available': True, 'disabled': False, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope1_', 'apply_rope",
-      "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend hip: {'available': False, 'disabled': False, 'unavailable_reason': 'PyTorch ROCm/HIP runtime not available', 'capabilities': []}",
-      "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend triton: {'available': True, 'disabled': True, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope1_', 'apply_rope",
       "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend ascend: {'available': False, 'disabled': False, 'unavailable_reason': \"torch-npu is not installed: No module named 'torch_npu'\", 'capabilities': []}",
+      "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend triton: {'available': True, 'disabled': True, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope1_', 'apply_rope",
+      "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend hip: {'available': False, 'disabled': False, 'unavailable_reason': 'PyTorch ROCm/HIP runtime not available', 'capabilities': []}",
+      "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend eager: {'available': True, 'disabled': False, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope1_', 'apply_rope",
+      "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend cuda: {'available': True, 'disabled': False, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope1_', 'apply_rope_",
       "\u001b[32m[INFO]\u001b[0m pytorch version: 2.14.1+cu130",
       "\u001b[32m[INFO]\u001b[0m Using pytorch attention",
       "\u001b[32m[INFO]\u001b[0m aimdo: /project/src/control.c:283:INFO:comfy-aimdo inited for GPU: NVIDIA GeForce RTX 4090 (VRAM: 24082 MB)"
@@ -42,11 +43,11 @@
   },
   "lane": "py313-torch2.14.1-cu130",
   "custom_nodes": null,
-  "runpod_job_id": "2c65b259-dfbd-441a-a603-0aaeb7fb2da4-u2",
+  "runpod_job_id": "04fc797d-ce43-40fa-a22e-f994f7aa0bd5-u2",
   "attempt": 1,
-  "delay_ms": 77053,
-  "delay_s": 77.053,
-  "execution_ms": 35136,
+  "delay_ms": 333277,
+  "delay_s": 333.277,
+  "execution_ms": 39192,
   "outputs": [
     {
       "filename": "sdxl_t2i_00001_.png",
