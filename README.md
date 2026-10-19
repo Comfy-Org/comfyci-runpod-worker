@@ -271,7 +271,13 @@ Adding a lane:
    floor; `--dry-run` prints it, `--write` records the new id as the lane's
    `endpoint_id`. Commit that. From then on `build-image.yml` repoints the lane
    at each new sha tag (`runpod_endpoints.py set-image`); the legacy lane is
-   never moved.
+   never moved. A repoint is a rolling release: workers already running the
+   old image keep serving jobs until RunPod replaces them, which can take a
+   long time when the new image is large and the new workers sit throttled
+   behind them, so a run right after a repoint may silently use the old image
+   (its `env.image_sha` tells). Check `isStale` in the endpoint's worker list
+   before generating goldens; setting the endpoint's max workers to 0 and back
+   to its normal value flushes the stale workers within seconds.
 4. Generate and bless goldens for the lane: **Golden baselines** with the
    current release tag, `workflows: all`, `lane: <lane id>`, inspect, then
    `bless_only`.
