@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_ts": 1792441729,
+  "generated_ts": 1792441738,
   "primary": "py312-torch2.11.0-cu128",
   "lanes": {
     "py312-torch2.11.0-cu128": {
@@ -138,6 +138,10 @@
         "manager_import_smoke": {
           "tag": "v0.42.0",
           "sha": "35af9768de21397f200d5f4c0eac854ea8ab8a1615659bd89583d6606a4a8b75"
+        },
+        "vhs_video_roundtrip": {
+          "tag": "v0.42.0",
+          "sha": "130703f705ade93600513afc74fc676d4c7b40ff76201a9c8f6438ae57b3d2dd"
         }
       }
     }

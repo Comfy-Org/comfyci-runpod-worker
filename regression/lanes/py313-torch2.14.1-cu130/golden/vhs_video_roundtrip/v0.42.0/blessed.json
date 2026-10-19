@@ -10,20 +10,20 @@
   "cuda": "13.0",
   "driver_version": null,
   "image_sha": "8718304972ba3869024ec49c0b61b4ab58ba2374",
-  "output_sha256": "32b50bb0d7a5e7d95f46d70478e53e12c96dcd935b833daba85ce08c64631b1d",
+  "output_sha256": "130703f705ade93600513afc74fc676d4c7b40ff76201a9c8f6438ae57b3d2dd",
   "custom_nodes": {
     "ComfyUI-VideoHelperSuite": {
       "import": "ok",
-      "install_s": 0.03,
+      "install_s": 0.01,
       "kind": "git",
       "pip_s": 0,
-      "seconds": 0.1,
+      "seconds": 0,
       "sha": "115de7a9d9e34410cffb9ecfd268e993b11a50fb",
       "source": "cache"
     }
   },
-  "reason": "first goldens for the custom-node pack workflows (PR #13), generated on the pack image",
+  "reason": "first golden for vhs_video_roundtrip on the synthetic clip (PR #13)",
   "previous_tag": null,
   "generated_by": "marawan206",
-  "generated_ts": 1792440811
+  "generated_ts": 1792441736
 }

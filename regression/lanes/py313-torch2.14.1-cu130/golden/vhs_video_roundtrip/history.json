@@ -1,0 +1,14 @@
+{
+  "blesses": [
+    {
+      "tag": "v0.42.0",
+      "commit": "355cd6b14c92c19ac3188fe528e47a3f21ef5178",
+      "blessed_by": "marawan206",
+      "blessed_ts": 1792441738,
+      "reason": "first golden for vhs_video_roundtrip on the synthetic clip (PR #13)",
+      "supersedes": null,
+      "source": "golden_run",
+      "output_sha256": "130703f705ade93600513afc74fc676d4c7b40ff76201a9c8f6438ae57b3d2dd"
+    }
+  ]
+}
