@@ -6,7 +6,7 @@
   "python_version": "3.13.16 (main, Oct 14 2026, 01:04:01) [Clang 23.1.3 ]",
   "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
   "vram_peak_mb": 1381.6,
-  "rss_peak_mb": 1068.7,
+  "rss_peak_mb": 1068.8,
   "validation": {
     "filled_defaults": [],
     "missing_nodes": [],
@@ -42,11 +42,11 @@
   },
   "lane": "py313-torch2.14.1-cu130",
   "custom_nodes": null,
-  "runpod_job_id": "de10601a-4a07-432c-8ed4-f5c92df40ad2-u1",
+  "runpod_job_id": "e854771d-18f7-4f6a-a3f6-285ffa7fb011-u1",
   "attempt": 1,
-  "delay_ms": 127,
-  "delay_s": 0.127,
-  "execution_ms": 5079,
+  "delay_ms": 131,
+  "delay_s": 0.131,
+  "execution_ms": 5122,
   "outputs": [
     {
       "filename": "manager_import_smoke_00001_.png",
