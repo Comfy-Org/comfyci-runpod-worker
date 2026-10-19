@@ -2,17 +2,32 @@
   "schema_version": 2,
   "primary": "py312-torch2.11.0-cu128",
   "endpoint_defaults": {
-    "gpu_pools": ["ADA_24"],
+    "gpu_pools": [
+      "ADA_24"
+    ],
     "gpu_count": 1,
-    "workers": { "min": 0, "max": 3, "idleTimeout": 20 },
-    "scaling": { "type": "QUEUE_DELAY", "queueDelay": 4 },
+    "workers": {
+      "min": 0,
+      "max": 3,
+      "idleTimeout": 20
+    },
+    "scaling": {
+      "type": "QUEUE_DELAY",
+      "queueDelay": 4
+    },
     "timeout_ms": 3600000,
     "flashboot": "FLASHBOOT",
     "disk_gb": 40,
-    "network_volumes": ["n0xnkwnogx"],
-    "data_center_ids": ["EU-RO-1"],
+    "network_volumes": [
+      "n0xnkwnogx"
+    ],
+    "data_center_ids": [
+      "EU-RO-1"
+    ],
     "registry": "cmszcugyp001tfk7ooe7rtp4d",
-    "env": { "RUNPOD_INIT_TIMEOUT": "800" }
+    "env": {
+      "RUNPOD_INIT_TIMEOUT": "800"
+    }
   },
   "images": {
     "cu128-t2110": {
@@ -57,7 +72,7 @@
       "layout": 2,
       "prefix": "regression/lanes/py313-torch2.14.1-cu130",
       "image": "cu130-t2141",
-      "endpoint_id": null,
+      "endpoint_id": "2192t0ar23kdb5",
       "min_cuda_driver": "13.0"
     }
   }
