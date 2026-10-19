@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_ts": 1792367355,
+  "generated_ts": 1792378306,
   "primary": "py312-torch2.11.0-cu128",
   "lanes": {
     "py312-torch2.11.0-cu128": {
@@ -64,6 +64,62 @@
         "qwen_image_2_1_turbo_t2i": {
           "tag": "v0.42.0",
           "sha": "e489a013f070829be4a0220256a23427627084b7f1b6331f3a47406d332fa19f"
+        }
+      }
+    },
+    "py313-torch2.14.1-cu130": {
+      "label": "py3.13 / torch 2.14.1 / cu130 / RTX 4090",
+      "python": "3.13",
+      "torch": "2.14.1",
+      "cuda": "13.0",
+      "gpu": "RTX 4090",
+      "cadence": "per-commit",
+      "blocking": false,
+      "role": "lane",
+      "layout": 2,
+      "branches": {
+        "master": {
+          "latest": null,
+          "count": 0,
+          "shards": []
+        }
+      },
+      "goldens": {
+        "flux_dev_t2i": {
+          "tag": "v0.42.0",
+          "sha": "b7495989456d662565e10028178760947622e378463c562e2b64239f125185c6"
+        },
+        "krea2_turbo_t2i": {
+          "tag": "v0.42.0",
+          "sha": "63f058b56c5ffce0d0bf35993ef2d486959a8e71d65be40096996435c6166172"
+        },
+        "mage_flow_t2i_int8": {
+          "tag": "v0.42.0",
+          "sha": "4b63f34437230271dd3ee706cd8d04d578ba0e8376139d09e659823281114a2d"
+        },
+        "pixeldit_t2i": {
+          "tag": "v0.42.0",
+          "sha": "d76c74febc82bb9dd43799d58e34294bcab5702c003d9fc4e0908d08bb692392"
+        },
+        "qwen_image_2_1_edit": {
+          "tag": "v0.42.0",
+          "sha": "4e24fb0858ec690d5867e9d403c0837dccc54fad3a240a1e730881566f8138ab"
+        },
+        "qwen_image_2_1_t2i": {
+          "tag": "v0.42.0",
+          "sha": "208b08f9c5e0b2a35e5ee26511f9588830c709012ee89fd24871879bd4c101c8"
+        },
+        "qwen_image_2_1_turbo_t2i": {
+          "tag": "v0.42.0",
+          "sha": "67f783c49e1b059460bb0c9e74c5106856d543ecd356c17bab50e3679bddd12f"
+        },
+        "sdxl_t2i": {
+          "tag": "v0.42.0",
+          "sha": "26772840cd78a305972987574388d0da385b0704ecca28c17d967e876e577c11"
+        },
+        "z_image_turbo_t2i": {
+          "tag": "v0.42.0",
+          "sha": "dde6c3402a0ca8d24d6201cf02e05d980bae4f7482d58afea81bc023b970706d"
         }
       }
     }

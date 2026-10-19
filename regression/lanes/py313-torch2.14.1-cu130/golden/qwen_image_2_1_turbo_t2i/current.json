@@ -1,0 +1,10 @@
+{
+  "tag": "v0.42.0",
+  "commit": "355cd6b14c92c19ac3188fe528e47a3f21ef5178",
+  "blessed_by": "marawan206",
+  "blessed_ts": 1792378306,
+  "reason": "First baselines for the py313-torch2.14.1-cu130 lane: all nine workflows generated twice at v0.42.0 on image cu130-t2141-aa085619 (run 39190171919), every noise floor identical, outputs inspected.",
+  "supersedes": null,
+  "source": "golden_run",
+  "output_sha256": "67f783c49e1b059460bb0c9e74c5106856d543ecd356c17bab50e3679bddd12f"
+}
