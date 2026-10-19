@@ -35,8 +35,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
     VIRTUAL_ENV=/opt/venv \
     PATH=/opt/venv/bin:$PATH
 
+# gcc + libc headers: torch 2.14 dispatches some ops (torch._native, e.g. the
+# bmm_outer_product the Qwen3 and Gemma text encoders hit) to Triton kernels, and
+# Triton builds its CUDA driver shim with the system C compiler on first use.
+# Without one every such workflow fails with "Failed to find C compiler".
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git curl ca-certificates \
+        git curl ca-certificates gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # The lane's interpreter and a seeded venv (pip stays available for the runtime
