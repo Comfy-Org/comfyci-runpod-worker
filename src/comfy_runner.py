@@ -230,38 +230,14 @@ def execute(workflow: dict, timeout_s: float = 600, extra_flags: list[str] | Non
     t_spawn = time.monotonic()
     proc, log_f = start_comfy(port, output_dir, log_path, extra_flags or [])
     try:
-        t_ready = wait_server_ready(port, proc)
-        record["server_start_s"] = round(t_ready - t_spawn, 2)
-        try:
-            stats = http_get_json(f"http://127.0.0.1:{port}/system_stats", timeout=10)
-            sysinfo = stats.get("system", {})
-            record["comfy_version"] = sysinfo.get("comfyui_version")
-            record["torch_version"] = sysinfo.get("pytorch_version")
-            record["python_version"] = sysinfo.get("python_version")
-            devices = stats.get("devices", [])
-            if devices:
-                record["gpu_name"] = devices[0].get("name")
-        except Exception:
-            pass
-
-        record["validation"] = validate_workflow(port, workflow)
-        if not record["validation"]["ok"]:
-            raise ExecutionFailure("validation_error", record["validation"])
-
-        hist = run_prompt(port, workflow, timeout_s)
-        record["prompt_exec_s"] = hist.get("_exec_seconds")
-        st = hist.get("status", {})
-        if not st.get("completed"):
-            msgs = [m for m in st.get("messages", []) if m[0] == "execution_error"]
-            err = msgs[0][1] if msgs else {}
-            raise ExecutionFailure("execution_error", {
-                "node_id": err.get("node_id"),
-                "node_type": err.get("node_type"),
-                "message": err.get("exception_message"),
-                "traceback": (err.get("traceback") or [])[-10:],
-            })
-        record["vram_peak_mb"] = read_vram_peak_mb()
-        record["rss_peak_mb"] = read_rss_peak_mb(proc.pid)
+        _execute(port, proc, workflow, timeout_s, record, t_spawn)
+    except ExecutionFailure as e:
+        # Whatever went wrong, the server log says why: stop the server so the log
+        # is complete, then carry its tail with the failure.
+        kill_comfy(proc)
+        log_f.close()
+        e.detail = {**e.detail, "log_tail": log_tail(log_path)}
+        raise
     finally:
         kill_comfy(proc)
         try:
@@ -272,5 +248,49 @@ def execute(workflow: dict, timeout_s: float = 600, extra_flags: list[str] | Non
     record["runtime_backends"] = runtime_backends(log_path)
     record["outputs"] = collect_outputs(output_dir)
     if not record["outputs"]:
-        raise ExecutionFailure("no_outputs", {"log_tail": log_path.read_text(errors="replace")[-3000:]})
+        raise ExecutionFailure("no_outputs", {"log_tail": log_tail(log_path)})
     return record
+
+
+def log_tail(log_path: Path, chars: int = 6000) -> str:
+    try:
+        return log_path.read_text(errors="replace")[-chars:]
+    except Exception:
+        return ""
+
+
+def _execute(port: int, proc: subprocess.Popen, workflow: dict, timeout_s: float,
+             record: dict, t_spawn: float) -> None:
+    """Drive the already-started server through one workflow, filling `record`."""
+    t_ready = wait_server_ready(port, proc)
+    record["server_start_s"] = round(t_ready - t_spawn, 2)
+    try:
+        stats = http_get_json(f"http://127.0.0.1:{port}/system_stats", timeout=10)
+        sysinfo = stats.get("system", {})
+        record["comfy_version"] = sysinfo.get("comfyui_version")
+        record["torch_version"] = sysinfo.get("pytorch_version")
+        record["python_version"] = sysinfo.get("python_version")
+        devices = stats.get("devices", [])
+        if devices:
+            record["gpu_name"] = devices[0].get("name")
+    except Exception:
+        pass
+
+    record["validation"] = validate_workflow(port, workflow)
+    if not record["validation"]["ok"]:
+        raise ExecutionFailure("validation_error", record["validation"])
+
+    hist = run_prompt(port, workflow, timeout_s)
+    record["prompt_exec_s"] = hist.get("_exec_seconds")
+    st = hist.get("status", {})
+    if not st.get("completed"):
+        msgs = [m for m in st.get("messages", []) if m[0] == "execution_error"]
+        err = msgs[0][1] if msgs else {}
+        raise ExecutionFailure("execution_error", {
+            "node_id": err.get("node_id"),
+            "node_type": err.get("node_type"),
+            "message": err.get("exception_message"),
+            "traceback": (err.get("traceback") or [])[-10:],
+        })
+    record["vram_peak_mb"] = read_vram_peak_mb()
+    record["rss_peak_mb"] = read_rss_peak_mb(proc.pid)

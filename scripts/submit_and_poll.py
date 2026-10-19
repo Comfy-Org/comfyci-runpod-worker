@@ -151,8 +151,11 @@ def run_workflow_job(client: RunPodClient, workflow_id: str, workflow_json: dict
                   ("status", "error", "comfy_version", "torch_version", "python_version",
                    "gpu_name", "vram_peak_mb", "rss_peak_mb", "validation", "timings",
                    "commit_checked_out", "env", "lane")}
-        # The RunPod SDK lifts a handler's `error` key to the job level, so
-        # fall back to it or the worker's failure detail is lost.
+        # The worker reports failure detail under `failure` (a top-level `error`
+        # makes the RunPod SDK fail the job and drop a dict detail). Older images
+        # still use `error`, which the SDK may lift to the job level: read all three.
+        if record.get("error") is None:
+            record["error"] = out.get("failure")
         if record.get("error") is None and st.get("error") is not None:
             record["error"] = _error_detail(st.get("error"))
         record["runpod_job_id"] = job_id

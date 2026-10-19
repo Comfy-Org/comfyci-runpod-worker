@@ -58,7 +58,8 @@ RUN git clone --depth 50 https://github.com/Comfy-Org/ComfyUI ${COMFY_ROOT} \
     && pip install -r ${COMFY_ROOT}/requirements.txt -c ${COMFY_CONSTRAINTS_FILE} \
     && sha256sum ${COMFY_ROOT}/requirements.txt | cut -d' ' -f1 > ${BAKED_REQ_HASH_FILE}
 
-RUN pip install runpod pynvml
+# Pinned: SDK behaviour around handler outputs changed between releases.
+RUN pip install runpod==1.12.0 nvidia-ml-py
 
 # What this image is, echoed into every run record as its `env` block.
 RUN printf '{"image": "%s", "image_sha": "%s", "python": "%s", "cuda": "%s", "torch_spec": "%s", "torch_index": "%s"}\n' \
