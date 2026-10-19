@@ -15,8 +15,15 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
-from index_builder import load_lanes
+# Standard library only: the workflows' plan jobs run this before installing anything.
+LANES_FILE = Path(__file__).resolve().parents[1] / "manifest" / "lanes.json"
+
+
+def load_lanes(path: Path | None = None) -> dict:
+    return json.loads((path or LANES_FILE).read_text(encoding="utf-8"))
+
 
 CADENCES = ("per-commit", "nightly", "weekly")
 ROLES = ("primary", "lane", "legacy")
