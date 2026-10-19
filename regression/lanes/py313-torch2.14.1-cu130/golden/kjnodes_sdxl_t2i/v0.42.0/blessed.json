@@ -1,0 +1,29 @@
+{
+  "schema_version": 2,
+  "tag": "v0.42.0",
+  "commit": "355cd6b14c92c19ac3188fe528e47a3f21ef5178",
+  "source": "golden_run",
+  "lane": "py313-torch2.14.1-cu130",
+  "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+  "torch_version": "2.14.1+cu130",
+  "python_version": "3.13.16 (main, Oct 14 2026, 01:04:01) [Clang 23.1.3 ]",
+  "cuda": "13.0",
+  "driver_version": null,
+  "image_sha": "8718304972ba3869024ec49c0b61b4ab58ba2374",
+  "output_sha256": "c381e25de13b7a96f47516e2e2874eb6bf30f4b0d1e979c48e6ff0ad1e09465e",
+  "custom_nodes": {
+    "ComfyUI-KJNodes": {
+      "import": "ok",
+      "install_s": 0.08,
+      "kind": "git",
+      "pip_s": 0,
+      "seconds": 0.3,
+      "sha": "e27a505b3ba6ce42687fe00500deda103d9d6071",
+      "source": "cache"
+    }
+  },
+  "reason": "first goldens for the custom-node pack workflows (PR #13), generated on the pack image",
+  "previous_tag": null,
+  "generated_by": "marawan206",
+  "generated_ts": 1792440790
+}
