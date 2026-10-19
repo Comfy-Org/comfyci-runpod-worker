@@ -1,7 +1,8 @@
 # Interim scheduler: poll ComfyUI master and run the GPU regression suite for
-# each new commit, publishing results to this repo's `results` branch (read by
-# ci.comfy.org via raw.githubusercontent.com). Once GCS credentials exist this
-# moves into ComfyUI's own test-ci.yml as a per-push job (see action.yml).
+# each new commit on every provisioned per-commit lane, publishing results to
+# this repo's `results` branch (read by ci.comfy.org via raw.githubusercontent.com).
+# Once GCS credentials exist this moves into ComfyUI's own test-ci.yml as a
+# per-push job (see action.yml).
 name: GPU regression
 on:
   schedule:
@@ -14,6 +15,9 @@ on:
       workflows:
         description: csv of workflow ids, or 'all'
         default: all
+      lane:
+        description: lane id from manifest/lanes.json (empty = every provisioned per-commit lane)
+        default: ''
 
 concurrency:
   group: gpu-regression
@@ -23,18 +27,48 @@ permissions:
   contents: write
 
 jobs:
-  regression:
+  lanes:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - id: plan
+        env:
+          LANE: ${{ inputs.lane }}
+        run: |
+          cd scripts
+          if [ -n "$LANE" ]; then
+            matrix=$(python lanes.py per-commit --only "$LANE")
+          else
+            matrix=$(python lanes.py per-commit)
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "$matrix" | python -m json.tool
+
+  regression:
+    needs: lanes
+    if: needs.lanes.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.lanes.outputs.matrix) }}
+    name: ${{ matrix.lane }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install -r scripts/requirements.txt
-      - name: Resolve target commit and skip if already tested
+      - name: Resolve target commit and skip if already tested on this lane
         id: target
         env:
           INPUT_COMMIT: ${{ inputs.commit }}
+          PREFIX: ${{ matrix.prefix }}
         run: |
           COMMIT="$INPUT_COMMIT"
           if [ -n "$COMMIT" ] && ! [[ "$COMMIT" =~ ^[0-9a-f]{7,40}$ ]]; then
@@ -45,15 +79,15 @@ jobs:
             COMMIT=$(git ls-remote https://github.com/Comfy-Org/ComfyUI refs/heads/master | cut -f1)
           fi
           echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
-          # Read the last-tested pointer straight from the results branch
+          # Read the lane's last-tested pointer straight from the results branch
           # (raw.githubusercontent.com caches for ~5 min; git does not).
           LAST=""
           if git fetch --depth 1 --filter=blob:none origin results 2>/dev/null; then
-            LAST=$(git show FETCH_HEAD:regression/latest/master.json 2>/dev/null \
+            LAST=$(git show "FETCH_HEAD:$PREFIX/latest/master.json" 2>/dev/null \
                    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("commit",""))' || true)
           fi
           if [ -z "$INPUT_COMMIT" ] && [ "$COMMIT" = "$LAST" ]; then
-            echo "master HEAD $COMMIT already tested; skipping"
+            echo "master HEAD $COMMIT already tested on this lane; skipping"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
       - name: Run regression suite
@@ -64,19 +98,21 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           COMMIT: ${{ steps.target.outputs.commit }}
           WORKFLOWS: ${{ inputs.workflows || 'all' }}
+          LANE: ${{ matrix.lane }}
         # The summary file is written before the script exits, so the PR
         # comment step below can read it even when this step fails.
         run: |
           python scripts/run_regression.py \
             --commit "$COMMIT" \
             --branch master \
+            --lane "$LANE" \
             --workflows "$WORKFLOWS" \
             --workdir "$RUNNER_TEMP/regression-work" \
             --results-workdir "$RUNNER_TEMP/results-checkout" \
             --summary-out "$RUNNER_TEMP/summary.json"
       # PULSE: one comment, updated in place, on the PR that landed the tested
-      # commit when its outputs changed; code owners' PRs only. dry-run (the
-      # default) only renders it into the job summary. See README.
+      # commit when its outputs changed; code owners' PRs only, primary lane
+      # only. dry-run (the default) only renders it into the job summary. See README.
       - name: PR comment (PULSE)
         if: always() && steps.target.outputs.skip != 'true'
         continue-on-error: true

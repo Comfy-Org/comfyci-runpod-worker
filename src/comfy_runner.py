@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -159,6 +160,39 @@ def read_vram_peak_mb() -> float | None:
         return None
 
 
+def read_driver_version() -> str | None:
+    """The host's NVIDIA driver version, which bounds the CUDA runtime a lane can use."""
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        v = pynvml.nvmlSystemGetDriverVersion()
+        return v.decode() if isinstance(v, bytes) else str(v)
+    except Exception:
+        return None
+
+
+# Lines in ComfyUI's startup log that say which kernels and attention path a run
+# took: comfy-kitchen's backend choice, the attention implementation, comfy-aimdo.
+# cu130+ lanes enable kernels that cu128 cannot, so these explain golden drift.
+BACKEND_LINE = re.compile(r"(comfy[_-]?kitchen|kitchen backend|using \S+ attention|attention backend|"
+                          r"comfy[_-]?aimdo|dynamicvram|xformers version|pytorch version)", re.I)
+
+
+def runtime_backends(log_path: Path, limit: int = 8) -> list[str]:
+    """Up to `limit` backend-related log lines from the server's startup output."""
+    try:
+        lines = log_path.read_text(errors="replace").splitlines()
+    except Exception:
+        return []
+    found: list[str] = []
+    for line in lines:
+        if BACKEND_LINE.search(line):
+            found.append(line.strip()[:200])
+            if len(found) >= limit:
+                break
+    return found
+
+
 def read_rss_peak_mb(pid: int) -> float | None:
     """Kernel-tracked resident-set high-water mark (VmHWM), so no sampling loop."""
     try:
@@ -235,6 +269,7 @@ def execute(workflow: dict, timeout_s: float = 600, extra_flags: list[str] | Non
         except Exception:
             pass
 
+    record["runtime_backends"] = runtime_backends(log_path)
     record["outputs"] = collect_outputs(output_dir)
     if not record["outputs"]:
         raise ExecutionFailure("no_outputs", {"log_tail": log_path.read_text(errors="replace")[-3000:]})

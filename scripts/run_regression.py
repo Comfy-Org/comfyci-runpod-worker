@@ -141,9 +141,9 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
     workflow = json.loads((repo_root / entry["workflow_path"]).read_text(encoding="utf-8"))
     workflow = apply_seed_overrides(workflow, entry.get("seed_overrides"))
 
-    endpoint_id = entry.get("endpoint_id") or os.environ["RUNPOD_ENDPOINT_ID"]
+    endpoint_id = entry.get("endpoint_id") or args.endpoint_id
     client = RunPodClient(endpoint_id)
-    print(f"[{wf_id}] submitting to RunPod (endpoint {endpoint_id})")
+    print(f"[{wf_id}] submitting to RunPod (endpoint {endpoint_id}, lane {args.lane_id})")
     run_rec = run_workflow_job(
         client, wf_id, workflow,
         comfy_commit=args.commit,
@@ -152,6 +152,7 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
         comfy_flags=entry_value(entry, defaults, "comfy_flags"),
         workdir=workdir,
         comfy_repo=args.repo_url,
+        lane=args.lane_id,
     )
     published = {k: v for k, v in run_rec.items() if k != "outputs_dir"}  # runner-local path
     (workdir / "run.json").write_text(json.dumps(published, indent=2), encoding="utf-8")
@@ -253,7 +254,8 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
             "rss_peak_mb": run_rec.get("rss_peak_mb"),
             "comfy_version": run_rec.get("comfy_version"),
             "torch_version": run_rec.get("torch_version"),
-            "python_version": run_rec.get("python_version")}
+            "python_version": run_rec.get("python_version"),
+            "env": run_rec.get("env")}
 
 
 def write_summary(path: Path, summary: dict):
@@ -292,6 +294,14 @@ def main():
             raise SystemExit(f"no lane in manifest/lanes.json has prefix {args.prefix!r}; "
                              "pass --lane")
     layout = lanes["lanes"][lane_id].get("layout", 1)
+    # The lane names its endpoint (and so its worker image); a lane without one
+    # is not provisioned yet and must not fall through to another lane's endpoint.
+    args.lane_id = lane_id
+    args.endpoint_id = index_builder.lane_endpoint(lanes, lane_id)
+    if not args.endpoint_id:
+        raise SystemExit(f"lane {lane_id!r} has no endpoint (endpoint_id is null in "
+                         "manifest/lanes.json): create one for its image and commit the id "
+                         "before running this lane")
     store = storage.from_args(args)
     # The pointer as it stands before this run names the previous tested
     # commit (the per-workflow comparisons read it again later, but they can
@@ -348,6 +358,8 @@ def main():
                "run_ts": int(time.time()), "overall": overall,
                "has_infra_error": any(v == "infra_error" for v in verdicts.values()),
                "lane": lane_id,
+               # The worker image and host every workflow ran on (they share one endpoint).
+               "env": next((r.get("env") for r in results if r.get("env")), None),
                "commit_meta": meta,
                "tested_range": (commit_meta.fetch_range(prev_commit, args.commit)
                                 if prev_commit and prev_commit != args.commit else None),

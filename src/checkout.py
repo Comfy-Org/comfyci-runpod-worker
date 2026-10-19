@@ -3,7 +3,9 @@
 The worker image ships with a clone of Comfy-Org/ComfyUI at /comfyui and its
 requirements pre-installed. Per request we fetch the target sha (GitHub allows
 fetching arbitrary reachable SHAs), hard-checkout, and re-run pip only when the
-commit's requirements.txt differs from what the image baked in.
+commit's requirements.txt differs from what the image baked in. That install
+is held to the image's torch pins (constraints.txt), so a commit can never
+swap the lane's torch build underneath it.
 """
 from __future__ import annotations
 
@@ -16,6 +18,8 @@ from pathlib import Path
 COMFY_ROOT = Path(os.environ.get("COMFY_ROOT", "/comfyui"))
 # Written at image build time: sha256 of the requirements.txt that was pip-installed.
 BAKED_REQ_HASH = Path(os.environ.get("BAKED_REQ_HASH_FILE", "/comfy-config/requirements.sha256"))
+# Written at image build time: the torch/torchvision pins the image was built with.
+CONSTRAINTS = Path(os.environ.get("COMFY_CONSTRAINTS_FILE", "/comfy-config/constraints.txt"))
 DEFAULT_REPO = "https://github.com/Comfy-Org/ComfyUI"
 
 
@@ -37,6 +41,14 @@ def _req_hash() -> str:
     if not req.exists():
         return ""
     return hashlib.sha256(req.read_bytes()).hexdigest()
+
+
+def pip_install_command() -> list[str]:
+    """The requirements install, constrained to the image's torch pins when present."""
+    cmd = ["pip", "install", "-r", "requirements.txt", "--upgrade-strategy", "only-if-needed"]
+    if CONSTRAINTS.exists():
+        cmd += ["-c", str(CONSTRAINTS)]
+    return cmd
 
 
 def checkout_commit(commit: str, repo_url: str | None = None) -> dict:
@@ -69,7 +81,7 @@ def checkout_commit(commit: str, repo_url: str | None = None) -> dict:
     if now and now != baked:
         t1 = time.monotonic()
         proc = subprocess.run(
-            ["pip", "install", "-r", "requirements.txt", "--upgrade-strategy", "only-if-needed"],
+            pip_install_command(),
             cwd=str(COMFY_ROOT), capture_output=True, text=True, timeout=1800,
         )
         if proc.returncode != 0:

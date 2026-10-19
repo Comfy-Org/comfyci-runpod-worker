@@ -222,17 +222,52 @@ To turn it on: add `PULSE_GH_TOKEN` (Settings → Secrets and variables →
 Actions), check the dry-run output in a few job summaries, then set the
 variable `PULSE_PR_COMMENTS` to `on`. Setting it to `off` stops it at once.
 
+## Lanes
+
+A lane is one environment the corpus runs in: a worker image (Python, torch
+build, CUDA channel), the RunPod endpoint running that image, a cadence and a
+storage prefix. `manifest/lanes.json` declares the images once under `images`
+and the lanes under `lanes`; `scripts/lanes.py` derives the build matrix and
+the per-commit matrix from it, and `scripts/lanes.py validate` (run by the
+tests) keeps the file consistent. Goldens are per lane: cu130+ images enable
+comfy-kitchen kernels that cu128 cannot, so a new lane always starts with its
+own baselines.
+
+Adding a lane:
+
+1. Add the image under `images` (python, cuda, `torch_index`, `torch_spec`
+   with exact torch and torchvision pins; no torchaudio, ComfyUI dropped it)
+   and the lane under `lanes` with `"endpoint_id": null`, `layout: 2` and
+   `prefix: regression/lanes/<lane id>`. Merge.
+2. `build-image.yml` builds every buildable image on push to main (or dispatch
+   it from the branch with the image id) and tags it `:<image>` and
+   `:<image>-<sha>`.
+3. Create the serverless endpoint from the `:<image>-<sha>` tag: pool `ADA_24`,
+   `minCudaVersion` at the lane's CUDA, the models volume attached, data
+   center `EU-RO-1`, 0-3 workers, idle 20-60 s, execution timeout 3600 s,
+   flashboot, the GHCR registry credential. This is the one billable, manual
+   step; commit the returned id as the lane's `endpoint_id`. From then on
+   `build-image.yml` repoints the lane at each new sha tag
+   (`scripts/runpod_endpoints.py set-image`); the legacy lane is never moved.
+4. Generate and bless goldens for the lane: **Golden baselines** with the
+   current release tag, `workflows: all`, `lane: <lane id>`, inspect, then
+   `bless_only`.
+5. The per-commit cron picks the lane up on its next tick (a lane with a null
+   `endpoint_id` is skipped), and ci.comfy.org lists it in the lane selector
+   after the first publish.
+
 ## One-time infrastructure setup
 
-1. **Docker image**: `build-image.yml` pushes
-   `ghcr.io/comfy-org/comfyci-runpod-worker` using the built-in
-   `GITHUB_TOKEN` (no registry secrets). After the first build, make the
-   package public (repo → Packages → package settings → Change visibility)
-   so RunPod can pull it without credentials.
-2. **RunPod**: create a Network Volume (≥250 GB, datacenter with 4090
-   availability), then a serverless endpoint from the image with the volume
-   attached, GPU type `RTX 4090`, max workers 3, idle timeout ~60s. Optionally
-   set `HF_TOKEN` as an endpoint env var for gated models.
+1. **Docker images**: `build-image.yml` pushes one image per entry in
+   `manifest/lanes.json` `images` to `ghcr.io/comfy-org/comfyci-runpod-worker`
+   using the built-in `GITHUB_TOKEN` (no registry secrets). After the first
+   build, make the package public (repo → Packages → package settings → Change
+   visibility) so RunPod can pull it without credentials, or give the endpoint
+   a registry credential.
+2. **RunPod**: create a Network Volume (≥200 GB, datacenter with 4090
+   availability), then one serverless endpoint per lane from its image with
+   the volume attached (see *Lanes*). Optionally set `HF_TOKEN` as an endpoint
+   env var for gated models.
 3. **Repo secrets** (this repo): `RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID`, and
    optionally `HF_TOKEN` (gated models) and `PULSE_GH_TOKEN` (PR comments,
    see above). For the GCS phase, additionally
@@ -287,8 +322,10 @@ for the dashboard's list views.
 
 ## Notes
 
-- Goldens are valid **per GPU type and per worker image torch/CUDA**: after
-  changing either, regenerate and re-bless (`blessed.json` records both).
+- Goldens are valid **per lane** (GPU type and worker image torch/CUDA): after
+  changing either, regenerate and re-bless (`blessed.json` records both, and
+  every run record carries an `env` block with the image id, build sha,
+  python, torch, CUDA, host driver and the kernel backends ComfyUI logged).
 - Local dry run without publishing anything:
   `python scripts/run_regression.py --commit <sha> --branch test --skip-publish`
 - Script tests (run on every PR by the *Script tests* workflow):
