@@ -1,0 +1,148 @@
+{
+  "schema_version": 1,
+  "branch": "master",
+  "lane": "py313-torch2.14.1-cu130",
+  "shard": "2026-10",
+  "entries": [
+    {
+      "c": "8f04fd6ecf4a548937971e840af2a985529fab76",
+      "t": 1792379944,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.42.0",
+      "lane": "py313-torch2.14.1-cu130",
+      "layout": 2,
+      "m": {
+        "s": "[Partner Nodes] Renew partner-node sign-in tokens in API nodes (#16943)",
+        "a": "dante01yoon",
+        "pr": 16943,
+        "ct": 1792364785,
+        "pt": "[Partner Nodes] Renew partner-node sign-in tokens in API nodes",
+        "pa": "dante01yoon",
+        "av": "https://avatars.githubusercontent.com/u/6510430?v=4"
+      },
+      "prev": null,
+      "range": null,
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "b7495989456d662565e10028178760947622e378463c562e2b64239f125185c6",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": null,
+          "exec": 101.24,
+          "vram": 21953.6,
+          "g": "v0.42.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "krea2_turbo_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "63f058b56c5ffce0d0bf35993ef2d486959a8e71d65be40096996435c6166172",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": null,
+          "exec": 57.29,
+          "vram": 18541.6,
+          "g": "v0.42.0",
+          "th": "krea2_turbo_t2i_00001_.webp"
+        },
+        "mage_flow_t2i_int8": {
+          "v": "pass",
+          "d": null,
+          "sha": "4b63f34437230271dd3ee706cd8d04d578ba0e8376139d09e659823281114a2d",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": null,
+          "exec": 41.35,
+          "vram": 13507.6,
+          "g": "v0.42.0",
+          "th": "mage_flow_t2i_int8_00001_.webp"
+        },
+        "pixeldit_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "d76c74febc82bb9dd43799d58e34294bcab5702c003d9fc4e0908d08bb692392",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": null,
+          "exec": 29.54,
+          "vram": 9047.6,
+          "g": "v0.42.0",
+          "th": "pixeldit_t2i_00001_.webp"
+        },
+        "qwen_image_2_1_edit": {
+          "v": "pass",
+          "d": null,
+          "sha": "4e24fb0858ec690d5867e9d403c0837dccc54fad3a240a1e730881566f8138ab",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": null,
+          "exec": 58.43,
+          "vram": 17577.6,
+          "g": "v0.42.0",
+          "th": "qwen_image_2_1_edit_00001_.webp"
+        },
+        "qwen_image_2_1_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "208b08f9c5e0b2a35e5ee26511f9588830c709012ee89fd24871879bd4c101c8",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": null,
+          "exec": 46.6,
+          "vram": 16329.6,
+          "g": "v0.42.0",
+          "th": "qwen_image_2_1_t2i_00001_.webp"
+        },
+        "qwen_image_2_1_turbo_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "67f783c49e1b059460bb0c9e74c5106856d543ecd356c17bab50e3679bddd12f",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": null,
+          "exec": 42.35,
+          "vram": 16327.6,
+          "g": "v0.42.0",
+          "th": "qwen_image_2_1_turbo_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "26772840cd78a305972987574388d0da385b0704ecca28c17d967e876e577c11",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": null,
+          "exec": 32.57,
+          "vram": 8159.6,
+          "g": "v0.42.0",
+          "th": "sdxl_t2i_00001_.webp"
+        },
+        "z_image_turbo_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "dde6c3402a0ca8d24d6201cf02e05d980bae4f7482d58afea81bc023b970706d",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": null,
+          "exec": 64.12,
+          "vram": 21137.6,
+          "g": "v0.42.0",
+          "th": "z_image_turbo_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    }
+  ]
+}
