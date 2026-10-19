@@ -307,7 +307,7 @@
       "golden_tag": null
     },
     "kjnodes_sdxl_t2i": {
-      "enabled": false,
+      "enabled": true,
       "workflow_path": "manifest/workflows/kjnodes_sdxl_t2i_api.json",
       "seed_overrides": {
         "3": {
@@ -333,7 +333,7 @@
       "golden_tag": null
     },
     "vhs_video_roundtrip": {
-      "enabled": false,
+      "enabled": true,
       "workflow_path": "manifest/workflows/vhs_video_roundtrip_api.json",
       "seed_overrides": {},
       "models": [
@@ -360,7 +360,7 @@
       "golden_tag": null
     },
     "impact_sdxl_detailer": {
-      "enabled": false,
+      "enabled": true,
       "workflow_path": "manifest/workflows/impact_sdxl_detailer_api.json",
       "seed_overrides": {
         "3": {
@@ -396,7 +396,7 @@
       "golden_tag": null
     },
     "manager_import_smoke": {
-      "enabled": false,
+      "enabled": true,
       "workflow_path": "manifest/workflows/manager_import_smoke_api.json",
       "seed_overrides": {},
       "models": [],

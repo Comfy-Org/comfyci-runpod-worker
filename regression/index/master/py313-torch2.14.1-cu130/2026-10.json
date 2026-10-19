@@ -6,7 +6,7 @@
   "entries": [
     {
       "c": "a2440bc77cba0bee44b00cee40e9997bb18eb850",
-      "t": 1792441728,
+      "t": 1792442272,
       "o": "pass",
       "infra": false,
       "cv": "0.42.0",
@@ -35,8 +35,8 @@
           "psnr": null,
           "pct": 0.0,
           "pv": null,
-          "exec": 116.23,
-          "vram": 21569.6,
+          "exec": 97.25,
+          "vram": 21953.6,
           "g": "v0.42.0",
           "th": "flux_dev_t2i_00001_.webp"
         },
@@ -48,8 +48,8 @@
           "psnr": null,
           "pct": 0.0,
           "pv": null,
-          "exec": 69.73,
-          "vram": 18539.6,
+          "exec": 65.75,
+          "vram": 18541.6,
           "g": "v0.42.0",
           "th": "krea2_turbo_t2i_00001_.webp"
         },
@@ -61,7 +61,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": null,
-          "exec": 44.45,
+          "exec": 38.37,
           "vram": 13505.6,
           "g": "v0.42.0",
           "th": "mage_flow_t2i_int8_00001_.webp"
@@ -74,8 +74,8 @@
           "psnr": null,
           "pct": 0.0,
           "pv": null,
-          "exec": 34.23,
-          "vram": 9045.6,
+          "exec": 31.48,
+          "vram": 9047.6,
           "g": "v0.42.0",
           "th": "pixeldit_t2i_00001_.webp"
         },
@@ -87,7 +87,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": null,
-          "exec": 54.93,
+          "exec": 57.05,
           "vram": 17577.6,
           "g": "v0.42.0",
           "th": "qwen_image_2_1_edit_00001_.webp"
@@ -100,8 +100,8 @@
           "psnr": null,
           "pct": 0.0,
           "pv": null,
-          "exec": 58.13,
-          "vram": 16327.6,
+          "exec": 49.5,
+          "vram": 16329.6,
           "g": "v0.42.0",
           "th": "qwen_image_2_1_t2i_00001_.webp"
         },
@@ -113,7 +113,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": null,
-          "exec": 59.56,
+          "exec": 45.02,
           "vram": 16327.6,
           "g": "v0.42.0",
           "th": "qwen_image_2_1_turbo_t2i_00001_.webp"
@@ -126,7 +126,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": null,
-          "exec": 32.34,
+          "exec": 29.39,
           "vram": 8157.6,
           "g": "v0.42.0",
           "th": "sdxl_t2i_00001_.webp"
@@ -139,10 +139,75 @@
           "psnr": null,
           "pct": 0.0,
           "pv": null,
-          "exec": 64.16,
+          "exec": 82.64,
           "vram": 21137.6,
           "g": "v0.42.0",
           "th": "z_image_turbo_t2i_00001_.webp"
+        },
+        "impact_sdxl_detailer": {
+          "v": "pass",
+          "d": null,
+          "sha": "0b8f4cd63f87720b4020ff1933235b96a88fd7b1311fe83dbca4f4c5d6c16b42",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": null,
+          "exec": 30.07,
+          "vram": 8319.6,
+          "g": "v0.42.0",
+          "th": "impact_sdxl_detailer_00001_.webp",
+          "cn": {
+            "ComfyUI-Impact-Pack": "ok",
+            "ComfyUI-Impact-Subpack": "ok"
+          }
+        },
+        "kjnodes_sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "c381e25de13b7a96f47516e2e2874eb6bf30f4b0d1e979c48e6ff0ad1e09465e",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": null,
+          "exec": 26.09,
+          "vram": 8157.6,
+          "g": "v0.42.0",
+          "th": "kjnodes_sdxl_t2i_00001_.webp",
+          "cn": {
+            "ComfyUI-KJNodes": "ok"
+          }
+        },
+        "manager_import_smoke": {
+          "v": "pass",
+          "d": null,
+          "sha": "35af9768de21397f200d5f4c0eac854ea8ab8a1615659bd89583d6606a4a8b75",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": null,
+          "exec": 0.5,
+          "vram": 1383.6,
+          "g": "v0.42.0",
+          "th": "manager_import_smoke_00001_.webp",
+          "cn": {
+            "ComfyUI-Manager": "ok"
+          }
+        },
+        "vhs_video_roundtrip": {
+          "v": "pass",
+          "d": null,
+          "sha": "130703f705ade93600513afc74fc676d4c7b40ff76201a9c8f6438ae57b3d2dd",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": null,
+          "exec": 0.52,
+          "vram": 1381.6,
+          "g": "v0.42.0",
+          "th": "vhs_video_roundtrip_00001_.webp",
+          "cn": {
+            "ComfyUI-VideoHelperSuite": "ok"
+          }
         }
       },
       "s": null
