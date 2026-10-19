@@ -34,6 +34,8 @@ from pathlib import Path
 
 import compare
 import index_builder
+import lanes as lanes_mod
+import packs
 import storage
 from run_regression import apply_seed_overrides, entry_value, first_output_sha, load_manifest
 from submit_and_poll import RunPodClient, run_workflow_job
@@ -87,6 +89,8 @@ def blessed_record(tag: str, commit: str, run: dict, lane: str, source: str,
         "driver_version": run.get("driver_version"),
         "image_sha": (run.get("env") or {}).get("image_sha"),
         "output_sha256": first_output_sha(run),
+        # The custom-node packs (sha, import status) the golden was generated with.
+        "custom_nodes": run.get("custom_nodes"),
         "reason": reason,
         "previous_tag": previous_tag,
         "generated_by": generated_by, "generated_ts": int(time.time()),
@@ -196,8 +200,14 @@ def main():
         wf_id: e for wf_id, e in manifest["workflows"].items()
         if (args.workflows == "all" and e.get("enabled")) or wf_id in args.workflows.split(",")
     }
+    # A golden only means something on a lane the workflow runs on: the lane
+    # filter applies to generating, promoting and blessing alike.
+    for wf_id in [w for w, e in selected.items() if not lanes_mod.workflow_runs_on_lane(e, lane)]:
+        print(f"[{wf_id}] not run on lane {lane} (manifest lanes: "
+              f"{', '.join(selected[wf_id]['lanes'])}); skipped")
+        del selected[wf_id]
     if not selected:
-        raise SystemExit("no workflows selected")
+        raise SystemExit(f"no workflows selected for lane {lane}")
 
     from_branch = from_commit = None
     if args.from_run:
@@ -276,7 +286,8 @@ def main():
                 models=entry.get("models", []),
                 timeout_s=entry_value(entry, defaults, "timeout_s"),
                 comfy_flags=entry_value(entry, defaults, "comfy_flags"),
-                workdir=wf_dir / f"r{r}", comfy_repo=args.repo_url, lane=lane)
+                workdir=wf_dir / f"r{r}", comfy_repo=args.repo_url, lane=lane,
+                custom_nodes=packs.records_for(entry, repo_root))
             runs[r] = rec
             if rec.get("status") != "ok":
                 print(f"::error::[{wf_id}] golden r{r} failed: {rec.get('status')} "

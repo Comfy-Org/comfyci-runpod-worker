@@ -71,6 +71,45 @@ def test_failure_detail_is_read_from_the_workers_failure_key(tmp_path):
     assert rec["env"] == {"image": "cu130-t2141"} and rec["lane"] == "py313-torch2.14.1-cu130"
 
 
+def test_custom_nodes_ride_in_the_job_input_and_back_in_the_record(tmp_path):
+    class Recording(FakeClient):
+        def run(self, job_input):
+            self.sent = job_input
+            return super().run(job_input)
+
+    packs = [{"name": "ComfyUI-KJNodes", "repo": "https://github.com/kijai/ComfyUI-KJNodes",
+              "sha": "e" * 40, "kind": "git", "requirements": True}]
+    report = {"ComfyUI-KJNodes": {"sha": "e" * 40, "source": "cache", "pip_s": 0.0,
+                                  "import": "ok", "seconds": 1.1}}
+    client = Recording([
+        {"status": "COMPLETED", "delayTime": 10, "executionTime": 900,
+         "output": {"status": "ok", "timings": {"custom_nodes_s": 0.8}, "custom_nodes": report,
+                    "outputs": []}},
+    ])
+    rec = submit_and_poll.run_workflow_job(client, "wf", {}, comfy_commit="c" * 40, models=[],
+                                           timeout_s=10, comfy_flags=["--x"], workdir=tmp_path,
+                                           custom_nodes=packs)
+    assert client.sent["custom_nodes"] == packs and client.sent["comfy_flags"] == ["--x"]
+    assert rec["custom_nodes"] == report and rec["timings"] == {"custom_nodes_s": 0.8}
+    # Without packs the job input still carries the key, empty, so the worker reconciles.
+    rec = _job(FakeClient([{"status": "COMPLETED", "output": {"status": "ok", "outputs": []}}]), tmp_path)
+    assert rec["custom_nodes"] is None
+
+
+def test_pack_install_failures_are_infra_and_retried(tmp_path):
+    client = FakeClient([
+        {"status": "COMPLETED", "output": {"status": "custom_node_install_error",
+                                           "failure": {"message": "pinned commit could not be fetched"}}},
+        {"status": "COMPLETED", "output": {"status": "custom_node_error",
+                                           "failure": {"message": "ComfyUI-KJNodes: IMPORT FAILED"}}},
+    ])
+    rec = _job(client, tmp_path)
+    assert client.runs == 2
+    assert rec["status"] == "custom_node_error"  # an import failure is never retried
+    assert "custom_node_install_error" in submit_and_poll.INFRA_STATUSES
+    assert "custom_node_error" not in submit_and_poll.INFRA_STATUSES
+
+
 def test_bad_request_is_infra_but_not_retried(tmp_path):
     client = FakeClient([
         {"status": "COMPLETED", "output": {"status": "bad_request",

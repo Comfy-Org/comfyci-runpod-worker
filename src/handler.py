@@ -1,20 +1,24 @@
 """RunPod serverless handler for ComfyUI CI regression runs.
 
 Modes (input.mode):
-  run          (default) — check out input.comfy_commit, run input.workflow,
-               return outputs base64-encoded.
+  run          (default) — check out input.comfy_commit, install the custom-node
+               packs in input.custom_nodes (if any), run input.workflow, return
+               outputs base64-encoded.
   sync_models  — sync input.models onto the network volume (see model_sync.py).
 
 Every failure maps to a distinct output.status so the orchestrator can tell
-infrastructure problems (checkout_error, missing_model, server_start_timeout)
-apart from real execution failures (execution_error, validation_error) and
-never report an infra flake as a code regression. The detail travels under
-`failure`, never `error`: the RunPod SDK treats a top-level `error` as the job
-failing, rejects a dict there (job-done 400) and drops it from the output.
+infrastructure problems (checkout_error, missing_model, server_start_timeout,
+custom_node_install_error) apart from real execution failures
+(execution_error, validation_error, custom_node_error) and never report an
+infra flake as a code regression. The detail travels under `failure`, never
+`error`: the RunPod SDK treats a top-level `error` as the job failing, rejects
+a dict there (job-done 400) and drops it from the output.
 
 Every `run` answer carries an `env` block naming the worker image (lane image
 id, build sha, python, torch, cuda) and the host driver, so a result is always
-attributable to the environment that produced it.
+attributable to the environment that produced it. A run that requested packs
+also carries `custom_nodes`: per pack the sha, where it came from, the pip
+time, and whether ComfyUI imported it.
 """
 from __future__ import annotations
 
@@ -28,6 +32,7 @@ import runpod
 
 import checkout
 import comfy_runner
+import custom_nodes
 import model_sync
 
 MAX_INLINE_BYTES = 15 * 1024 * 1024  # stay under RunPod's ~20MB response cap after b64 overhead
@@ -70,18 +75,41 @@ def _run(job_input: dict) -> dict:
         return {**out, "status": "missing_model", "failure": {"message": "models absent from volume",
                                                               "missing": missing}}
 
+    # Always reconciled, even for a job without packs: a warm worker may still
+    # hold the packs of an earlier job, and a job that requests none must run
+    # the bare custom_nodes/ the image shipped.
+    requested = list(job_input.get("custom_nodes") or [])
+    try:
+        installed = custom_nodes.prepare(requested)
+    except custom_nodes.InstallError as e:
+        return {**out, "status": "custom_node_install_error", "failure": {"message": str(e)[:2000]}}
+    except Exception as e:
+        return {**out, "status": "worker_error",
+                "failure": {"message": str(e)[:2000], "traceback": traceback.format_exc()[-3000:]}}
+    if requested:
+        out["custom_nodes"] = installed["packs"]
+        out["timings"]["custom_nodes_s"] = installed["seconds"]
+        out["timings"]["custom_nodes_pip_s"] = installed["pip_s"]
+
     try:
         rec = comfy_runner.execute(
             workflow,
             timeout_s=float(job_input.get("timeout_s", 600)),
-            extra_flags=list(job_input.get("comfy_flags", [])),
+            extra_flags=custom_nodes.merge_flags(list(job_input.get("comfy_flags", [])), requested),
+            required_custom_nodes=requested,
         )
     except comfy_runner.ExecutionFailure as e:
+        if requested and e.detail.get("custom_nodes"):
+            out["custom_nodes"] = custom_nodes.merge_status(out.get("custom_nodes"),
+                                                            e.detail["custom_nodes"])
         return {**out, "status": e.status, "failure": e.detail}
     except Exception as e:
         return {**out, "status": "worker_error",
                 "failure": {"message": str(e)[:2000], "traceback": traceback.format_exc()[-3000:]}}
 
+    if requested:
+        out["custom_nodes"] = custom_nodes.merge_status(out.get("custom_nodes"),
+                                                        rec.get("custom_nodes"))
     out["comfy_version"] = rec.get("comfy_version")
     out["torch_version"] = rec.get("torch_version")
     out["python_version"] = rec.get("python_version")

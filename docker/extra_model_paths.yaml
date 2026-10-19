@@ -12,3 +12,6 @@ comfyci:
     loras: loras
     upscale_models: upscale_models
     vae: vae
+    ultralytics: ultralytics
+    ultralytics_bbox: ultralytics/bbox
+    ultralytics_segm: ultralytics/segm

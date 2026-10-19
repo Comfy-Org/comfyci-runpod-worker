@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "note": "Custom-node packs the pack workflows exercise, keyed by their ComfyUI/custom_nodes directory name and pinned to the commits the frontend's custom-node gate tests (ComfyUI_frontend browser_tests/fixtures/data/customNodeManifest.core.json). Bump a pin by PR: build-image.yml rebuilds the baking images, then re-bless the pack workflows' goldens. `constraints` are extra pins for pack installs on top of the lane's torch pins.",
+  "constraints": [
+    "opencv-python==4.12.0.88",
+    "opencv-python-headless==4.12.0.88"
+  ],
+  "packs": {
+    "ComfyUI-KJNodes": {
+      "repo": "https://github.com/kijai/ComfyUI-KJNodes",
+      "sha": "e27a505b3ba6ce42687fe00500deda103d9d6071",
+      "label": "KJNodes 1.4.7",
+      "kind": "git",
+      "requirements": true
+    },
+    "ComfyUI-VideoHelperSuite": {
+      "repo": "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite",
+      "sha": "115de7a9d9e34410cffb9ecfd268e993b11a50fb",
+      "label": "VideoHelperSuite 1.7.9",
+      "kind": "git",
+      "requirements": true
+    },
+    "ComfyUI-Impact-Pack": {
+      "repo": "https://github.com/ltdrdata/ComfyUI-Impact-Pack",
+      "sha": "429d0159ad429e64d2b3916e6e7be9c22d025c3c",
+      "label": "Impact-Pack 8.28.3",
+      "kind": "git",
+      "requirements": true,
+      "pip_args": ["--no-build-isolation"],
+      "note": "requirements.txt pulls sam2 from its git HEAD; sam2's build needs torch and setuptools from the venv, so it is installed without build isolation, and SAM2_BUILD_CUDA=0 (Dockerfile) skips its CUDA extension. install.py is never run."
+    },
+    "ComfyUI-Impact-Subpack": {
+      "repo": "https://github.com/ltdrdata/ComfyUI-Impact-Subpack",
+      "sha": "50c7b71a6a224734cc9b21963c6d1926816a97f1",
+      "label": "Impact-Subpack 1.3.5",
+      "kind": "git",
+      "requirements": true,
+      "note": "Provides UltralyticsDetectorProvider for Impact-Pack; its detector models come from the workflow manifest (models/ultralytics), never from its install.py."
+    },
+    "ComfyUI-Manager": {
+      "repo": "https://github.com/Comfy-Org/ComfyUI-Manager",
+      "sha": "f764cc0e54ca8cd6e1c6a8ecc005bd574592ca65",
+      "label": "Manager 4.3",
+      "kind": "pip",
+      "requirements": false,
+      "comfy_flags": ["--enable-manager"],
+      "files": {
+        "user/__manager/config.ini": "[default]\nnetwork_mode = offline\nfile_logging = false\n"
+      },
+      "log_ok": "[START] ComfyUI-Manager",
+      "log_missing": "must be installed first",
+      "note": "Manager 4.x is a pip package (not a custom_nodes clone) that ComfyUI loads with --enable-manager. The config keeps its startup hermetic: no node-database fetch from GitHub, no log file under user/."
+    }
+  }
+}

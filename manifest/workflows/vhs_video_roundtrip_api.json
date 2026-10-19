@@ -1,0 +1,43 @@
+{
+  "1": {
+    "class_type": "VHS_LoadVideo",
+    "inputs": {
+      "video": "comfyci_clip.mp4",
+      "force_rate": 3,
+      "custom_width": 0,
+      "custom_height": 0,
+      "frame_load_cap": 4,
+      "skip_first_frames": 0,
+      "select_every_nth": 1
+    }
+  },
+  "2": {
+    "class_type": "ImageScale",
+    "inputs": {
+      "image": ["1", 0],
+      "upscale_method": "nearest-exact",
+      "width": 256,
+      "height": 256,
+      "crop": "disabled"
+    }
+  },
+  "3": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "vhs_video_roundtrip",
+      "images": ["2", 0]
+    }
+  },
+  "4": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+      "images": ["2", 0],
+      "frame_rate": 3,
+      "loop_count": 0,
+      "filename_prefix": "vhs_video_roundtrip_gif",
+      "format": "image/gif",
+      "pingpong": false,
+      "save_output": true
+    }
+  }
+}

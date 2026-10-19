@@ -40,6 +40,7 @@ pick with `--storage` / `REGRESSION_STORAGE`):
 | `src/` | RunPod handler (`handler.py`), commit checkout, workflow runner, volume model sync |
 | `manifest/workflows.json` | Single source of truth: workflows, models, seeds, thresholds (staged workflow JSONs not yet in the manifest live in `manifest/workflows/`) |
 | `manifest/lanes.json` | Environment lanes (python / torch / cuda / GPU, cadence, storage prefix) published to the dashboard through the run index |
+| `manifest/custom_nodes.json` | Custom-node packs (repo, pinned commit) the pack workflows install on the worker, baked into the images CI builds (see [Custom-node packs](#custom-node-packs)) |
 | `.github/workflows/build-index.yml` | Backfills or repairs the run index for a branch/lane (workflow_dispatch) |
 | `scripts/` | Orchestration run on the (CPU) CI runner: submit/poll, compare, publish, golden generation |
 | `scripts/template_api_export.py`, `scripts/import_template.py` | Turn a workflow template into a corpus entry (see [Adding a workflow](#adding-a-workflow)) |
@@ -85,10 +86,17 @@ this repo per template.
    `seed_overrides` (node id → input patch, belt-and-braces for the seed),
    `models` (name + download url + ComfyUI models subdirectory, plus `sha256`
    when the host publishes one), and optionally `gpu_type`, `thresholds`,
-   `comfy_flags`. Input images for `LoadImage` nodes are listed under `models`
-   too, with `"directory": "input"` (pin the url to a commit, not a branch), and
-   the entry sets `"comfy_flags": ["--input-directory", "/runpod-volume/models/input"]`
-   so ComfyUI reads them from the volume.
+   `comfy_flags`. Input images for `LoadImage` nodes (and clips for
+   `VHS_LoadVideo`) are listed under `models` too, with `"directory": "input"`
+   (pin the url to a commit, not a branch), and the entry sets
+   `"comfy_flags": ["--input-directory", "/runpod-volume/models/input"]` so
+   ComfyUI reads them from the volume. A model that lives in a subfolder of a
+   models directory keeps the subfolder in its `name`, the way the loader's
+   combo lists it (`"name": "bbox/face_yolov8m.pt", "directory": "ultralytics"`).
+
+   A workflow that uses custom nodes lists its packs under `custom_nodes`
+   (names from `manifest/custom_nodes.json`) and restricts itself with `lanes`
+   to the lanes whose image bakes them; see [Custom-node packs](#custom-node-packs).
 
 3. Check it. `python -m pytest scripts/tests -q` lints the manifest against
    every workflow it references (loaded files and `models` match both ways,
@@ -117,9 +125,9 @@ this repo per template.
 |---|---|---|
 | `pass` | metrics within thresholds vs golden | green |
 | `fail` | metrics exceed thresholds vs golden | **red** |
-| `execution_error` | workflow errored on the commit under test | **red** |
+| `execution_error` | workflow errored on the commit under test, or a custom-node pack it requested did not import (worker status `custom_node_error`) | **red** |
 | `no_baseline` | no blessed golden yet | warning, green |
-| `infra_error` | RunPod/queue/checkout/model-volume problem (after 1 retry) | warning, green |
+| `infra_error` | RunPod/queue/checkout/model-volume/pack-install problem (after 1 retry) | warning, green |
 
 Thresholds come from the manifest entry if set, otherwise from the manifest
 defaults loosened to 3× the golden's own re-run noise floor
@@ -233,6 +241,13 @@ tests) keeps the file consistent. Goldens are per lane: cu130+ images enable
 comfy-kitchen kernels that cu128 cannot, so a new lane always starts with its
 own baselines.
 
+A workflow can restrict itself to lanes with `lanes` in
+`manifest/workflows.json` (a list of lane ids; null, the default, means every
+lane). `run_regression.py`, `golden_baseline.py` and the per-commit plan
+(`lanes.py per-commit` lists each lane's workflows) all honour it, even when
+the workflow is named explicitly, and the dashboard shows a skipped cell as
+not run. Workflows that need custom-node packs must use it (see below).
+
 Adding a lane:
 
 1. Add the image under `images` (python, cuda, `torch_index`, `torch_spec`
@@ -256,13 +271,94 @@ Adding a lane:
    floor; `--dry-run` prints it, `--write` records the new id as the lane's
    `endpoint_id`. Commit that. From then on `build-image.yml` repoints the lane
    at each new sha tag (`runpod_endpoints.py set-image`); the legacy lane is
-   never moved.
+   never moved. A repoint is a rolling release: workers already running the
+   old image keep serving jobs until RunPod replaces them, which can take a
+   long time when the new image is large and the new workers sit throttled
+   behind them, so a run right after a repoint may silently use the old image
+   (its `env.image_sha` tells). Check `isStale` in the endpoint's worker list
+   before generating goldens; setting the endpoint's max workers to 0 and back
+   to its normal value flushes the stale workers within seconds.
 4. Generate and bless goldens for the lane: **Golden baselines** with the
    current release tag, `workflows: all`, `lane: <lane id>`, inspect, then
    `bless_only`.
 5. The per-commit cron picks the lane up on its next tick (a lane with a null
    `endpoint_id` is skipped), and ci.comfy.org lists it in the lane selector
    after the first publish.
+
+## Custom-node packs
+
+Four workflows exercise custom-node packs on real GPUs, so a core commit or a
+torch lane that breaks a pack is caught within the hour and bit-compared
+against goldens like every other workflow: `kjnodes_sdxl_t2i` (KJNodes image
+nodes on an SDXL render), `vhs_video_roundtrip` (VideoHelperSuite decode of a
+clip, PNG frames, gif encode), `impact_sdxl_detailer` (Impact-Pack face
+detection and detailing with the Impact-Subpack ultralytics detector) and
+`manager_import_smoke` (ComfyUI-Manager import, no pack nodes).
+
+`manifest/custom_nodes.json` is the registry: packs keyed by their
+`custom_nodes` directory name, with `repo`, `sha` (a full commit), `label`,
+`kind` (`git`, the default, or `pip` for a Python package such as Manager 4.x,
+which ComfyUI loads with `--enable-manager` and must not be cloned into
+`custom_nodes`), `requirements` (install the pack's requirements.txt), and
+optionally `pip_args`, `comfy_flags` the pack needs, `files` written into the
+checkout before the server starts (Manager's config, which keeps its startup
+offline), and for a pip pack the log line that proves it loaded (`log_ok`) or
+that ComfyUI prints when it is absent (`log_missing`). `constraints` are extra
+version pins for pack installs on top of the lane's torch pins (both opencv
+variants in lockstep, so Manager's startup fixer finds nothing to reinstall).
+Pins follow the frontend's custom-node gate
+(`browser_tests/fixtures/data/customNodeManifest.core.json` in
+ComfyUI_frontend), so both CI systems test the same pack commits; bump them
+by PR.
+
+A workflow entry names its packs under `custom_nodes` and restricts itself
+with `lanes` to lanes whose image bakes them. Pack requirements are baked into
+the images CI builds (`build` not false in `lanes.json`); the legacy cu128
+image is never rebuilt, so pack workflows never run on its lane and their
+cells show as not run there. `scripts/lanes.py validate` and the manifest lint
+enforce both rules.
+
+How a job runs a pack (`src/custom_nodes.py`):
+
+- The image build fetches every pack at its sha (`git init`, `fetch --depth 1
+  <sha>`, `checkout FETCH_HEAD`: the gate's own recipe) into
+  `/comfy-cache/custom_nodes/<name>/<sha>`, installs its requirements under
+  the torch pins plus the registry's, and records under
+  `/comfy-config/custom_nodes/` the requirements hash (or the pip pin) it
+  baked. The image's `env` block carries `custom_nodes_sha256`, the registry
+  it was built from. A pack's `install.py` is never run: dependencies come
+  from its requirements.txt, models from the workflow manifest.
+- Per job, after the commit checkout, the worker removes the packs an earlier
+  job left behind, copies each requested pack from the cache into
+  `ComfyUI/custom_nodes/<name>` (fetching it first when that pin is not
+  cached) and pip-installs its requirements only when their hash differs from
+  the baked one, so a pin bump works before the rebuild lands. A job that
+  requests no packs runs the bare `custom_nodes/` the image shipped. ComfyUI
+  ignores `custom_nodes/` and `user/` in git, so the checkout's `git clean`
+  never touches them.
+- Once the server is up, ComfyUI's own import summary (`Import times for
+  custom nodes:`, read with the console formatter's colour codes and `[INFO]`
+  tags stripped) is read from the server log. A requested pack that failed to
+  import, or has no line there, fails the run with worker status
+  `custom_node_error` (verdict `execution_error`) before the workflow is
+  validated, whether or not the workflow uses its nodes. A server that dies
+  or never answers is reported the same way only when the log proves a pack
+  is at fault (the summary was printed and the pack is not ok in it, or
+  ComfyUI said a pip pack is absent); a server that fell over before loading
+  packs (CUDA init, OOM, a core import error) keeps `server_died` /
+  `server_start_timeout` (infra, retried once) with the packs' status as
+  detail. A pack that could not be fetched or pip-installed is
+  `custom_node_install_error` (infra, retried once).
+- `run.json` carries `custom_nodes` (per pack: sha, where it came from, pip
+  time, import status and time), `summary.json` copies it per workflow, the
+  run index keeps the import status per pack (`cn`), and `blessed.json`
+  records the packs a golden was generated with.
+
+Adding a pack: declare it in the registry, add the workflow with
+`custom_nodes` and `lanes`, merge (the baking images rebuild and their lanes
+are repointed), let `sync-models.yml` fetch any models it needs, generate and
+bless the golden, then enable the workflow. Bumping a pin: edit the sha,
+merge, re-bless the workflows that use the pack.
 
 ## Frontend CI index
 
@@ -422,6 +518,9 @@ for the dashboard's list views.
   changing either, regenerate and re-bless (`blessed.json` records both, and
   every run record carries an `env` block with the image id, build sha,
   python, torch, CUDA, host driver and the kernel backends ComfyUI logged).
+- Custom-node pins are part of the image too: a bump in
+  `manifest/custom_nodes.json` rebuilds the baking images and moves the pack
+  workflows' outputs, so re-bless them (`blessed.json` records the pins).
 - Local dry run without publishing anything:
   `python scripts/run_regression.py --commit <sha> --branch test --skip-publish`
 - Script tests (run on every PR by the *Script tests* workflow):
