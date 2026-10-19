@@ -338,10 +338,10 @@
       "seed_overrides": {},
       "models": [
         {
-          "name": "plain_video.mp4",
-          "url": "https://raw.githubusercontent.com/Comfy-Org/ComfyUI_frontend/ad63f7cb9bd0f4b2b4a7c6b3599291cd8fe36051/browser_tests/assets/plain_video.mp4",
+          "name": "comfyci_clip.mp4",
+          "url": "https://raw.githubusercontent.com/Comfy-Org/comfyci-runpod-worker/43286394d73914d283e5daee12d82d011d4630fe/manifest/inputs/comfyci_clip.mp4",
           "directory": "input",
-          "sha256": "ab3896e8a35d2be240b4c48c3fb034c449f4381e6518789dd2080ec998476439"
+          "sha256": "d9bf16fbfb0bd7d9b3851fcfc4ca208f4160a6523bac7ed97ce4b288c8b0ec95"
         }
       ],
       "comfy_flags": [
