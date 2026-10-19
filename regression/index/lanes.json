@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_ts": 1792440242,
+  "generated_ts": 1792441119,
   "primary": "py312-torch2.11.0-cu128",
   "lanes": {
     "py312-torch2.11.0-cu128": {
@@ -126,6 +126,18 @@
         "z_image_turbo_t2i": {
           "tag": "v0.42.0",
           "sha": "dde6c3402a0ca8d24d6201cf02e05d980bae4f7482d58afea81bc023b970706d"
+        },
+        "impact_sdxl_detailer": {
+          "tag": "v0.42.0",
+          "sha": "0b8f4cd63f87720b4020ff1933235b96a88fd7b1311fe83dbca4f4c5d6c16b42"
+        },
+        "kjnodes_sdxl_t2i": {
+          "tag": "v0.42.0",
+          "sha": "c381e25de13b7a96f47516e2e2874eb6bf30f4b0d1e979c48e6ff0ad1e09465e"
+        },
+        "manager_import_smoke": {
+          "tag": "v0.42.0",
+          "sha": "35af9768de21397f200d5f4c0eac854ea8ab8a1615659bd89583d6606a4a8b75"
         }
       }
     }
