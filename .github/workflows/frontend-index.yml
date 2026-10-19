@@ -1,0 +1,43 @@
+# Publishes the ComfyUI_frontend CI index (main's workflow runs, the perf
+# baselines and the daily custom-nodes gate) as compact JSON under frontend/
+# on this repo's `results` branch, read by ci.comfy.org's Frontend tab.
+# Incremental every half hour, offset from the regression cron; dispatch with
+# backfill_days to walk history. See README "Frontend CI index".
+name: Frontend index
+on:
+  schedule:
+    - cron: '13,43 * * * *'
+  workflow_dispatch:
+    inputs:
+      backfill_days:
+        description: walk main's push runs this many days back (empty = incremental)
+        default: ''
+      only:
+        description: csv of perf, ci, gate (empty = all three)
+        default: ''
+
+concurrency:
+  group: frontend-index
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r scripts/requirements.txt
+      - name: Publish the frontend index
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          FRONTEND_GH_TOKEN: ${{ secrets.FRONTEND_GH_TOKEN }}
+          FRONTEND_BACKFILL_DAYS: ${{ inputs.backfill_days }}
+          FRONTEND_ONLY: ${{ inputs.only }}
+        run: |
+          python scripts/frontend_index.py \
+            --results-workdir "$RUNNER_TEMP/results-checkout"

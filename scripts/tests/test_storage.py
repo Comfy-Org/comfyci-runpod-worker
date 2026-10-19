@@ -112,3 +112,19 @@ def test_missing_results_branch_starts_empty(tmp_path):
     s.finalize("first publish")
     assert subprocess.run(["git", "-C", str(bare), "rev-parse", "results"],
                           capture_output=True).returncode == 0
+
+
+def test_upload_json_compact_drops_whitespace_and_round_trips(tmp_path, remote):
+    s = _store(tmp_path, remote, "a")
+    obj = {"schema_version": 1, "entries": [{"c": "abc", "t": 1, "w": {"x": None}}]}
+    s.upload_json("frontend/ci/main.json", obj, compact=True)
+    s.upload_json("frontend/ci/pretty.json", obj)
+    compact = (s.workdir / "frontend" / "ci" / "main.json").read_text(encoding="utf-8")
+    assert compact == '{"schema_version":1,"entries":[{"c":"abc","t":1,"w":{"x":null}}]}'
+    pretty = (s.workdir / "frontend" / "ci" / "pretty.json").read_text(encoding="utf-8")
+    assert pretty.startswith('{\n  "schema_version": 1,') and json.loads(pretty) == obj
+    assert s.download_json("frontend/ci/main.json") == obj
+    s.finalize("compact")
+    check = tmp_path / "check"
+    subprocess.run(["git", "clone", "-q", "-b", "results", str(remote), str(check)], check=True)
+    assert (check / "frontend" / "ci" / "main.json").read_text(encoding="utf-8") == compact
