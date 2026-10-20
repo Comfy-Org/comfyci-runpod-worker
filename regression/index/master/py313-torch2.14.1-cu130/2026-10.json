@@ -5,6 +5,214 @@
   "shard": "2026-10",
   "entries": [
     {
+      "c": "1045d48eb4cc1afd27c419a4765555440f192eab",
+      "t": 1792531359,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.42.0",
+      "lane": "py313-torch2.14.1-cu130",
+      "layout": 2,
+      "m": {
+        "s": "Apply single-head LoRAs to MiniMax-H3 PDD head banks (#17239)",
+        "a": "kijai",
+        "pr": 17239,
+        "ct": 1792530586,
+        "pt": "Apply single-head LoRAs to MiniMax-H3 PDD head banks",
+        "pa": "kijai",
+        "av": "https://avatars.githubusercontent.com/u/40791699?v=4"
+      },
+      "prev": "7ef81780f814dc25b4108163e70b22c011e968be",
+      "range": {
+        "n": 1,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/7ef81780f814dc25b4108163e70b22c011e968be...1045d48eb4cc1afd27c419a4765555440f192eab"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "b7495989456d662565e10028178760947622e378463c562e2b64239f125185c6",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 97.75,
+          "vram": 21793.6,
+          "g": "v0.42.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "impact_sdxl_detailer": {
+          "v": "pass",
+          "d": null,
+          "sha": "0b8f4cd63f87720b4020ff1933235b96a88fd7b1311fe83dbca4f4c5d6c16b42",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 40.58,
+          "vram": 8287.6,
+          "g": "v0.42.0",
+          "th": "impact_sdxl_detailer_00001_.webp",
+          "cn": {
+            "ComfyUI-Impact-Pack": "ok",
+            "ComfyUI-Impact-Subpack": "ok"
+          }
+        },
+        "kjnodes_sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "c381e25de13b7a96f47516e2e2874eb6bf30f4b0d1e979c48e6ff0ad1e09465e",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 34.1,
+          "vram": 8157.6,
+          "g": "v0.42.0",
+          "th": "kjnodes_sdxl_t2i_00001_.webp",
+          "cn": {
+            "ComfyUI-KJNodes": "ok"
+          }
+        },
+        "krea2_turbo_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "63f058b56c5ffce0d0bf35993ef2d486959a8e71d65be40096996435c6166172",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 50.69,
+          "vram": 18539.6,
+          "g": "v0.42.0",
+          "th": "krea2_turbo_t2i_00001_.webp"
+        },
+        "mage_flow_t2i_int8": {
+          "v": "pass",
+          "d": null,
+          "sha": "4b63f34437230271dd3ee706cd8d04d578ba0e8376139d09e659823281114a2d",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 39.66,
+          "vram": 13505.6,
+          "g": "v0.42.0",
+          "th": "mage_flow_t2i_int8_00001_.webp"
+        },
+        "manager_import_smoke": {
+          "v": "pass",
+          "d": null,
+          "sha": "35af9768de21397f200d5f4c0eac854ea8ab8a1615659bd89583d6606a4a8b75",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 0.5,
+          "vram": 1381.6,
+          "g": "v0.42.0",
+          "th": "manager_import_smoke_00001_.webp",
+          "cn": {
+            "ComfyUI-Manager": "ok"
+          }
+        },
+        "pixeldit_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "d76c74febc82bb9dd43799d58e34294bcab5702c003d9fc4e0908d08bb692392",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 28.24,
+          "vram": 9045.6,
+          "g": "v0.42.0",
+          "th": "pixeldit_t2i_00001_.webp"
+        },
+        "qwen_image_2_1_edit": {
+          "v": "pass",
+          "d": null,
+          "sha": "4e24fb0858ec690d5867e9d403c0837dccc54fad3a240a1e730881566f8138ab",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 60.48,
+          "vram": 17545.6,
+          "g": "v0.42.0",
+          "th": "qwen_image_2_1_edit_00001_.webp"
+        },
+        "qwen_image_2_1_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "208b08f9c5e0b2a35e5ee26511f9588830c709012ee89fd24871879bd4c101c8",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 62.64,
+          "vram": 16327.6,
+          "g": "v0.42.0",
+          "th": "qwen_image_2_1_t2i_00001_.webp"
+        },
+        "qwen_image_2_1_turbo_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "67f783c49e1b059460bb0c9e74c5106856d543ecd356c17bab50e3679bddd12f",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 47.71,
+          "vram": 16327.6,
+          "g": "v0.42.0",
+          "th": "qwen_image_2_1_turbo_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "26772840cd78a305972987574388d0da385b0704ecca28c17d967e876e577c11",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 32.62,
+          "vram": 8157.6,
+          "g": "v0.42.0",
+          "th": "sdxl_t2i_00001_.webp"
+        },
+        "vhs_video_roundtrip": {
+          "v": "pass",
+          "d": null,
+          "sha": "130703f705ade93600513afc74fc676d4c7b40ff76201a9c8f6438ae57b3d2dd",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 0.51,
+          "vram": 1381.6,
+          "g": "v0.42.0",
+          "th": "vhs_video_roundtrip_00001_.webp",
+          "cn": {
+            "ComfyUI-VideoHelperSuite": "ok"
+          }
+        },
+        "z_image_turbo_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "dde6c3402a0ca8d24d6201cf02e05d980bae4f7482d58afea81bc023b970706d",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 64.98,
+          "vram": 21137.6,
+          "g": "v0.42.0",
+          "th": "z_image_turbo_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
+    {
       "c": "7ef81780f814dc25b4108163e70b22c011e968be",
       "t": 1792527634,
       "o": "pass",
