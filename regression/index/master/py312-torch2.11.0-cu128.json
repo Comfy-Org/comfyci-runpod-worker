@@ -3,20 +3,163 @@
   "branch": "master",
   "lane": "py312-torch2.11.0-cu128",
   "layout": 1,
-  "generated_ts": 1792707432,
-  "count": 333,
+  "generated_ts": 1792711042,
+  "count": 334,
   "shards": [
     "2026-08",
     "2026-09",
     "2026-10"
   ],
   "latest": {
-    "commit": "503d785f0702428e2344248af9572a7270bb3253",
-    "run_ts": 1792707432,
+    "commit": "baa9c563c3c749ac85dead76bd09695684b2150b",
+    "run_ts": 1792711040,
     "overall": "pass"
   },
   "first_bad": {},
   "entries": [
+    {
+      "c": "baa9c563c3c749ac85dead76bd09695684b2150b",
+      "t": 1792711040,
+      "o": "pass",
+      "infra": false,
+      "cv": "0.42.0",
+      "lane": "py312-torch2.11.0-cu128",
+      "layout": 1,
+      "m": {
+        "s": "[Partner Nodes] feat(Ideogram): add Ideogram Vector Generate SVG and Image to SVG nodes (#17298)",
+        "a": "bigcat88",
+        "pr": 17298,
+        "ct": 1792709521,
+        "pt": "[Partner Nodes] feat(Ideogram): add Ideogram Vector Generate SVG nodes",
+        "pa": "bigcat88",
+        "av": "https://avatars.githubusercontent.com/u/13381981?v=4"
+      },
+      "prev": "503d785f0702428e2344248af9572a7270bb3253",
+      "range": {
+        "n": 4,
+        "url": "https://github.com/Comfy-Org/ComfyUI/compare/503d785f0702428e2344248af9572a7270bb3253...baa9c563c3c749ac85dead76bd09695684b2150b"
+      },
+      "w": {
+        "flux_dev_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "3fa6e2ad80aa0723206792cacd4f760a7db9ddf800bf60051866dd44bf3db4d3",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 102.64,
+          "vram": 21737.6,
+          "g": "v0.38.0",
+          "th": "flux_dev_t2i_00001_.webp"
+        },
+        "krea2_turbo_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "aee96126190a3f72e4716baa1ca98338fa1ddc3a5d6d839f525551e9f2b50350",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 55.71,
+          "vram": 18539.6,
+          "g": "v0.42.0",
+          "th": "krea2_turbo_t2i_00001_.webp"
+        },
+        "mage_flow_t2i_int8": {
+          "v": "pass",
+          "d": null,
+          "sha": "d6f2fc7a8a4d0ae38119c7c65ce05d37a5618ee2709b1fb6e533f0346582b5a4",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 53.9,
+          "vram": 13505.6,
+          "g": "v0.42.0",
+          "th": "mage_flow_t2i_int8_00001_.webp"
+        },
+        "pixeldit_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "25bb183d1d80cd8dee71ef2a59724ef479e883082f596e222981fe174b55670c",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 26.65,
+          "vram": 9045.6,
+          "g": "v0.42.0",
+          "th": "pixeldit_t2i_00001_.webp"
+        },
+        "qwen_image_2_1_edit": {
+          "v": "pass",
+          "d": null,
+          "sha": "7ed110b317b4e4b0a4f6b52da86bcd9a4e39eec0689c4e0f404cc9e68782f312",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 82.33,
+          "vram": 14187.6,
+          "g": "v0.42.0",
+          "th": "qwen_image_2_1_edit_00001_.webp"
+        },
+        "qwen_image_2_1_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "9600706e86efe85401ce391816cfc6957dfffea0ac5f7934a6e598a73a8b8586",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 60.31,
+          "vram": 16327.6,
+          "g": "v0.42.0",
+          "th": "qwen_image_2_1_t2i_00001_.webp"
+        },
+        "qwen_image_2_1_turbo_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "e489a013f070829be4a0220256a23427627084b7f1b6331f3a47406d332fa19f",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 49.94,
+          "vram": 16329.6,
+          "g": "v0.42.0",
+          "th": "qwen_image_2_1_turbo_t2i_00001_.webp"
+        },
+        "sdxl_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "12d47cfab50fbe18bd829cb148baa00097566fe3706db88e401e6209b233e260",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 29.63,
+          "vram": 8157.6,
+          "g": "v0.33.2",
+          "th": "sdxl_t2i_00001_.webp"
+        },
+        "z_image_turbo_t2i": {
+          "v": "pass",
+          "d": null,
+          "sha": "d92d0fb9c7af9bc27e3ee1d86c723bf17281f3318dffb47ac48345f6331e1a6f",
+          "mse": 0.0,
+          "psnr": null,
+          "pct": 0.0,
+          "pv": true,
+          "exec": 63.23,
+          "vram": 21105.6,
+          "g": "v0.42.0",
+          "th": "z_image_turbo_t2i_00001_.webp"
+        }
+      },
+      "s": null
+    },
     {
       "c": "503d785f0702428e2344248af9572a7270bb3253",
       "t": 1792707432,
