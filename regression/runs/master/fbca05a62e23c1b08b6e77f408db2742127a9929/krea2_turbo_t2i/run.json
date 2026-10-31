@@ -1,0 +1,38 @@
+{
+  "status": "ok",
+  "error": null,
+  "comfy_version": "0.43.0",
+  "torch_version": "2.11.0+cu128",
+  "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+  "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+  "vram_peak_mb": 18539.6,
+  "rss_peak_mb": 19175.1,
+  "validation": {
+    "filled_defaults": [],
+    "missing_nodes": [],
+    "ok": true,
+    "stripped_inputs": []
+  },
+  "timings": {
+    "checkout_s": 0.01,
+    "pip_s": 0.91,
+    "prompt_exec_s": 68.95,
+    "server_start_s": 8.03
+  },
+  "commit_checked_out": "fbca05a62e23c1b08b6e77f408db2742127a9929",
+  "env": null,
+  "lane": null,
+  "custom_nodes": null,
+  "runpod_job_id": "4d513fae-5b60-4b3b-b610-7e6f18b4441a-u2",
+  "attempt": 1,
+  "delay_ms": 258228,
+  "delay_s": 258.228,
+  "execution_ms": 83340,
+  "outputs": [
+    {
+      "filename": "krea2_turbo_t2i_00001_.png",
+      "bytes": 1267260,
+      "sha256": "aee96126190a3f72e4716baa1ca98338fa1ddc3a5d6d839f525551e9f2b50350"
+    }
+  ]
+}
