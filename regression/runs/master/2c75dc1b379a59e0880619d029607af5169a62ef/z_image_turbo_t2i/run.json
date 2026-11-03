@@ -10,16 +10,16 @@
   "validation": null,
   "timings": {
     "checkout_s": 0.01,
-    "pip_s": 1.03
+    "pip_s": 1.01
   },
   "commit_checked_out": "2c75dc1b379a59e0880619d029607af5169a62ef",
   "env": null,
   "lane": null,
   "custom_nodes": null,
-  "runpod_job_id": "bf17b480-481f-422c-bd11-23283602670a-u2",
+  "runpod_job_id": "9bf5d57c-d5fe-4e52-bcda-9e07c913c506-u2",
   "attempt": 1,
-  "delay_ms": 315848,
-  "delay_s": 315.848,
-  "execution_ms": 910718,
+  "delay_ms": 477787,
+  "delay_s": 477.787,
+  "execution_ms": 910377,
   "outputs": []
 }
