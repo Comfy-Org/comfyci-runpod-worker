@@ -6,7 +6,7 @@
   "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
   "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
   "vram_peak_mb": 13505.6,
-  "rss_peak_mb": 14058.9,
+  "rss_peak_mb": 14057.5,
   "validation": {
     "filled_defaults": [],
     "missing_nodes": [],
@@ -14,20 +14,20 @@
     "stripped_inputs": []
   },
   "timings": {
-    "checkout_s": 1.77,
-    "pip_s": 10.3,
-    "prompt_exec_s": 53,
-    "server_start_s": 7.02
+    "checkout_s": 0.01,
+    "pip_s": 0.98,
+    "prompt_exec_s": 62.43,
+    "server_start_s": 8.64
   },
   "commit_checked_out": "2c75dc1b379a59e0880619d029607af5169a62ef",
   "env": null,
   "lane": null,
   "custom_nodes": null,
-  "runpod_job_id": "95ba7646-a2da-4d62-9bf5-e26606e5de0c-u1",
+  "runpod_job_id": "4250a286-a99f-44bb-99ce-3f226ed88a2c-u1",
   "attempt": 1,
-  "delay_ms": 7268,
-  "delay_s": 7.268,
-  "execution_ms": 74430,
+  "delay_ms": 327790,
+  "delay_s": 327.79,
+  "execution_ms": 76141,
   "outputs": [
     {
       "filename": "mage_flow_t2i_int8_00001_.png",
