@@ -6,7 +6,7 @@
   "entries": [
     {
       "c": "2c75dc1b379a59e0880619d029607af5169a62ef",
-      "t": 1793746356,
+      "t": 1793748353,
       "o": "fail",
       "infra": false,
       "cv": "0.44.0",
@@ -32,8 +32,8 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 111.74,
-          "vram": 21513.6,
+          "exec": 107.15,
+          "vram": 21801.6,
           "g": "v0.38.0",
           "th": "flux_dev_t2i_00001_.webp"
         },
@@ -45,7 +45,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 65.09,
+          "exec": 57.79,
           "vram": 18539.6,
           "g": "v0.42.0",
           "th": "krea2_turbo_t2i_00001_.webp"
@@ -58,7 +58,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 54.62,
+          "exec": 53,
           "vram": 13505.6,
           "g": "v0.42.0",
           "th": "mage_flow_t2i_int8_00001_.webp"
@@ -71,8 +71,8 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 34.75,
-          "vram": 9045.6,
+          "exec": 26.31,
+          "vram": 9077.6,
           "g": "v0.42.0",
           "th": "pixeldit_t2i_00001_.webp"
         },
@@ -84,8 +84,8 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 80.48,
-          "vram": 14859.6,
+          "exec": 70.28,
+          "vram": 14187.6,
           "g": "v0.42.0",
           "th": "qwen_image_2_1_edit_00001_.webp"
         },
@@ -97,7 +97,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 87.59,
+          "exec": 57.34,
           "vram": 16327.6,
           "g": "v0.42.0",
           "th": "qwen_image_2_1_t2i_00001_.webp"
@@ -110,7 +110,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 58.64,
+          "exec": 58.86,
           "vram": 16329.6,
           "g": "v0.42.0",
           "th": "qwen_image_2_1_turbo_t2i_00001_.webp"
@@ -123,7 +123,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 39.42,
+          "exec": 40.27,
           "vram": 8157.6,
           "g": "v0.33.2",
           "th": "sdxl_t2i_00001_.webp"

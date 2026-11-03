@@ -2,7 +2,7 @@
   "schema_version": 2,
   "branch": "master",
   "commit": "2c75dc1b379a59e0880619d029607af5169a62ef",
-  "run_ts": 1793746356,
+  "run_ts": 1793748353,
   "overall": "fail",
   "has_infra_error": false,
   "lane": "py312-torch2.11.0-cu128",
@@ -71,12 +71,12 @@
       "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
       "timings": {
         "checkout_s": 0.01,
-        "pip_s": 1,
-        "prompt_exec_s": 111.74,
-        "server_start_s": 8.44
+        "pip_s": 0.98,
+        "prompt_exec_s": 107.15,
+        "server_start_s": 8.63
       },
-      "vram_peak_mb": 21513.6,
-      "rss_peak_mb": 34427.7,
+      "vram_peak_mb": 21801.6,
+      "rss_peak_mb": 34427.9,
       "comfy_version": "0.44.0",
       "torch_version": "2.11.0+cu128",
       "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
@@ -127,13 +127,13 @@
       "thumbnail": "krea2_turbo_t2i_00001_.webp",
       "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
       "timings": {
-        "checkout_s": 2.6,
-        "pip_s": 19.39,
-        "prompt_exec_s": 65.09,
-        "server_start_s": 10.89
+        "checkout_s": 0,
+        "pip_s": 0.65,
+        "prompt_exec_s": 57.79,
+        "server_start_s": 6.43
       },
       "vram_peak_mb": 18539.6,
-      "rss_peak_mb": 19186.9,
+      "rss_peak_mb": 19176.8,
       "comfy_version": "0.44.0",
       "torch_version": "2.11.0+cu128",
       "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
@@ -184,13 +184,13 @@
       "thumbnail": "mage_flow_t2i_int8_00001_.webp",
       "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
       "timings": {
-        "checkout_s": 0.01,
-        "pip_s": 1.02,
-        "prompt_exec_s": 54.62,
-        "server_start_s": 8.44
+        "checkout_s": 1.77,
+        "pip_s": 10.3,
+        "prompt_exec_s": 53,
+        "server_start_s": 7.02
       },
       "vram_peak_mb": 13505.6,
-      "rss_peak_mb": 14065.4,
+      "rss_peak_mb": 14058.9,
       "comfy_version": "0.44.0",
       "torch_version": "2.11.0+cu128",
       "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
@@ -241,13 +241,13 @@
       "thumbnail": "pixeldit_t2i_00001_.webp",
       "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
       "timings": {
-        "checkout_s": 0.01,
-        "pip_s": 1,
-        "prompt_exec_s": 34.75,
-        "server_start_s": 9.03
+        "checkout_s": 1.69,
+        "pip_s": 9.77,
+        "prompt_exec_s": 26.31,
+        "server_start_s": 6.51
       },
-      "vram_peak_mb": 9045.6,
-      "rss_peak_mb": 9738.3,
+      "vram_peak_mb": 9077.6,
+      "rss_peak_mb": 9764.3,
       "comfy_version": "0.44.0",
       "torch_version": "2.11.0+cu128",
       "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
@@ -298,13 +298,13 @@
       "thumbnail": "qwen_image_2_1_edit_00001_.webp",
       "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
       "timings": {
-        "checkout_s": 0.01,
-        "pip_s": 1.06,
-        "prompt_exec_s": 80.48,
-        "server_start_s": 9.43
+        "checkout_s": 0,
+        "pip_s": 0.55,
+        "prompt_exec_s": 70.28,
+        "server_start_s": 5.01
       },
-      "vram_peak_mb": 14859.6,
-      "rss_peak_mb": 18324.9,
+      "vram_peak_mb": 14187.6,
+      "rss_peak_mb": 18340.3,
       "comfy_version": "0.44.0",
       "torch_version": "2.11.0+cu128",
       "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
@@ -355,13 +355,13 @@
       "thumbnail": "qwen_image_2_1_t2i_00001_.webp",
       "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
       "timings": {
-        "checkout_s": 4.49,
-        "pip_s": 58.3,
-        "prompt_exec_s": 87.59,
-        "server_start_s": 21.06
+        "checkout_s": 0.01,
+        "pip_s": 0.55,
+        "prompt_exec_s": 57.34,
+        "server_start_s": 4.81
       },
       "vram_peak_mb": 16327.6,
-      "rss_peak_mb": 17050.3,
+      "rss_peak_mb": 17064.5,
       "comfy_version": "0.44.0",
       "torch_version": "2.11.0+cu128",
       "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
@@ -412,13 +412,13 @@
       "thumbnail": "qwen_image_2_1_turbo_t2i_00001_.webp",
       "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
       "timings": {
-        "checkout_s": 2.26,
-        "pip_s": 17.56,
-        "prompt_exec_s": 58.64,
-        "server_start_s": 10.82
+        "checkout_s": 2.36,
+        "pip_s": 21.98,
+        "prompt_exec_s": 58.86,
+        "server_start_s": 11.21
       },
       "vram_peak_mb": 16329.6,
-      "rss_peak_mb": 17067.3,
+      "rss_peak_mb": 17071.5,
       "comfy_version": "0.44.0",
       "torch_version": "2.11.0+cu128",
       "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
@@ -470,12 +470,12 @@
       "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
       "timings": {
         "checkout_s": 0.01,
-        "pip_s": 0.96,
-        "prompt_exec_s": 39.42,
-        "server_start_s": 8.43
+        "pip_s": 1.05,
+        "prompt_exec_s": 40.27,
+        "server_start_s": 8.63
       },
       "vram_peak_mb": 8157.6,
-      "rss_peak_mb": 8923.3,
+      "rss_peak_mb": 8925.1,
       "comfy_version": "0.44.0",
       "torch_version": "2.11.0+cu128",
       "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
@@ -500,8 +500,8 @@
       "thumbnail": null,
       "gpu_name": null,
       "timings": {
-        "checkout_s": 0.01,
-        "pip_s": 1.02
+        "checkout_s": 0,
+        "pip_s": 0.54
       },
       "vram_peak_mb": null,
       "rss_peak_mb": null,
