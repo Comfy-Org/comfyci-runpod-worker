@@ -6,7 +6,7 @@
   "python_version": "3.13.16 (main, Oct 14 2026, 01:04:01) [Clang 23.1.3 ]",
   "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
   "vram_peak_mb": 8157.6,
-  "rss_peak_mb": 9027.2,
+  "rss_peak_mb": 9019.8,
   "validation": {
     "filled_defaults": [],
     "missing_nodes": [],
@@ -15,9 +15,9 @@
   },
   "timings": {
     "checkout_s": 0.01,
-    "pip_s": 0.74,
-    "prompt_exec_s": 33.08,
-    "server_start_s": 6.42
+    "pip_s": 0.77,
+    "prompt_exec_s": 31.09,
+    "server_start_s": 6.62
   },
   "commit_checked_out": "576b642e77b4c42f84afe583c8e8f0eef7637618",
   "env": {
@@ -29,10 +29,10 @@
     "python": "3.13.16 (main, Oct 14 2026, 01:04:01) [Clang 23.1.3 ]",
     "runtime_backends": [
       "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend ascend: {'available': False, 'disabled': False, 'unavailable_reason': \"torch-npu is not installed: No module named 'torch_npu'\", 'capabilities': []}",
+      "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend hip: {'available': False, 'disabled': False, 'unavailable_reason': 'PyTorch ROCm/HIP runtime not available', 'capabilities': []}",
       "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend triton: {'available': True, 'disabled': True, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope1_', 'apply_rope",
       "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend eager: {'available': True, 'disabled': False, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope1_', 'apply_rope",
       "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend cuda: {'available': True, 'disabled': False, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope1_', 'apply_rope_",
-      "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend hip: {'available': False, 'disabled': False, 'unavailable_reason': 'PyTorch ROCm/HIP runtime not available', 'capabilities': []}",
       "\u001b[32m[INFO]\u001b[0m pytorch version: 2.14.1+cu130",
       "\u001b[32m[INFO]\u001b[0m Using pytorch attention",
       "\u001b[32m[INFO]\u001b[0m aimdo: /project/src/control.c:283:INFO:comfy-aimdo inited for GPU: NVIDIA GeForce RTX 4090 (VRAM: 24082 MB)"
@@ -43,11 +43,11 @@
   },
   "lane": "py313-torch2.14.1-cu130",
   "custom_nodes": null,
-  "runpod_job_id": "9a0fdd42-175d-4374-a3dd-21201e4d7feb-u2",
+  "runpod_job_id": "797e64ca-4b33-4010-baaf-797c4a1bbea9-u2",
   "attempt": 1,
-  "delay_ms": 296561,
-  "delay_s": 296.561,
-  "execution_ms": 42497,
+  "delay_ms": 221542,
+  "delay_s": 221.542,
+  "execution_ms": 40656,
   "outputs": [
     {
       "filename": "sdxl_t2i_00001_.png",
