@@ -15,19 +15,19 @@
   },
   "timings": {
     "checkout_s": 0.01,
-    "pip_s": 1.06,
-    "prompt_exec_s": 40.29,
-    "server_start_s": 8.83
+    "pip_s": 1.02,
+    "prompt_exec_s": 44.31,
+    "server_start_s": 8.63
   },
   "commit_checked_out": "576b642e77b4c42f84afe583c8e8f0eef7637618",
   "env": null,
   "lane": null,
   "custom_nodes": null,
-  "runpod_job_id": "024fdd59-a666-4780-81a6-72cca648c595-u1",
+  "runpod_job_id": "51e27558-1399-4b9a-9385-64d31b8610d3-u1",
   "attempt": 1,
-  "delay_ms": 257147,
-  "delay_s": 257.147,
-  "execution_ms": 53014,
+  "delay_ms": 346556,
+  "delay_s": 346.556,
+  "execution_ms": 56799,
   "outputs": [
     {
       "filename": "sdxl_t2i_00001_.png",
