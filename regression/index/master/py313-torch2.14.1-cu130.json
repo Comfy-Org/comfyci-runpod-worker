@@ -3,7 +3,7 @@
   "branch": "master",
   "lane": "py313-torch2.14.1-cu130",
   "layout": 2,
-  "generated_ts": 1793757371,
+  "generated_ts": 1793759287,
   "count": 82,
   "shards": [
     "2026-10",
@@ -11,7 +11,7 @@
   ],
   "latest": {
     "commit": "7f09d3fa4a783868fe39d4d63cf4f815e58abecd",
-    "run_ts": 1793757369,
+    "run_ts": 1793759286,
     "overall": "fail"
   },
   "first_bad": {
@@ -29,7 +29,7 @@
   "entries": [
     {
       "c": "7f09d3fa4a783868fe39d4d63cf4f815e58abecd",
-      "t": 1793757369,
+      "t": 1793759286,
       "o": "fail",
       "infra": false,
       "cv": "0.44.0",
@@ -58,8 +58,8 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 96.52,
-          "vram": 21953.6,
+          "exec": 95.8,
+          "vram": 22081.6,
           "g": "v0.42.0",
           "th": "flux_dev_t2i_00001_.webp"
         },
@@ -71,8 +71,8 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 32.17,
-          "vram": 8319.6,
+          "exec": 39.79,
+          "vram": 8287.6,
           "g": "v0.42.0",
           "th": "impact_sdxl_detailer_00001_.webp",
           "cn": {
@@ -88,7 +88,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 38.05,
+          "exec": 33.07,
           "vram": 8157.6,
           "g": "v0.42.0",
           "th": "kjnodes_sdxl_t2i_00001_.webp",
@@ -104,7 +104,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 58.94,
+          "exec": 59.38,
           "vram": 18539.6,
           "g": "v0.42.0",
           "th": "krea2_turbo_t2i_00001_.webp"
@@ -117,7 +117,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 49.88,
+          "exec": 36.24,
           "vram": 13505.6,
           "g": "v0.42.0",
           "th": "mage_flow_t2i_int8_00001_.webp"
@@ -146,7 +146,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 26.82,
+          "exec": 25.75,
           "vram": 9045.6,
           "g": "v0.42.0",
           "th": "pixeldit_t2i_00001_.webp"
@@ -159,7 +159,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 62.64,
+          "exec": 53.83,
           "vram": 17577.6,
           "g": "v0.42.0",
           "th": "qwen_image_2_1_edit_00001_.webp"
@@ -172,7 +172,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 54.72,
+          "exec": 51.02,
           "vram": 16327.6,
           "g": "v0.42.0",
           "th": "qwen_image_2_1_t2i_00001_.webp"
@@ -185,7 +185,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 40.69,
+          "exec": 50.18,
           "vram": 16327.6,
           "g": "v0.42.0",
           "th": "qwen_image_2_1_turbo_t2i_00001_.webp"
@@ -198,7 +198,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 28.69,
+          "exec": 33.74,
           "vram": 8157.6,
           "g": "v0.42.0",
           "th": "sdxl_t2i_00001_.webp"
