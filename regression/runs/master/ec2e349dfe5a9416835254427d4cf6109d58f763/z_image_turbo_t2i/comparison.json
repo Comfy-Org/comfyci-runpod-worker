@@ -1,0 +1,12 @@
+{
+  "verdict": "execution_error",
+  "detail": null,
+  "vs_golden": null,
+  "vs_previous": null,
+  "thresholds_used": null,
+  "golden_tag": null,
+  "previous_commit": null,
+  "previous_verdict": null,
+  "previous_golden_tag": null,
+  "figures": false
+}
