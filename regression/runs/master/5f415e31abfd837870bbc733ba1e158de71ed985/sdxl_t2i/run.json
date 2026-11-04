@@ -6,7 +6,7 @@
   "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
   "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
   "vram_peak_mb": 8157.6,
-  "rss_peak_mb": 8927.1,
+  "rss_peak_mb": 8925.9,
   "validation": {
     "filled_defaults": [],
     "missing_nodes": [],
@@ -14,20 +14,20 @@
     "stripped_inputs": []
   },
   "timings": {
-    "checkout_s": 2.16,
-    "pip_s": 24.99,
-    "prompt_exec_s": 30.07,
-    "server_start_s": 11.04
+    "checkout_s": 0.01,
+    "pip_s": 0.99,
+    "prompt_exec_s": 36.67,
+    "server_start_s": 8.63
   },
   "commit_checked_out": "5f415e31abfd837870bbc733ba1e158de71ed985",
   "env": null,
   "lane": null,
   "custom_nodes": null,
-  "runpod_job_id": "4be995f6-9ebc-4d74-9e81-219f801b95af-u1",
+  "runpod_job_id": "b671a386-bc49-4a56-a369-e60fea4cf5ca-u2",
   "attempt": 1,
-  "delay_ms": 318066,
-  "delay_s": 318.066,
-  "execution_ms": 70152,
+  "delay_ms": 266647,
+  "delay_s": 266.647,
+  "execution_ms": 49274,
   "outputs": [
     {
       "filename": "sdxl_t2i_00001_.png",
