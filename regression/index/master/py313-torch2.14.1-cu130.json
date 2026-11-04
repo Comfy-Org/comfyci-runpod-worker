@@ -3,7 +3,7 @@
   "branch": "master",
   "lane": "py313-torch2.14.1-cu130",
   "layout": 2,
-  "generated_ts": 1793766693,
+  "generated_ts": 1793768077,
   "count": 82,
   "shards": [
     "2026-10",
@@ -11,7 +11,7 @@
   ],
   "latest": {
     "commit": "7f09d3fa4a783868fe39d4d63cf4f815e58abecd",
-    "run_ts": 1793766691,
+    "run_ts": 1793768075,
     "overall": "fail"
   },
   "first_bad": {
@@ -29,7 +29,7 @@
   "entries": [
     {
       "c": "7f09d3fa4a783868fe39d4d63cf4f815e58abecd",
-      "t": 1793766691,
+      "t": 1793768075,
       "o": "fail",
       "infra": false,
       "cv": "0.44.0",
@@ -58,7 +58,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 90.83,
+          "exec": 100.39,
           "vram": 22081.6,
           "g": "v0.42.0",
           "th": "flux_dev_t2i_00001_.webp"
@@ -71,8 +71,8 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 31.64,
-          "vram": 8287.6,
+          "exec": 30.43,
+          "vram": 8319.6,
           "g": "v0.42.0",
           "th": "impact_sdxl_detailer_00001_.webp",
           "cn": {
@@ -88,7 +88,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 36.16,
+          "exec": 29.06,
           "vram": 8157.6,
           "g": "v0.42.0",
           "th": "kjnodes_sdxl_t2i_00001_.webp",
@@ -104,7 +104,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 49.63,
+          "exec": 54.83,
           "vram": 18539.6,
           "g": "v0.42.0",
           "th": "krea2_turbo_t2i_00001_.webp"
@@ -117,7 +117,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 36.89,
+          "exec": 40.09,
           "vram": 13505.6,
           "g": "v0.42.0",
           "th": "mage_flow_t2i_int8_00001_.webp"
@@ -130,7 +130,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 0.5,
+          "exec": 0.51,
           "vram": 1381.6,
           "g": "v0.42.0",
           "th": "manager_import_smoke_00001_.webp",
@@ -146,7 +146,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 26.63,
+          "exec": 26.55,
           "vram": 9045.6,
           "g": "v0.42.0",
           "th": "pixeldit_t2i_00001_.webp"
@@ -159,8 +159,8 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 51.81,
-          "vram": 17545.6,
+          "exec": 50.96,
+          "vram": 17577.6,
           "g": "v0.42.0",
           "th": "qwen_image_2_1_edit_00001_.webp"
         },
@@ -172,7 +172,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 46.28,
+          "exec": 44.42,
           "vram": 16327.6,
           "g": "v0.42.0",
           "th": "qwen_image_2_1_t2i_00001_.webp"
@@ -185,7 +185,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 50.64,
+          "exec": 44.22,
           "vram": 16327.6,
           "g": "v0.42.0",
           "th": "qwen_image_2_1_turbo_t2i_00001_.webp"
@@ -198,7 +198,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 30.07,
+          "exec": 26.3,
           "vram": 8157.6,
           "g": "v0.42.0",
           "th": "sdxl_t2i_00001_.webp"
