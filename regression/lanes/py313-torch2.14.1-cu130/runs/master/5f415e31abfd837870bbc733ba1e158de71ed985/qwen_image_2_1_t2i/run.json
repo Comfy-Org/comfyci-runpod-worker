@@ -14,10 +14,10 @@
     "stripped_inputs": []
   },
   "timings": {
-    "checkout_s": 0,
-    "pip_s": 0.52,
-    "prompt_exec_s": 42.77,
-    "server_start_s": 4.61
+    "checkout_s": 0.01,
+    "pip_s": 0.59,
+    "prompt_exec_s": 41.21,
+    "server_start_s": 5.22
   },
   "commit_checked_out": "5f415e31abfd837870bbc733ba1e158de71ed985",
   "env": {
@@ -30,9 +30,9 @@
     "runtime_backends": [
       "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend ascend: {'available': False, 'disabled': False, 'unavailable_reason': \"torch-npu is not installed: No module named 'torch_npu'\", 'capabilities': []}",
       "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend triton: {'available': True, 'disabled': True, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope1_', 'apply_rope",
-      "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend eager: {'available': True, 'disabled': False, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope1_', 'apply_rope",
       "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend cuda: {'available': True, 'disabled': False, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope1_', 'apply_rope_",
       "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend hip: {'available': False, 'disabled': False, 'unavailable_reason': 'PyTorch ROCm/HIP runtime not available', 'capabilities': []}",
+      "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend eager: {'available': True, 'disabled': False, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope1_', 'apply_rope",
       "\u001b[32m[INFO]\u001b[0m pytorch version: 2.14.1+cu130",
       "\u001b[32m[INFO]\u001b[0m Using pytorch attention",
       "\u001b[32m[INFO]\u001b[0m aimdo: /project/src/control.c:283:INFO:comfy-aimdo inited for GPU: NVIDIA GeForce RTX 4090 (VRAM: 24082 MB)"
@@ -43,11 +43,11 @@
   },
   "lane": "py313-torch2.14.1-cu130",
   "custom_nodes": null,
-  "runpod_job_id": "8b7898d9-1eec-46b3-b9e1-1a69d3c9b289-u1",
+  "runpod_job_id": "be9b8999-4778-4a71-9538-fb1079ceaeb8-u2",
   "attempt": 1,
-  "delay_ms": 133018,
-  "delay_s": 133.018,
-  "execution_ms": 50499,
+  "delay_ms": 321723,
+  "delay_s": 321.723,
+  "execution_ms": 49538,
   "outputs": [
     {
       "filename": "qwen_image_2_1_t2i_00001_.png",
