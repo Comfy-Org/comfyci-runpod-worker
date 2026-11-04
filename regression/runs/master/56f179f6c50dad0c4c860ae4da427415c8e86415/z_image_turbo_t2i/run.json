@@ -16,10 +16,10 @@
   "env": null,
   "lane": null,
   "custom_nodes": null,
-  "runpod_job_id": "480827ca-ce94-4f2e-a858-33547dc4dec6-u1",
+  "runpod_job_id": "bb1a189b-8db7-42cc-aa2d-1eefb5f1794b-u1",
   "attempt": 1,
-  "delay_ms": 120556,
-  "delay_s": 120.556,
-  "execution_ms": 910291,
+  "delay_ms": 303569,
+  "delay_s": 303.569,
+  "execution_ms": 910470,
   "outputs": []
 }
