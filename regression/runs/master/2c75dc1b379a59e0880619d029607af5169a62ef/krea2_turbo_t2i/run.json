@@ -6,7 +6,7 @@
   "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
   "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
   "vram_peak_mb": 18539.6,
-  "rss_peak_mb": 19179.7,
+  "rss_peak_mb": 19198,
   "validation": {
     "filled_defaults": [],
     "missing_nodes": [],
@@ -15,19 +15,19 @@
   },
   "timings": {
     "checkout_s": 0.01,
-    "pip_s": 0.99,
-    "prompt_exec_s": 77.9,
+    "pip_s": 0.98,
+    "prompt_exec_s": 67.51,
     "server_start_s": 8.63
   },
   "commit_checked_out": "2c75dc1b379a59e0880619d029607af5169a62ef",
   "env": null,
   "lane": null,
   "custom_nodes": null,
-  "runpod_job_id": "7152599a-710c-4d0c-9312-6d592eea13fc-u1",
+  "runpod_job_id": "5e8d7494-c899-4313-a947-1f7b0c7a75d2-u1",
   "attempt": 1,
-  "delay_ms": 334395,
-  "delay_s": 334.395,
-  "execution_ms": 93013,
+  "delay_ms": 221423,
+  "delay_s": 221.423,
+  "execution_ms": 82568,
   "outputs": [
     {
       "filename": "krea2_turbo_t2i_00001_.png",
