@@ -9,17 +9,17 @@
   "rss_peak_mb": null,
   "validation": null,
   "timings": {
-    "checkout_s": 0,
-    "pip_s": 0.52
+    "checkout_s": 0.01,
+    "pip_s": 0.96
   },
   "commit_checked_out": "70bcb4e9fc70f19b7cdb340966351ed6479f2188",
   "env": null,
   "lane": null,
   "custom_nodes": null,
-  "runpod_job_id": "6ff2cda0-33c7-4542-b217-39b5f5acf62e-u1",
+  "runpod_job_id": "919be587-c503-4fc3-bc88-930451329b5f-u2",
   "attempt": 1,
-  "delay_ms": 142839,
-  "delay_s": 142.839,
-  "execution_ms": 906265,
+  "delay_ms": 138584,
+  "delay_s": 138.584,
+  "execution_ms": 910558,
   "outputs": []
 }
