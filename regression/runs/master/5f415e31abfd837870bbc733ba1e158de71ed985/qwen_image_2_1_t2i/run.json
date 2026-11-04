@@ -6,7 +6,7 @@
   "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
   "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
   "vram_peak_mb": 16327.6,
-  "rss_peak_mb": 17053.7,
+  "rss_peak_mb": 17045.4,
   "validation": {
     "filled_defaults": [],
     "missing_nodes": [],
@@ -14,20 +14,20 @@
     "stripped_inputs": []
   },
   "timings": {
-    "checkout_s": 2.42,
-    "pip_s": 22.6,
-    "prompt_exec_s": 75.07,
-    "server_start_s": 12.02
+    "checkout_s": 0,
+    "pip_s": 0.55,
+    "prompt_exec_s": 57.34,
+    "server_start_s": 4.61
   },
   "commit_checked_out": "5f415e31abfd837870bbc733ba1e158de71ed985",
   "env": null,
   "lane": null,
   "custom_nodes": null,
-  "runpod_job_id": "8e2a840c-214f-43e1-8b3d-be66cebcf7a9-u2",
+  "runpod_job_id": "3c32b7ee-3635-4c86-9376-b1273b784b94-u1",
   "attempt": 1,
-  "delay_ms": 450808,
-  "delay_s": 450.808,
-  "execution_ms": 117481,
+  "delay_ms": 235473,
+  "delay_s": 235.473,
+  "execution_ms": 65218,
   "outputs": [
     {
       "filename": "qwen_image_2_1_t2i_00001_.png",
