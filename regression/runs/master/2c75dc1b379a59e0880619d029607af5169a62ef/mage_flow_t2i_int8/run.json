@@ -16,18 +16,18 @@
   "timings": {
     "checkout_s": 0.01,
     "pip_s": 0.97,
-    "prompt_exec_s": 59.46,
-    "server_start_s": 9.03
+    "prompt_exec_s": 57.65,
+    "server_start_s": 8.45
   },
   "commit_checked_out": "2c75dc1b379a59e0880619d029607af5169a62ef",
   "env": null,
   "lane": null,
   "custom_nodes": null,
-  "runpod_job_id": "7967d875-857b-4bdc-9aea-7a1d68a7f4d0-u2",
+  "runpod_job_id": "8d4debc7-28e6-4883-bad6-b61ed880dae8-u2",
   "attempt": 1,
-  "delay_ms": 284559,
-  "delay_s": 284.559,
-  "execution_ms": 74027,
+  "delay_ms": 167166,
+  "delay_s": 167.166,
+  "execution_ms": 71190,
   "outputs": [
     {
       "filename": "mage_flow_t2i_int8_00001_.png",

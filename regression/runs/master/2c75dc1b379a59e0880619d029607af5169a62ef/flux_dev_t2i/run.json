@@ -5,8 +5,8 @@
   "torch_version": "2.11.0+cu128",
   "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
   "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
-  "vram_peak_mb": 21801.6,
-  "rss_peak_mb": 34428.8,
+  "vram_peak_mb": 21833.6,
+  "rss_peak_mb": 34429.4,
   "validation": {
     "filled_defaults": [],
     "missing_nodes": [],
@@ -15,19 +15,19 @@
   },
   "timings": {
     "checkout_s": 0.01,
-    "pip_s": 0.98,
-    "prompt_exec_s": 117.31,
-    "server_start_s": 8.63
+    "pip_s": 0.95,
+    "prompt_exec_s": 113.46,
+    "server_start_s": 8.43
   },
   "commit_checked_out": "2c75dc1b379a59e0880619d029607af5169a62ef",
   "env": null,
   "lane": null,
   "custom_nodes": null,
-  "runpod_job_id": "519fdce8-72cc-4de9-94ee-04c3d46a19ec-u2",
+  "runpod_job_id": "2b13f5d8-3ec2-48ed-bcdf-87f3a402846a-u1",
   "attempt": 1,
-  "delay_ms": 146212,
-  "delay_s": 146.212,
-  "execution_ms": 136336,
+  "delay_ms": 239429,
+  "delay_s": 239.429,
+  "execution_ms": 131934,
   "outputs": [
     {
       "filename": "flux_dev_t2i_00001_.png",
