@@ -1,0 +1,25 @@
+{
+  "status": "timeout",
+  "error": null,
+  "comfy_version": null,
+  "torch_version": null,
+  "python_version": null,
+  "gpu_name": null,
+  "vram_peak_mb": null,
+  "rss_peak_mb": null,
+  "validation": null,
+  "timings": {
+    "checkout_s": 2.28,
+    "pip_s": 21.43
+  },
+  "commit_checked_out": "70bcb4e9fc70f19b7cdb340966351ed6479f2188",
+  "env": null,
+  "lane": null,
+  "custom_nodes": null,
+  "runpod_job_id": "4494622b-5d6e-487e-83b8-1db76df94078-u1",
+  "attempt": 1,
+  "delay_ms": 10286,
+  "delay_s": 10.286,
+  "execution_ms": 936859,
+  "outputs": []
+}
