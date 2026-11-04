@@ -5,8 +5,8 @@
   "torch_version": "2.14.1+cu130",
   "python_version": "3.13.16 (main, Oct 14 2026, 01:04:01) [Clang 23.1.3 ]",
   "gpu_name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
-  "vram_peak_mb": 16327.5,
-  "rss_peak_mb": 17162.6,
+  "vram_peak_mb": 16327.6,
+  "rss_peak_mb": 17152,
   "validation": {
     "filled_defaults": [],
     "missing_nodes": [],
@@ -14,10 +14,10 @@
     "stripped_inputs": []
   },
   "timings": {
-    "checkout_s": 2.29,
-    "pip_s": 20.98,
-    "prompt_exec_s": 57.44,
-    "server_start_s": 11.24
+    "checkout_s": 0.01,
+    "pip_s": 0.51,
+    "prompt_exec_s": 44.66,
+    "server_start_s": 4.41
   },
   "commit_checked_out": "70bcb4e9fc70f19b7cdb340966351ed6479f2188",
   "env": {
@@ -29,9 +29,9 @@
     "python": "3.13.16 (main, Oct 14 2026, 01:04:01) [Clang 23.1.3 ]",
     "runtime_backends": [
       "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend ascend: {'available': False, 'disabled': False, 'unavailable_reason': \"torch-npu is not installed: No module named 'torch_npu'\", 'capabilities': []}",
-      "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend eager: {'available': True, 'disabled': False, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope1_', 'apply_rope",
-      "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend hip: {'available': False, 'disabled': False, 'unavailable_reason': 'PyTorch ROCm/HIP runtime not available', 'capabilities': []}",
       "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend cuda: {'available': True, 'disabled': False, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope1_', 'apply_rope_",
+      "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend hip: {'available': False, 'disabled': False, 'unavailable_reason': 'PyTorch ROCm/HIP runtime not available', 'capabilities': []}",
+      "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend eager: {'available': True, 'disabled': False, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope1_', 'apply_rope",
       "\u001b[32m[INFO]\u001b[0m Found comfy_kitchen backend triton: {'available': True, 'disabled': True, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope1_', 'apply_rope",
       "\u001b[32m[INFO]\u001b[0m pytorch version: 2.14.1+cu130",
       "\u001b[32m[INFO]\u001b[0m Using pytorch attention",
@@ -43,11 +43,11 @@
   },
   "lane": "py313-torch2.14.1-cu130",
   "custom_nodes": null,
-  "runpod_job_id": "8a88451e-b869-4e0f-97a5-202d5f4304d6-u1",
+  "runpod_job_id": "52238185-58c4-48b7-8e87-53827a0c385f-u2",
   "attempt": 1,
-  "delay_ms": 144734,
-  "delay_s": 144.734,
-  "execution_ms": 97009,
+  "delay_ms": 457295,
+  "delay_s": 457.295,
+  "execution_ms": 52131,
   "outputs": [
     {
       "filename": "qwen_image_2_1_t2i_00001_.png",
