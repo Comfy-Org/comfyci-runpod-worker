@@ -3,7 +3,7 @@
   "branch": "master",
   "lane": "py313-torch2.14.1-cu130",
   "layout": 2,
-  "generated_ts": 1793811088,
+  "generated_ts": 1793812808,
   "count": 86,
   "shards": [
     "2026-10",
@@ -11,26 +11,15 @@
   ],
   "latest": {
     "commit": "5f415e31abfd837870bbc733ba1e158de71ed985",
-    "run_ts": 1793811086,
-    "overall": "fail"
+    "run_ts": 1793812806,
+    "overall": "pass"
   },
-  "first_bad": {
-    "z_image_turbo_t2i": {
-      "commit": "783ab7282af1d470258615c5e4962868aa643afb",
-      "run_ts": 1793721374,
-      "kind": "execution_error",
-      "prev_good": "ab08f7b2caa6d4007ecde3762116c6193613f43b",
-      "pr": 17507,
-      "author": "bigcat88",
-      "golden": null,
-      "runs": 11
-    }
-  },
+  "first_bad": {},
   "entries": [
     {
       "c": "5f415e31abfd837870bbc733ba1e158de71ed985",
-      "t": 1793811086,
-      "o": "fail",
+      "t": 1793812806,
+      "o": "pass",
       "infra": false,
       "cv": "0.44.0",
       "lane": "py313-torch2.14.1-cu130",
@@ -58,8 +47,8 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 114.82,
-          "vram": 22081.6,
+          "exec": 108.47,
+          "vram": 21513.6,
           "g": "v0.42.0",
           "th": "flux_dev_t2i_00001_.webp"
         },
@@ -71,7 +60,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 32.44,
+          "exec": 32.13,
           "vram": 8287.6,
           "g": "v0.42.0",
           "th": "impact_sdxl_detailer_00001_.webp",
@@ -88,7 +77,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 36.38,
+          "exec": 36.96,
           "vram": 8157.6,
           "g": "v0.42.0",
           "th": "kjnodes_sdxl_t2i_00001_.webp",
@@ -104,7 +93,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 139.2,
+          "exec": 63.23,
           "vram": 18539.6,
           "g": "v0.42.0",
           "th": "krea2_turbo_t2i_00001_.webp"
@@ -117,7 +106,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 42.11,
+          "exec": 33.58,
           "vram": 13505.6,
           "g": "v0.42.0",
           "th": "mage_flow_t2i_int8_00001_.webp"
@@ -146,7 +135,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 40.7,
+          "exec": 36.69,
           "vram": 9045.6,
           "g": "v0.42.0",
           "th": "pixeldit_t2i_00001_.webp"
@@ -159,8 +148,8 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 52.73,
-          "vram": 17545.6,
+          "exec": 65.07,
+          "vram": 17577.6,
           "g": "v0.42.0",
           "th": "qwen_image_2_1_edit_00001_.webp"
         },
@@ -172,7 +161,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 45.18,
+          "exec": 42.63,
           "vram": 16327.6,
           "g": "v0.42.0",
           "th": "qwen_image_2_1_t2i_00001_.webp"
@@ -185,7 +174,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 46.99,
+          "exec": 40.11,
           "vram": 16327.6,
           "g": "v0.42.0",
           "th": "qwen_image_2_1_turbo_t2i_00001_.webp"
@@ -198,7 +187,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 76.53,
+          "exec": 33.84,
           "vram": 8157.6,
           "g": "v0.42.0",
           "th": "sdxl_t2i_00001_.webp"
@@ -211,7 +200,7 @@
           "psnr": null,
           "pct": 0.0,
           "pv": true,
-          "exec": 0.51,
+          "exec": 0.74,
           "vram": 1381.6,
           "g": "v0.42.0",
           "th": "vhs_video_roundtrip_00001_.webp",
@@ -220,17 +209,17 @@
           }
         },
         "z_image_turbo_t2i": {
-          "v": "execution_error",
+          "v": "pass",
           "d": null,
-          "sha": null,
-          "mse": null,
+          "sha": "dde6c3402a0ca8d24d6201cf02e05d980bae4f7482d58afea81bc023b970706d",
+          "mse": 0.0,
           "psnr": null,
-          "pct": null,
-          "pv": null,
-          "exec": null,
-          "vram": null,
-          "g": null,
-          "th": null
+          "pct": 0.0,
+          "pv": true,
+          "exec": 58.36,
+          "vram": 21137.6,
+          "g": "v0.42.0",
+          "th": "z_image_turbo_t2i_00001_.webp"
         }
       },
       "s": null
