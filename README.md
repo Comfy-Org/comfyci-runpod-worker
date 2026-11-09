@@ -403,10 +403,22 @@ last role, and every default-prefix path breaks if the layout-1 lane goes).
 The PR that makes cu130 the primary, retires cu128 and adds the cu132 lane,
 in order:
 
-1. Build the cu132 image from the branch (CPU, GitHub-hosted):
+1. Deploy the dashboard's support for the `retired` cadence (comfyci-dashboard,
+   "Handle retired lanes and share lane ordering") first, before the bless in
+   step 4. That bless is the first publish of the branch's registry to
+   `index/lanes.json`: cu130 as the primary and cu128 as `retired`, `legacy`
+   and informational, while main still tests cu128 as its blocking primary.
+   Without that support the dashboard only knows per-commit, nightly and
+   weekly: its lane selector captions cu128 "retired · informational", its
+   lane page turns amber after 24 hours without a run ("no run in the last
+   24 h on this retired lane") and adds "the worker may be stalled" after 48,
+   and the frontend lane caption calls it "every core commit". Main's next
+   publish restores cu128's old entry; the first publish after the merge
+   (step 5) retires it for good.
+2. Build the cu132 image from the branch (CPU, GitHub-hosted):
    `gh workflow run build-image.yml --ref lanes-cu132 -f images=cu132-t2150 -f repoint=false`.
    It is tagged `cu132-t2150-<branch head sha>`.
-2. Create the endpoint and record it on the branch:
+3. Create the endpoint and record it on the branch:
 
    ```
    python scripts/runpod_endpoints.py create \
@@ -419,22 +431,15 @@ in order:
    plus comfy-pulse's 1 fills the 10-worker quota exactly; if the create is
    refused, add `"workers_max": 2` to the lane rather than scaling cu128 down
    while it is still the primary on main (step 7 raises it again).
-3. Generate goldens from the branch (a fresh endpoint has no stale workers):
+4. Generate goldens from the branch (a fresh endpoint has no stale workers):
    `gh workflow run golden-baseline.yml --ref lanes-cu132 -f lane=py313-torch2.15.0-cu132 -f ref=v0.42.0 -f workflows=all -f bless=false`
    (v0.42.0 is the tag the cu130 goldens use). Inspect
    `regression/lanes/py313-torch2.15.0-cu132/golden/<workflow>/v0.42.0/` on the
    results branch, then bless:
    `gh workflow run golden-baseline.yml --ref lanes-cu132 -f lane=py313-torch2.15.0-cu132 -f ref=v0.42.0 -f workflows=all -f bless_only=true -f reason="cu132 lane baseline"`.
    A bless from the branch publishes the branch's registry to
-   `index/lanes.json` (cu130 primary) until main's next publish rewrites it;
-   step 9 makes it stick.
-4. Deploy the dashboard's support for the `retired` cadence (comfyci-dashboard,
-   "Handle retired lanes and share lane ordering") before this PR merges, or
-   with it. The dashboard on main only knows per-commit, nightly and weekly:
-   once the first publish after the merge writes `retired` for cu128 into
-   `index/lanes.json`, its lane page turns amber after 24 hours ("no run in
-   the last 24 h on this retired lane"), adds "the worker may be stalled"
-   after 48, and the frontend lane caption calls it "every core commit".
+   `index/lanes.json` (cu130 primary, cu128 retired; hence step 1) until
+   main's next publish rewrites it; step 9 makes it stick.
 5. Merge. That starts **Build worker images** (rebuilds `cu130-t2141` and
    `cu132-t2150` from scratch, then repoints both lanes) and **Sync models**
    (on the cu130 endpoint), and the cron stops testing cu128 from its next
