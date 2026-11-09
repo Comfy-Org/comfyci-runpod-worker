@@ -303,6 +303,10 @@ def main():
         if not lane_id:
             raise SystemExit(f"no lane in manifest/lanes.json has prefix {args.prefix!r}; "
                              "pass --lane")
+    if lanes_mod.is_retired(lanes["lanes"][lane_id]):
+        raise SystemExit(f"lane {lane_id!r} is retired (cadence 'retired' in manifest/lanes.json): "
+                         "its results stay readable but it runs nothing; pass --lane with an "
+                         f"active lane (the primary is {lanes.get('primary')!r})")
     layout = lanes["lanes"][lane_id].get("layout", 1)
     # The lane names its endpoint (and so its worker image); a lane without one
     # is not provisioned yet and must not fall through to another lane's endpoint.

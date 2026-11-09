@@ -235,3 +235,75 @@ def test_workflows_derive_their_matrices_from_the_registry():
     assert "lanes.py per-commit" in regression
     assert '--lane "$LANE"' in regression
     assert 'FETCH_HEAD:$PREFIX/latest/master.json' in regression
+
+
+def _registry(**lanes):
+    """A self-contained registry: lane id -> overrides of a provisioned lane."""
+    base = {"label": "x", "python": "3.13", "torch": "2.14.1", "cuda": "13.0", "gpu": "RTX 4090",
+            "cadence": "per-commit", "blocking": False, "role": "lane", "image": "img"}
+    out = {"schema_version": 2, "primary": "main",
+           "images": {"img": {"python": "3.13", "cuda": "13.0", "torch_index": "i", "torch_spec": "s"},
+                      "old": {"python": "3.13", "cuda": "13.0", "torch_index": "i", "torch_spec": "s"}},
+           "lanes": {}}
+    for n, (lane_id, over) in enumerate(lanes.items()):
+        layout = 1 if n == 0 else 2
+        out["lanes"][lane_id] = {**base, "layout": layout,
+                                 "prefix": "regression" if layout == 1 else f"regression/lanes/{lane_id}",
+                                 "endpoint_id": f"ep-{lane_id}", **over}
+    return out
+
+
+def test_validate_holds_the_primary_to_the_primary_role():
+    ok = _registry(old={"cadence": "retired", "role": "legacy", "image": "old"},
+                   main={"role": "primary", "blocking": True})
+    assert lanes_mod.validate(ok) == []
+    for over, needle in (({"role": "lane"}, "role must be 'primary', not 'lane'"),
+                         ({"role": "legacy"}, "role must be 'primary', not 'legacy'"),
+                         ({"cadence": "retired"}, "cadence must be 'per-commit', not 'retired'"),
+                         ({"cadence": "nightly"}, "cadence must be 'per-commit', not 'nightly'")):
+        bad = copy.deepcopy(ok)
+        bad["lanes"]["main"].update(over)
+        problems = lanes_mod.validate(bad)
+        assert any(p.startswith("primary lane main: ") and needle in p for p in problems), problems
+    # Exactly one lane carries the primary role: the one `primary` names.
+    bad = copy.deepcopy(ok)
+    bad["lanes"]["old"]["role"] = "primary"
+    assert "lane old: role 'primary', but the primary lane is 'main'" in lanes_mod.validate(bad)
+
+
+def test_a_retired_lane_is_never_dispatched():
+    reg = _registry(old={"cadence": "retired", "role": "legacy", "image": "old"},
+                    main={"role": "primary"})
+    # Per-commit matrix: out, even when named explicitly, and the plan says why.
+    assert [r["lane"] for r in lanes_mod.per_commit_matrix(reg)] == ["main"]
+    assert lanes_mod.per_commit_matrix(reg, "old") == []
+    assert lanes_mod.per_commit_matrix(reg, "old,main")[0]["lane"] == "main"
+    assert lanes_mod.left_out(reg, "old,main,ghost") == [
+        "ghost: not a lane in manifest/lanes.json", "old: cadence 'retired', not per-commit"]
+    # Builds and repoints: an image only retired lanes run is never built, even
+    # when asked for, and a retired lane is never repointed, whatever its role.
+    assert [r["image"] for r in lanes_mod.image_matrix(reg)] == ["img"]
+    assert lanes_mod.image_matrix(reg, "old") == []
+    assert lanes_mod.lanes_on_image(reg, "old") == []
+    shared = copy.deepcopy(reg)
+    shared["lanes"]["old"].update({"image": "img", "role": "lane"})
+    assert lanes_mod.lanes_on_image(shared, "img") == ["main"]
+    assert runpod_endpoints.plan_set_image(shared, "img-1", image_id="img") == [
+        ("main", "ep-main", {"image": "ghcr.io/comfy-org/comfyci-runpod-worker:img-1"})]
+    with pytest.raises(SystemExit, match="is retired"):
+        runpod_endpoints.plan_set_image(reg, "old-1", lane_id="old")
+    unprovisioned = copy.deepcopy(reg)
+    unprovisioned["lanes"]["old"]["endpoint_id"] = None
+    unprovisioned["endpoint_defaults"] = REGISTRY["endpoint_defaults"]
+    with pytest.raises(SystemExit, match="is retired"):
+        runpod_endpoints.endpoint_body(unprovisioned, "old", "old-1")
+
+
+def test_per_commit_plan_explains_lanes_it_leaves_out(monkeypatch, capsys):
+    reg = _registry(old={"cadence": "retired", "role": "legacy", "image": "old"},
+                    main={"role": "primary"})
+    monkeypatch.setattr(lanes_mod, "load_lanes", lambda path=None: reg)
+    assert lanes_mod.main(["per-commit", "--only", "old"]) == 0
+    out = capsys.readouterr()
+    assert json.loads(out.out) == []
+    assert "not tested: old: cadence 'retired', not per-commit" in out.err

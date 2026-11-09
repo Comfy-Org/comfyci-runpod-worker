@@ -6,6 +6,7 @@
       point the lane's endpoint (or every non-legacy lane on IMAGE) at
       ghcr.io/comfy-org/comfyci-runpod-worker:TAG. TAG must start with the
       lane's image id, so a lane can never be handed another torch build.
+      A retired lane is never repointed.
   create --lane ID --tag TAG [--dry-run] [--write]
       create the lane's endpoint from `endpoint_defaults` in lanes.json plus the
       lane's own GPU/CUDA settings, print its id, and with --write record it as
@@ -76,6 +77,8 @@ def endpoint_body(lanes: dict, lane_id: str, tag: str) -> dict:
     cfg = lane_config(lanes, lane_id)
     if not cfg:
         raise SystemExit(f"unknown lane {lane_id!r}")
+    if lanes_mod.is_retired(cfg):
+        raise SystemExit(f"lane {lane_id!r} is retired; nothing runs on it, so it gets no endpoint")
     if cfg.get("endpoint_id"):
         raise SystemExit(f"lane {lane_id!r} already has endpoint {cfg['endpoint_id']}")
     image_id = cfg.get("image") or ""
@@ -136,6 +139,8 @@ def plan_set_image(lanes: dict, tag: str, lane_id: str | None = None,
         cfg = lane_config(lanes, lane_id)
         if not cfg:
             raise SystemExit(f"unknown lane {lane_id!r}")
+        if lanes_mod.is_retired(cfg):
+            raise SystemExit(f"lane {lane_id!r} is retired; its endpoint keeps the image it ran")
         targets = [lane_id]
         image_id = cfg.get("image")
     elif image_id:
@@ -177,6 +182,8 @@ def status(lanes: dict, client: Client, lane_id: str | None) -> int:
         if not cfg.get("endpoint_id"):
             print(f"{target}: not provisioned")
             continue
+        if lanes_mod.is_retired(cfg):
+            print(f"{target}: retired (endpoint {cfg['endpoint_id']}; keep its max workers at 0)")
         ep = client.get(cfg["endpoint_id"])
         gpu = ep.get("gpu") or {}
         workers = ep.get("workers") or {}

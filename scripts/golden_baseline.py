@@ -261,6 +261,11 @@ def main():
         return finish(f"golden {tag} from {args.from_run[:20]} ({', '.join(sorted(selected))})",
                       failed)
 
+    # Blessing and promoting stay possible on a retired lane (storage only);
+    # generating would dispatch GPU work to an endpoint that is scaled to zero.
+    if lanes_mod.is_retired(lanes["lanes"][lane]):
+        raise SystemExit(f"lane {lane!r} is retired: its goldens can still be blessed or "
+                         "promoted from a run, but not generated; pass lane= with an active lane")
     if not default_endpoint:
         raise SystemExit(f"lane {lane!r} has no endpoint (endpoint_id is null in "
                          "manifest/lanes.json): create one for its image and commit the id "

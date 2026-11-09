@@ -204,3 +204,24 @@ def test_custom_node_errors_are_execution_failures():
     assert "custom_node_error" in run_regression.EXEC_FAIL_STATUSES
     assert "custom_node_install_error" in run_regression.INFRA_STATUSES
     assert not run_regression.EXEC_FAIL_STATUSES & run_regression.INFRA_STATUSES
+
+
+def test_a_retired_lane_runs_nothing(monkeypatch):
+    """A retired lane is refused before any GPU job, named or reached through
+    the default prefix; its endpoint is scaled to zero."""
+    import sys
+    import pytest
+    import index_builder
+    import storage
+    reg = {"primary": "new", "lanes": {
+        "old": {"cadence": "retired", "role": "legacy", "layout": 1, "prefix": "regression",
+                "endpoint_id": "ep-old"},
+        "new": {"cadence": "per-commit", "role": "primary", "layout": 2,
+                "prefix": "regression/lanes/new", "endpoint_id": "ep-new"}}}
+    monkeypatch.setattr(index_builder, "load_lanes", lambda path=None: reg)
+    monkeypatch.setattr(storage, "from_args", lambda args: pytest.fail("no store for a retired lane"))
+    for extra in (["--lane", "old"], []):
+        monkeypatch.setattr(sys, "argv", ["run_regression.py", "--commit", "new", "--branch", "master",
+                                          "--skip-publish", *extra])
+        with pytest.raises(SystemExit, match="lane 'old' is retired.*the primary is 'new'"):
+            run_regression.main()
