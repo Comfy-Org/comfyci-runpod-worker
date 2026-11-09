@@ -114,7 +114,8 @@ this repo per template.
    missing weights without telling you anything new.
 
 4. Merge. `sync-models.yml` downloads the new models onto the network volume
-   automatically.
+   automatically, through a one-shot job on the primary lane's endpoint (every
+   lane shares the volume, so one sync serves them all).
 5. Generate + bless a golden for it: run the **Golden baselines** workflow with
    the current release tag and `workflows: <id>`, inspect, bless.
 6. Flip `"enabled": true` in a follow-up PR.
@@ -466,12 +467,19 @@ with Actions read on the frontend repo) is optional and reserved for phase 2
    availability), then one serverless endpoint per lane from its image with
    the volume attached (see *Lanes*). Optionally set `HF_TOKEN` as an endpoint
    env var for gated models.
-3. **Repo secrets** (this repo): `RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID`, and
-   optionally `HF_TOKEN` (gated models) and `PULSE_GH_TOKEN` (PR comments,
-   see above). For the GCS phase, additionally
+3. **Repo secrets** (this repo): `RUNPOD_API_KEY`, and optionally `HF_TOKEN`
+   (gated models; sent with the sync job) and `PULSE_GH_TOKEN` (PR comments,
+   see above). Every lane names its endpoint in `manifest/lanes.json`;
+   `RUNPOD_ENDPOINT_ID` is only a fallback for the model sync when the primary
+   lane has no `endpoint_id`. For the GCS phase, additionally
    `GCS_SERVICE_ACCOUNT_JSON` (write access to the CI bucket) and `GCS_BUCKET`
    (`comfy-ci-results`).
-4. **Seed the volume**: run `sync-models.yml` (workflow_dispatch).
+4. **Seed the volume**: run `sync-models.yml` (workflow_dispatch). The sync
+   runs on the primary lane's endpoint (`scripts/sync_models.py`). Only one
+   endpoint may write the network volume at a time: the workflow is a single
+   concurrency group, so never start a second sync by hand (or from another
+   endpoint) while one is running; regression and golden jobs only read the
+   volume and can run alongside it.
 5. **First goldens**: run **Golden baselines** with the latest release tag and
    `bless: true`.
 6. Done — `regression.yml` now tests each new master commit on its own.
