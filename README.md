@@ -144,8 +144,11 @@ job) is still counted. A summary with infra errors, or a marker with no
 summary, gets one more attempt: two in all per commit per lane, counted in the
 summary's and the marker's `attempt`. A run that cannot push its marker stops
 before any GPU work. To test a commit again on purpose, dispatch **GPU
-regression** with `commit=<sha>` (and `lane=` for one lane). The decision
-lives in `scripts/regression_skip.py`. The cron used to key on the
+regression** with `commit=<sha>` (and `lane=` for one lane), when no GPU
+regression run is in progress, or check afterwards that the dispatch ran:
+all runs share one concurrency group, and GitHub cancels a pending run as
+soon as a newer one (the next cron tick) queues behind the running one. The
+decision lives in `scripts/regression_skip.py`. The cron used to key on the
 previous-run pointer, which does not advance on execution errors, so a red
 HEAD was re-run on both lanes every half hour (53 runs for 11 commits during
 the 2026-11-03/04 z_image timeouts).
@@ -386,9 +389,11 @@ last role, and every default-prefix path breaks if the layout-1 lane goes).
    primary, change the primary first (above).
 2. Merge. The cron stops testing it at the next tick; image builds and
    repoints leave it alone.
-3. Scale its endpoint to max 0 workers in the RunPod console. Do not delete
-   it yet: an idle endpoint costs nothing and max 0 frees its share of the
-   worker quota.
+3. Scale its endpoint to max 0 workers in the RunPod console, once no GPU
+   regression run that started before the merge is still using it. Do not
+   delete it yet: an idle endpoint costs nothing and max 0 frees its share of
+   the worker quota. ci.comfy.org needs to know the `retired` cadence, or it
+   shows the lane as stale a day after its last run.
 4. The model sync already follows the primary, so nothing depends on the
    retired endpoint. From now on always pass `lane=` to **Golden baselines**
    and **Build run index**.
@@ -413,7 +418,7 @@ in order:
    Commit and push the `lanes.json` change to the branch. 3 + 3 + 3 workers
    plus comfy-pulse's 1 fills the 10-worker quota exactly; if the create is
    refused, add `"workers_max": 2` to the lane rather than scaling cu128 down
-   while it is still the primary on main.
+   while it is still the primary on main (step 7 raises it again).
 3. Generate goldens from the branch (a fresh endpoint has no stale workers):
    `gh workflow run golden-baseline.yml --ref lanes-cu132 -f lane=py313-torch2.15.0-cu132 -f ref=v0.42.0 -f workflows=all -f bless=false`
    (v0.42.0 is the tag the cu130 goldens use). Inspect
@@ -422,21 +427,45 @@ in order:
    `gh workflow run golden-baseline.yml --ref lanes-cu132 -f lane=py313-torch2.15.0-cu132 -f ref=v0.42.0 -f workflows=all -f bless_only=true -f reason="cu132 lane baseline"`.
    A bless from the branch publishes the branch's registry to
    `index/lanes.json` (cu130 primary) until main's next publish rewrites it;
-   step 6 makes it stick.
-4. Merge. That rebuilds `cu130-t2141` and `cu132-t2150` from scratch and
-   repoints both lanes, runs the model sync on the cu130 endpoint, and stops
-   the cu128 cron.
-5. Flush stale workers on both endpoints (max workers 0, then back to 3) and
-   check `isStale` is gone. Then check the first runs after the rebuild: the
-   cron picks up cu132 on its own; cu130 has usually published master HEAD
-   already, so dispatch **GPU regression** with `commit=<sha>` and
-   `lane=py313-torch2.14.1-cu130` to see it on the rebuilt image. Re-bless
+   step 9 makes it stick.
+4. Deploy the dashboard's support for the `retired` cadence (comfyci-dashboard,
+   "Handle retired lanes and share lane ordering") before this PR merges, or
+   with it. The dashboard on main only knows per-commit, nightly and weekly:
+   once the first publish after the merge writes `retired` for cu128 into
+   `index/lanes.json`, its lane page turns amber after 24 hours ("no run in
+   the last 24 h on this retired lane"), adds "the worker may be stalled"
+   after 48, and the frontend lane caption calls it "every core commit".
+5. Merge. That starts **Build worker images** (rebuilds `cu130-t2141` and
+   `cu132-t2150` from scratch, then repoints both lanes) and **Sync models**
+   (on the cu130 endpoint), and the cron stops testing cu128 from its next
+   tick. Wait for both runs to finish.
+6. Expect the cron to test master HEAD on cu132 within 30 minutes of the
+   merge, before the repoint or before the stale workers are flushed, so on
+   the branch's image or a mix of old and new workers. A commit is tested
+   once per lane, so the cron does not test it again on the rebuilt image;
+   step 8 does.
+7. When no **GPU regression**, **Golden baselines** or **Sync models** run is
+   in progress (max workers 0 empties an endpoint's worker list within
+   seconds, cutting off any job a worker is running):
+   - scale the cu128 endpoint `xwdhxbhd9qixjj` to max 0 workers. Keep it and
+     its `endpoint_id`; nothing runs on it any more, and this frees its 3
+     workers of the quota;
+   - flush stale workers on the cu130 and cu132 endpoints: max workers 0,
+     then back to the previous max. If the cu132 endpoint was created with
+     `"workers_max": 2`, raise it to 3 now that cu128 is at 0, and drop
+     `workers_max` from `lanes.json` in a follow-up so a re-create gets 3;
+   - check that `isStale` is gone from both worker lists.
+8. Test master HEAD on the rebuilt images, both lanes in one run (no `lane=`):
+   `gh workflow run regression.yml -f commit=<master HEAD sha>`. Check that
+   the run is not cancelled (a cron tick that queues behind a running run
+   cancels a pending dispatch; dispatch it again if so). In each lane's
+   `runs/master/<sha>/summary.json`, every workflow's `env.image_sha` must
+   equal the merge commit, the sha in the new `-<sha>` image tags; one that
+   does not ran on a stale worker: flush again and re-dispatch. Re-bless
    drifted workflows with `from_run`.
-6. Publish the primary flip: `gh workflow run build-index.yml -f branch=master -f lane=py313-torch2.14.1-cu130`.
-7. Scale the cu128 endpoint `xwdhxbhd9qixjj` to max 0 workers; keep it and
-   its `endpoint_id`. The `RUNPOD_ENDPOINT_ID` secret (set 2026-08-18, so the
-   cu128 endpoint) is now only the sync's fallback: point it at the cu130
-   endpoint or delete it.
+9. Publish the primary flip: `gh workflow run build-index.yml -f branch=master -f lane=py313-torch2.14.1-cu130`.
+10. The `RUNPOD_ENDPOINT_ID` secret (set 2026-08-18, so the cu128 endpoint) is
+    now only the sync's fallback: point it at the cu130 endpoint or delete it.
 
 ## Custom-node packs
 
