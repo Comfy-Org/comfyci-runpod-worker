@@ -17,7 +17,9 @@ dispatch that names a commit always runs.
   python regression_skip.py --commit SHA [--explicit] [--summary FILE] [--latest FILE]
 
 FILE is the lane's published runs/<branch>/<SHA>/summary.json (or
-latest/<branch>.json); a missing or empty file means there is none. Prints
+latest/<branch>.json); a missing or empty file means there is none, and
+{"unreadable": true} means the results tree lists one that could not be read
+(counted as published). Prints
 `skip=true` or `skip=false` for $GITHUB_OUTPUT, and the reason on stderr.
 """
 from __future__ import annotations
@@ -61,6 +63,11 @@ def decide(commit: str, summary: dict | None = None, latest: dict | None = None,
         if latest and latest.get("commit") == commit:
             return False, f"{short} is the lane's previous-run pointer; already tested"
         return True, f"{short} has no published result on this lane yet"
+    if summary.get("unreadable"):
+        # The results tree lists a summary whose content could not be fetched:
+        # the commit has a result, so do not spend GPU time on a read error.
+        return False, (f"{short} has a published summary that could not be read; dispatch it "
+                       "with commit= to test it again")
     n = attempts(summary)
     verdict = f"overall {summary.get('overall')}"
     if has_infra_error(summary):

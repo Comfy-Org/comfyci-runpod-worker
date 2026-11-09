@@ -89,7 +89,14 @@ jobs:
           : > "$SUMMARY"
           : > "$LATEST"
           if git fetch --depth 1 --filter=blob:none origin results 2>/dev/null; then
-            git show "FETCH_HEAD:$PREFIX/runs/master/$COMMIT/summary.json" > "$SUMMARY" 2>/dev/null || : > "$SUMMARY"
+            RUN_SUMMARY="$PREFIX/runs/master/$COMMIT/summary.json"
+            # The trees came with the fetch, so whether the summary exists is
+            # known without the network; only its content is fetched lazily.
+            if [ -n "$(git ls-tree --name-only FETCH_HEAD -- "$RUN_SUMMARY")" ]; then
+              git show "FETCH_HEAD:$RUN_SUMMARY" > "$SUMMARY" 2>/dev/null \
+                || git show "FETCH_HEAD:$RUN_SUMMARY" > "$SUMMARY" 2>/dev/null \
+                || echo '{"unreadable": true}' > "$SUMMARY"
+            fi
             git show "FETCH_HEAD:$PREFIX/latest/master.json" > "$LATEST" 2>/dev/null || : > "$LATEST"
           fi
           args=(--commit "$COMMIT" --summary "$SUMMARY" --latest "$LATEST")

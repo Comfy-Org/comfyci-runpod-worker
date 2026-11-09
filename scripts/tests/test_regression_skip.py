@@ -64,6 +64,12 @@ def test_the_previous_run_pointer_still_counts_without_a_summary():
     assert not decide(latest={"commit": SHA})
 
 
+def test_a_listed_but_unreadable_summary_counts_as_published():
+    run, why = regression_skip.decide(SHA, {"unreadable": True})
+    assert not run and "could not be read" in why
+    assert decide(summary={"unreadable": True}, explicit=True)
+
+
 def test_the_incident_replays_as_one_run_per_commit():
     """Ticks every 30 minutes over an execution-error streak: each commit runs
     once, however long master HEAD stays red."""
@@ -110,7 +116,9 @@ def test_cli_prints_the_step_output(tmp_path, capsys):
 
 def test_the_workflow_decides_with_the_published_summary():
     regression = (ROOT / ".github" / "workflows" / "regression.yml").read_text(encoding="utf-8")
-    assert "FETCH_HEAD:$PREFIX/runs/master/$COMMIT/summary.json" in regression
+    assert 'RUN_SUMMARY="$PREFIX/runs/master/$COMMIT/summary.json"' in regression
+    assert 'git ls-tree --name-only FETCH_HEAD -- "$RUN_SUMMARY"' in regression
+    assert "echo '{\"unreadable\": true}' > \"$SUMMARY\"" in regression
     assert "python scripts/regression_skip.py" in regression
     assert 'if [ -n "$INPUT_COMMIT" ]; then args+=(--explicit); fi' in regression
     assert "steps.target.outputs.skip != 'true'" in regression
