@@ -1,5 +1,21 @@
 """run_regression: pure decision helpers and the summary handed to later steps."""
+import pytest
+
+import index_builder
 import run_regression
+
+# A registry of its own, so these tests do not follow the committed lane state:
+# "main" owns the default `regression` prefix, "other" is a layout-2 lane.
+LANES = {"schema_version": 2, "primary": "main", "lanes": {
+    "main": {"cadence": "per-commit", "role": "primary", "layout": 1, "prefix": "regression",
+             "endpoint_id": "ep-main"},
+    "other": {"cadence": "per-commit", "role": "lane", "layout": 2,
+              "prefix": "regression/lanes/other", "endpoint_id": "ep-other"}}}
+
+
+@pytest.fixture(autouse=True)
+def registry(monkeypatch):
+    monkeypatch.setattr(index_builder, "load_lanes", lambda path=None: LANES)
 
 IDENT = {"identical": True, "mean_mse": 0.0}
 DIFF = {"identical": False, "mean_mse": 3.4}
@@ -79,7 +95,7 @@ def test_summary_out_is_written_on_failure_with_prior_verdicts(tmp_path, monkeyp
     import sys
     import commit_meta
     import storage
-    lane = "py312-torch2.11.0-cu128"
+    lane = "main"
     head = {"entries": [{"c": "prev", "t": 2, "m": {"ct": 2},
                          "w": {"flux_dev_t2i": {"v": "execution_error"}}},
                         {"c": "old", "t": 1, "m": {"ct": 1},
@@ -174,7 +190,7 @@ def test_lane_filter_skips_workflows_restricted_to_other_lanes(tmp_path, monkeyp
             "sdxl_t2i": {"enabled": True, "workflow_path": "x", "models": []},
             "kjnodes_sdxl_t2i": {"enabled": True, "workflow_path": "x", "models": [],
                                  "custom_nodes": ["ComfyUI-KJNodes"],
-                                 "lanes": ["py313-torch2.14.1-cu130"]},
+                                 "lanes": ["other"]},
         }}))
     monkeypatch.setattr(storage, "from_args", lambda args: FakeStore({}))
     monkeypatch.setattr(commit_meta, "fetch_commit_meta", lambda sha: None)
@@ -184,16 +200,16 @@ def test_lane_filter_skips_workflows_restricted_to_other_lanes(tmp_path, monkeyp
                                                                 "verdict": "pass", "detail": None})
     out = tmp_path / "summary.json"
     monkeypatch.setattr(sys, "argv", ["run_regression.py", "--manifest", str(manifest), "--commit", "new",
-                                      "--branch", "master", "--lane", "py312-torch2.11.0-cu128",
+                                      "--branch", "master", "--lane", "main",
                                       "--workflows", "sdxl_t2i,kjnodes_sdxl_t2i",
                                       "--skip-publish", "--summary-out", str(out)])
     assert run_regression.main() == 0
     assert ran == ["sdxl_t2i"]
     assert set(json.loads(out.read_text())["workflows"]) == {"sdxl_t2i"}
-    assert "[kjnodes_sdxl_t2i] not run on lane py312-torch2.11.0-cu128" in capsys.readouterr().out
+    assert "[kjnodes_sdxl_t2i] not run on lane main" in capsys.readouterr().out
 
     monkeypatch.setattr(sys, "argv", ["run_regression.py", "--manifest", str(manifest), "--commit", "new",
-                                      "--branch", "master", "--lane", "py312-torch2.11.0-cu128",
+                                      "--branch", "master", "--lane", "main",
                                       "--workflows", "kjnodes_sdxl_t2i", "--skip-publish"])
     assert run_regression.main() == 0
     assert ran == ["sdxl_t2i"]
@@ -210,8 +226,6 @@ def test_a_retired_lane_runs_nothing(monkeypatch):
     """A retired lane is refused before any GPU job, named or reached through
     the default prefix; its endpoint is scaled to zero."""
     import sys
-    import pytest
-    import index_builder
     import storage
     reg = {"primary": "new", "lanes": {
         "old": {"cadence": "retired", "role": "legacy", "layout": 1, "prefix": "regression",

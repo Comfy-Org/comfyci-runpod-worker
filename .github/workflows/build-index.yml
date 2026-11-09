@@ -9,7 +9,7 @@ on:
         description: ComfyUI branch whose runs to index
         default: master
       lane:
-        description: lane id from manifest/lanes.json (empty = lane of the default prefix)
+        description: lane id from manifest/lanes.json (empty = the layout-1 lane, which is retired; always pass one)
         default: ''
 
 # Own group: the index writes are retry-safe against the cron's publishes, and

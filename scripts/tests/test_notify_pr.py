@@ -13,7 +13,7 @@ SHA = "c" * 40
 API = "https://api.github.com/repos/Comfy-Org/ComfyUI"
 CODEOWNERS = ("# owners\n* @comfyanonymous @guill @alexisrolland @rattus128 @kijai @Comfy-Org/core\n"
               "\n/.github/ @comfyanonymous\n")
-LANE = "py312-torch2.11.0-cu128"
+LANE = "py313-torch2.14.1-cu130"  # the primary lane in manifest/lanes.json
 
 
 def _wf(verdict, detail=None, prior=None, **kw):
@@ -22,8 +22,8 @@ def _wf(verdict, detail=None, prior=None, **kw):
                           "mean_pct_pixels_changed": 69.986} if verdict == "fail" else
             ({"identical": True, "mean_mse": 0.0} if verdict == "pass" else None),
             "timings": {"prompt_exec_s": 41.23}, "vram_peak_mb": 21504.0,
-            "gpu_name": "NVIDIA GeForce RTX 4090", "torch_version": "2.11.0+cu128",
-            "python_version": "3.12.3 (main, Apr 10 2026) [GCC 13.2.0]", **kw}
+            "gpu_name": "NVIDIA GeForce RTX 4090", "torch_version": "2.14.1+cu130",
+            "python_version": "3.13.11 (main, Dec 9 2025) [Clang 21.1.4]", **kw}
 
 
 def _summary(workflows, pr=16488, author="comfyanonymous", rng=None, branch="master", lane=LANE):
@@ -229,7 +229,7 @@ def test_clean_rerun_resolves_an_existing_comment(tmp_path, monkeypatch, env, gh
 def test_other_branches_and_lanes_are_skipped(tmp_path, monkeypatch, env, gh):
     on(monkeypatch)
     assert "not master" in run(tmp_path, _summary(DRIFT, branch="release"))
-    assert "primary lane" in run(tmp_path, _summary(DRIFT, lane="py313-torch2.12-cu130"))
+    assert "primary lane" in run(tmp_path, _summary(DRIFT, lane="py313-torch2.15.0-cu132"))
     assert gh.calls == []
 
 
@@ -328,14 +328,14 @@ def test_body_shape():
     rng = {"prev": "b" * 40, "commits_between": 3,
            "compare_url": "https://github.com/Comfy-Org/ComfyUI/compare/bbb...ccc"}
     s = _summary({**DRIFT, "wan": _wf("execution_error", prior="pass", vs_golden=None)}, rng=rng)
-    lanes = {"primary": LANE, "lanes": {LANE: {"cuda": "12.8", "gpu": "RTX 4090"}}}
+    lanes = {"primary": LANE, "lanes": {LANE: {"cuda": "13.0", "gpu": "RTX 4090"}}}
     body = notify_pr.render_changed(s, lanes)
     lines = body.splitlines()
     assert lines[0] == f"**(PULSE)** GPU output changed vs golden · `{SHA[:7]}`"
     assert "| `flux_dev_t2i` | changed | new | 42.76 | 3.442 | 69.99% | 41.2 | 21.0 GB |" in lines
     assert "| `sdxl_t2i` | match | – | identical | 0 | – | 41.2 | 21.0 GB |" in lines
     assert "| `wan` | error | new | – | – | – | 41.2 | 21.0 GB |" in lines
-    assert ("Lane: python 3.12.3 · torch 2.11.0+cu128 · CUDA 12.8 · NVIDIA GeForce RTX 4090"
+    assert ("Lane: python 3.13.11 · torch 2.14.1+cu130 · CUDA 13.0 · NVIDIA GeForce RTX 4090"
             in lines)
     assert f"Appeared in a batch of 3 commits: [compare]({rng['compare_url']})" in lines
     assert f"[Run details](https://ci.comfy.org/regression/master/{SHA})" in lines

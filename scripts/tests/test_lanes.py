@@ -16,8 +16,9 @@ MANIFEST = json.loads((ROOT / "manifest" / "workflows.json").read_text(encoding=
 PACKS = json.loads((ROOT / "manifest" / "custom_nodes.json").read_text(encoding="utf-8"))
 # The committed registry provisions lanes over time; these tests want one lane that is
 # declared but not yet provisioned, whatever the file says today.
-NEW = "py313-torch2.14.1-cu130"
-LEGACY = "py312-torch2.11.0-cu128"
+NEW = "py313-torch2.15.0-cu132"
+PRIMARY = "py313-torch2.14.1-cu130"
+LEGACY = "py312-torch2.11.0-cu128"  # retired
 PENDING = copy.deepcopy(REGISTRY)
 PENDING["lanes"][NEW]["endpoint_id"] = None
 
@@ -26,6 +27,33 @@ def test_the_committed_registry_is_consistent():
     assert lanes_mod.validate(REGISTRY) == []
     assert lanes_mod.validate(REGISTRY, MANIFEST, PACKS) == []
     assert REGISTRY["schema_version"] == 2
+
+
+def test_the_committed_lanes():
+    """cu130 is the primary, cu128 is retired but keeps its history, cu132 runs per commit."""
+    lanes = REGISTRY["lanes"]
+    assert REGISTRY["primary"] == PRIMARY
+    assert {k: lanes[PRIMARY][k] for k in ("role", "blocking", "cadence")} == {
+        "role": "primary", "blocking": True, "cadence": "per-commit"}
+    legacy = lanes[LEGACY]
+    assert lanes_mod.is_retired(legacy) and legacy["role"] == "legacy" and not legacy["blocking"]
+    # Its published history stays where the dashboard reads it.
+    assert (legacy["layout"], legacy["prefix"], legacy["image"]) == (1, "regression", "cu128-t2110")
+    assert legacy["endpoint_id"]
+    assert REGISTRY["images"]["cu128-t2110"]["build"] is False
+    new = lanes[NEW]
+    assert {k: new[k] for k in ("python", "torch", "cuda", "gpu", "cadence", "blocking", "role",
+                                "layout", "prefix", "image", "min_cuda_driver")} == {
+        "python": "3.13", "torch": "2.15.0", "cuda": "13.2", "gpu": "RTX 4090",
+        "cadence": "per-commit", "blocking": False, "role": "lane", "layout": 2,
+        "prefix": f"regression/lanes/{NEW}", "image": "cu132-t2150", "min_cuda_driver": "13.2"}
+    assert {k: REGISTRY["images"]["cu132-t2150"][k] for k in lanes_mod.IMAGE_FIELDS} == {
+        "python": "3.13", "cuda": "13.2", "torch_index": "https://download.pytorch.org/whl/cu132",
+        "torch_spec": "torch==2.15.0 torchvision==0.29.2"}
+    # The pack workflows run on both lanes whose images bake the packs.
+    for wf_id, entry in MANIFEST["workflows"].items():
+        if entry.get("custom_nodes"):
+            assert entry["lanes"] == [PRIMARY, NEW], wf_id
 
 
 def test_validate_names_each_problem():
@@ -95,46 +123,61 @@ def test_workflow_lane_filter():
 
 def test_image_matrix_skips_unbuilt_images_unless_asked_for():
     rows = lanes_mod.image_matrix(REGISTRY)
-    assert [r["image"] for r in rows] == ["cu130-t2141"]
+    assert [r["image"] for r in rows] == ["cu130-t2141", "cu132-t2150"]
     assert rows[0] == {"image": "cu130-t2141", "python": "3.13", "cuda": "13.0",
                        "torch_index": "https://download.pytorch.org/whl/cu130",
                        "torch_spec": "torch==2.14.1 torchvision==0.29.1"}
-    # Asking for the legacy image explicitly overrides its build: false.
-    assert [r["image"] for r in lanes_mod.image_matrix(REGISTRY, "cu128-t2110")] == ["cu128-t2110"]
+    assert [r["image"] for r in lanes_mod.image_matrix(REGISTRY, "cu132-t2150")] == ["cu132-t2150"]
+    # The retired lane's image is never built again, even when asked for...
+    assert lanes_mod.image_matrix(REGISTRY, "cu128-t2110") == []
+    # ...while a legacy image still in service can be, by name, despite build: false.
+    serving = copy.deepcopy(REGISTRY)
+    serving["lanes"][LEGACY]["cadence"] = "per-commit"
+    assert [r["image"] for r in lanes_mod.image_matrix(serving)] == ["cu130-t2141", "cu132-t2150"]
+    assert [r["image"] for r in lanes_mod.image_matrix(serving, "cu128-t2110")] == ["cu128-t2110"]
     assert lanes_mod.image_matrix(REGISTRY, "nothing") == []
 
 
 def test_per_commit_matrix_only_lists_provisioned_lanes():
     rows = lanes_mod.per_commit_matrix(PENDING)
     ids = [r["lane"] for r in rows]
-    assert "py312-torch2.11.0-cu128" in ids and NEW not in ids
+    assert ids == [PRIMARY]  # cu128 is retired, cu132 has no endpoint yet
     for row in rows:
         assert row["endpoint_id"]
         assert row["prefix"]
+    assert lanes_mod.per_commit_matrix(PENDING, NEW) == []
     provisioned = copy.deepcopy(PENDING)
-    provisioned["lanes"]["py313-torch2.14.1-cu130"]["endpoint_id"] = "abc123"
+    provisioned["lanes"][NEW]["endpoint_id"] = "abc123"
     rows = lanes_mod.per_commit_matrix(provisioned)
-    assert {"lane": "py313-torch2.14.1-cu130",
-            "prefix": "regression/lanes/py313-torch2.14.1-cu130",
-            "endpoint_id": "abc123"} in rows
-    assert [r["lane"] for r in lanes_mod.per_commit_matrix(provisioned, "py313-torch2.14.1-cu130")] == [
-        "py313-torch2.14.1-cu130"]
+    assert {"lane": NEW, "prefix": f"regression/lanes/{NEW}", "endpoint_id": "abc123"} in rows
+    assert [r["lane"] for r in lanes_mod.per_commit_matrix(provisioned, NEW)] == [NEW]
+
+
+def test_the_retired_lane_stays_out_of_the_matrix_even_when_named():
+    assert lanes_mod.per_commit_matrix(REGISTRY, LEGACY) == []
+    assert [r["lane"] for r in lanes_mod.per_commit_matrix(REGISTRY, f"{LEGACY},{PRIMARY}")] == [PRIMARY]
+    assert lanes_mod.left_out(PENDING, f"{LEGACY},{NEW}") == [
+        f"{LEGACY}: cadence 'retired', not per-commit", f"{NEW}: no endpoint_id yet"]
+    assert lanes_mod.lanes_on_image(REGISTRY, "cu128-t2110") == []
 
 
 def test_per_commit_matrix_lists_each_lanes_workflows_with_the_manifest():
     manifest = {"workflows": {"a": {"enabled": True}, "b": {"enabled": True, "lanes": [NEW]},
                               "c": {"enabled": False}}}
-    rows = {r["lane"]: r for r in lanes_mod.per_commit_matrix(REGISTRY, manifest=manifest)}
-    assert rows[LEGACY]["workflows"] == "a"
+    provisioned = copy.deepcopy(PENDING)
+    provisioned["lanes"][NEW]["endpoint_id"] = "abc123"
+    rows = {r["lane"]: r for r in lanes_mod.per_commit_matrix(provisioned, manifest=manifest)}
+    assert rows[PRIMARY]["workflows"] == "a"
     assert rows[NEW]["workflows"] == "a,b"
 
 
 def test_lanes_on_image_never_moves_the_legacy_lane():
     assert lanes_mod.lanes_on_image(PENDING, "cu128-t2110") == []
-    assert lanes_mod.lanes_on_image(PENDING, "cu130-t2141") == []  # not provisioned yet
+    assert lanes_mod.lanes_on_image(PENDING, "cu130-t2141") == [PRIMARY]
+    assert lanes_mod.lanes_on_image(PENDING, "cu132-t2150") == []  # not provisioned yet
     provisioned = copy.deepcopy(PENDING)
-    provisioned["lanes"]["py313-torch2.14.1-cu130"]["endpoint_id"] = "abc123"
-    assert lanes_mod.lanes_on_image(provisioned, "cu130-t2141") == ["py313-torch2.14.1-cu130"]
+    provisioned["lanes"][NEW]["endpoint_id"] = "abc123"
+    assert lanes_mod.lanes_on_image(provisioned, "cu132-t2150") == [NEW]
 
 
 def test_lane_endpoint_never_falls_back_for_an_unprovisioned_lane():
@@ -148,58 +191,79 @@ def test_lane_endpoint_never_falls_back_for_an_unprovisioned_lane():
     assert index_builder.lane_endpoint(reg, "unknown", env) == "fromenv"
 
 
-def test_set_image_plans_one_patch_per_provisioned_lane_and_refuses_foreign_tags():
+def test_set_image_plans_one_patch_per_provisioned_lane_and_refuses_foreign_tags(capsys):
     reg = copy.deepcopy(PENDING)
-    reg["lanes"]["py313-torch2.14.1-cu130"]["endpoint_id"] = "abc123"
-    plan = runpod_endpoints.plan_set_image(reg, "cu130-t2141-deadbeef", image_id="cu130-t2141")
-    assert plan == [("py313-torch2.14.1-cu130", "abc123",
-                     {"image": "ghcr.io/comfy-org/comfyci-runpod-worker:cu130-t2141-deadbeef"})]
-    plan = runpod_endpoints.plan_set_image(reg, "cu130-t2141", lane_id="py313-torch2.14.1-cu130")
-    assert plan[0][2]["image"].endswith(":cu130-t2141")
+    # A lane without an endpoint is skipped: build-image's repoint is a no-op for it.
+    assert runpod_endpoints.plan_set_image(reg, "cu132-t2150-deadbeef", image_id="cu132-t2150") == []
+    assert runpod_endpoints.plan_set_image(reg, "cu132-t2150-deadbeef", lane_id=NEW) == []
+    assert f"[{NEW}] no endpoint yet; skipping" in capsys.readouterr().out
+    assert runpod_endpoints.set_image(reg, "cu132-t2150-1", None, "cu132-t2150", None, True) == 0
+    assert "nothing to repoint" in capsys.readouterr().out
+    reg["lanes"][NEW]["endpoint_id"] = "abc123"
+    plan = runpod_endpoints.plan_set_image(reg, "cu132-t2150-deadbeef", image_id="cu132-t2150")
+    assert plan == [(NEW, "abc123",
+                     {"image": "ghcr.io/comfy-org/comfyci-runpod-worker:cu132-t2150-deadbeef"})]
+    plan = runpod_endpoints.plan_set_image(reg, "cu132-t2150", lane_id=NEW)
+    assert plan[0][2]["image"].endswith(":cu132-t2150")
     with pytest.raises(SystemExit):
-        runpod_endpoints.plan_set_image(reg, "cu128-t2110-deadbeef", lane_id="py313-torch2.14.1-cu130")
+        runpod_endpoints.plan_set_image(reg, "cu130-t2141-deadbeef", lane_id=NEW)
     with pytest.raises(SystemExit):
-        runpod_endpoints.plan_set_image(reg, "cu130-t2141-deadbeef", lane_id="nope")
-    # The legacy lane is pinned by hand: an image-wide repoint leaves it alone.
+        runpod_endpoints.plan_set_image(reg, "cu132-t2150-deadbeef", lane_id="nope")
+    # The retired lane is never moved: not by an image-wide repoint, not by name.
     assert runpod_endpoints.plan_set_image(reg, "cu128-t2110-deadbeef", image_id="cu128-t2110") == []
+    with pytest.raises(SystemExit, match="is retired"):
+        runpod_endpoints.plan_set_image(reg, "cu128-t2110-deadbeef", lane_id=LEGACY)
 
 
 def test_endpoint_body_comes_from_defaults_plus_the_lane():
-    body = runpod_endpoints.endpoint_body(PENDING, "py313-torch2.14.1-cu130", "cu130-t2141-abc")
-    assert body["name"] == "comfyci-cu130-t2141"
+    body = runpod_endpoints.endpoint_body(PENDING, NEW, "cu132-t2150-abc")
+    assert body["name"] == "comfyci-cu132-t2150"
     assert body["type"] == "QUEUE"
-    assert body["image"] == "ghcr.io/comfy-org/comfyci-runpod-worker:cu130-t2141-abc"
-    assert body["gpu"] == {"pools": ["ADA_24"], "count": 1, "minCudaVersion": "13.0"}
+    assert body["image"] == "ghcr.io/comfy-org/comfyci-runpod-worker:cu132-t2150-abc"
+    assert body["gpu"] == {"pools": ["ADA_24"], "count": 1, "minCudaVersion": "13.2"}
     assert body["workers"] == {"min": 0, "max": 3, "idleTimeout": 20}
     assert body["scaling"] == {"type": "QUEUE_DELAY", "queueDelay": 4}
     assert body["timeout"] == 3600000 and body["flashboot"] == "FLASHBOOT" and body["disk"] == 40
     assert body["networkVolumes"] == ["n0xnkwnogx"] and body["dataCenterIds"] == ["EU-RO-1"]
     assert body["registry"] == "cmszcugyp001tfk7ooe7rtp4d"
     assert body["env"] == {"RUNPOD_INIT_TIMEOUT": "800"}
-    # An already provisioned lane is never created twice, and a foreign tag is refused.
+    # An already provisioned lane is never created twice, a retired one never
+    # gets one, and a foreign tag is refused.
     with pytest.raises(SystemExit, match="already has endpoint"):
-        runpod_endpoints.endpoint_body(REGISTRY, "py312-torch2.11.0-cu128", "cu128-t2110-abc")
+        runpod_endpoints.endpoint_body(REGISTRY, PRIMARY, "cu130-t2141-abc")
+    with pytest.raises(SystemExit, match="is retired"):
+        runpod_endpoints.endpoint_body(REGISTRY, LEGACY, "cu128-t2110-abc")
     with pytest.raises(SystemExit, match="not a build of image"):
-        runpod_endpoints.endpoint_body(PENDING, "py313-torch2.14.1-cu130", "cu128-t2110-abc")
+        runpod_endpoints.endpoint_body(PENDING, NEW, "cu130-t2141-abc")
     lane = copy.deepcopy(PENDING)
-    lane["lanes"]["py313-torch2.14.1-cu130"]["workers_max"] = 1
-    assert runpod_endpoints.endpoint_body(lane, "py313-torch2.14.1-cu130", "cu130-t2141")["workers"]["max"] == 1
+    lane["lanes"][NEW]["workers_max"] = 1
+    assert runpod_endpoints.endpoint_body(lane, NEW, "cu132-t2150")["workers"]["max"] == 1
 
 
 def test_write_endpoint_id_updates_only_that_lane(tmp_path):
     path = tmp_path / "lanes.json"
     path.write_text(json.dumps(PENDING, indent=2), encoding="utf-8")
-    runpod_endpoints.write_endpoint_id("py313-torch2.14.1-cu130", "ep999", path)
+    runpod_endpoints.write_endpoint_id(NEW, "ep999", path)
     after = json.loads(path.read_text(encoding="utf-8"))
-    assert after["lanes"]["py313-torch2.14.1-cu130"]["endpoint_id"] == "ep999"
-    after["lanes"]["py313-torch2.14.1-cu130"]["endpoint_id"] = None
+    assert after["lanes"][NEW]["endpoint_id"] == "ep999"
+    after["lanes"][NEW]["endpoint_id"] = None
     assert after == PENDING
+
+
+def test_write_endpoint_id_keeps_the_committed_formatting(tmp_path):
+    """create --write re-serialises lanes.json: the diff it leaves is the id alone."""
+    text = (ROOT / "manifest" / "lanes.json").read_text(encoding="utf-8")
+    path = tmp_path / "lanes.json"
+    path.write_text(text, encoding="utf-8")
+    current = json.loads(text)["lanes"][NEW]["endpoint_id"]
+    runpod_endpoints.write_endpoint_id(NEW, current, path)
+    assert path.read_text(encoding="utf-8") == text
 
 
 def test_set_image_dry_run_sends_nothing(capsys):
     reg = copy.deepcopy(PENDING)
-    reg["lanes"]["py313-torch2.14.1-cu130"]["endpoint_id"] = "abc123"
-    assert runpod_endpoints.set_image(reg, "cu130-t2141-1", None, "cu130-t2141", None, True) == 0
+    reg["lanes"][NEW]["endpoint_id"] = "abc123"
+    assert runpod_endpoints.set_image(reg, "cu132-t2150-1", None, "cu132-t2150", None, True) == 0
     assert "would PATCH abc123" in capsys.readouterr().out
 
 
