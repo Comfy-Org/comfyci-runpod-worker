@@ -429,8 +429,13 @@ in order:
 
    Commit and push the `lanes.json` change to the branch. 3 + 3 + 3 workers
    plus comfy-pulse's 1 fills the 10-worker quota exactly; if the create is
-   refused, add `"workers_max": 2` to the lane rather than scaling cu128 down
-   while it is still the primary on main (step 7 raises it again).
+   refused, add `"workers_max": 2` to the lane for the create rather than
+   scaling cu128 down while it is still the primary on main, and take it out
+   again before you commit the `endpoint_id` (step 7 raises the endpoint to
+   3). Only `create` reads `workers_max`, so dropping it changes nothing on
+   the endpoint and a re-create gets 3, whereas dropping it after the merge
+   is one more `lanes.json` change on main, which rebuilds both images and
+   repoints both lanes again.
 4. Generate goldens from the branch (a fresh endpoint has no stale workers):
    `gh workflow run golden-baseline.yml --ref lanes-cu132 -f lane=py313-torch2.15.0-cu132 -f ref=v0.42.0 -f workflows=all -f bless=false`
    (v0.42.0 is the tag the cu130 goldens use). Inspect
@@ -457,8 +462,7 @@ in order:
      workers of the quota;
    - flush stale workers on the cu130 and cu132 endpoints: max workers 0,
      then back to the previous max. If the cu132 endpoint was created with
-     `"workers_max": 2`, raise it to 3 now that cu128 is at 0, and drop
-     `workers_max` from `lanes.json` in a follow-up so a re-create gets 3;
+     max 2 (step 3), raise it to 3 now that cu128 is at 0;
    - check that `isStale` is gone from both worker lists.
 8. Test master HEAD on the rebuilt images, both lanes in one run (no `lane=`):
    `gh workflow run regression.yml -f commit=<master HEAD sha>`. Check that
