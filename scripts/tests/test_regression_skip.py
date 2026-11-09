@@ -91,6 +91,48 @@ def test_next_attempt_counts_from_what_is_published():
     assert regression_skip.next_attempt({"commit": SHA}) == 2
     assert regression_skip.next_attempt({"commit": SHA, "attempt": 2}) == 3
     assert regression_skip.next_attempt({"commit": SHA, "attempt": "junk"}) == 2
+    # The start marker counts too, and the later of the two wins.
+    assert regression_skip.next_attempt(None, {"attempt": 1}) == 2
+    assert regression_skip.next_attempt({"attempt": 1}, {"attempt": 2}) == 3
+    assert regression_skip.next_attempt({"attempt": 2}, {"attempt": 1}) == 3
+
+
+def test_a_run_that_died_before_publishing_gets_one_more_attempt():
+    """A marker without a summary: the run started its GPU jobs and never
+    published (a failed push, a killed job). One retry, then the cron stops."""
+    run, why = regression_skip.decide(SHA, marker={"attempt": 1})
+    assert run and "published no result" in why and "attempt 2 of 2" in why
+    run, why = regression_skip.decide(SHA, marker={"attempt": 2})
+    assert not run and "none published a result" in why and "commit=" in why
+    assert not decide(marker={"attempt": 7})
+    assert not decide(marker={"unreadable": True})
+    assert decide(marker={"attempt": 2}, explicit=True)
+    # The previous-run pointer still settles it first.
+    assert not decide(latest={"commit": SHA}, marker={"attempt": 1})
+
+
+def test_a_retry_that_died_counts_against_the_infra_retry():
+    """Attempt 1 published infra errors, attempt 2 pushed its marker and died:
+    both attempts are spent."""
+    first = _summary("pass", infra=True, attempt=1, sdxl_t2i="infra_error")
+    assert decide(summary=first, marker={"attempt": 1})
+    assert not decide(summary=first, marker={"attempt": 2})
+    # A marker never reopens a commit whose result was not an infra error.
+    assert not decide(summary=_summary("fail", z="execution_error"), marker={"attempt": 1})
+
+
+def test_a_publish_that_keeps_failing_is_bounded():
+    """The open end of the 2026-11 incident: every run of HEAD does its GPU
+    work and then fails to push its results. Only the markers (pushed before
+    the GPU jobs) land, and the cron stops after MAX_ATTEMPTS."""
+    marker = None
+    runs = 0
+    for _tick in range(10):
+        if not regression_skip.decide(SHA, None, {"commit": "a" * 40}, marker=marker)[0]:
+            continue
+        runs += 1
+        marker = {"attempt": regression_skip.next_attempt(None, marker)}
+    assert runs == regression_skip.MAX_ATTEMPTS
 
 
 def test_cli_prints_the_step_output(tmp_path, capsys):
@@ -112,13 +154,20 @@ def test_cli_prints_the_step_output(tmp_path, capsys):
     assert out("--summary", str(tmp_path / "missing.json"))[0] == "skip=false"
     (tmp_path / "bad.json").write_text("{not json", encoding="utf-8")
     assert out("--summary", str(tmp_path / "bad.json"))[0] == "skip=false"
+    marker = tmp_path / "a.json"
+    marker.write_text(json.dumps({"attempt": 2}), encoding="utf-8")
+    assert out("--summary", str(empty), "--attempt", str(marker))[0] == "skip=true"
+    assert out("--summary", str(empty), "--attempt", str(empty))[0] == "skip=false"
 
 
 def test_the_workflow_decides_with_the_published_summary():
     regression = (ROOT / ".github" / "workflows" / "regression.yml").read_text(encoding="utf-8")
-    assert 'RUN_SUMMARY="$PREFIX/runs/master/$COMMIT/summary.json"' in regression
-    assert 'git ls-tree --name-only FETCH_HEAD -- "$RUN_SUMMARY"' in regression
-    assert "echo '{\"unreadable\": true}' > \"$SUMMARY\"" in regression
+    assert 'RUN_DIR="$PREFIX/runs/master/$COMMIT"' in regression
+    assert 'read_published "$RUN_DIR/summary.json" "$SUMMARY"' in regression
+    assert 'read_published "$RUN_DIR/attempt.json" "$ATTEMPT"' in regression
+    assert 'git ls-tree --name-only FETCH_HEAD -- "$1"' in regression
+    assert "echo '{\"unreadable\": true}' > \"$2\"" in regression
+    assert '--summary "$SUMMARY" --attempt "$ATTEMPT" --latest "$LATEST"' in regression
     assert "python scripts/regression_skip.py" in regression
     assert 'if [ -n "$INPUT_COMMIT" ]; then args+=(--explicit); fi' in regression
     assert "steps.target.outputs.skip != 'true'" in regression

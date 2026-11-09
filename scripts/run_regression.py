@@ -273,6 +273,18 @@ def write_summary(path: Path, summary: dict):
     path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
 
+def attempt_marker(args, lane_id: str, attempt: int) -> dict:
+    """runs/<branch>/<commit>/attempt.json: which attempt started, and the
+    Actions run behind it (to find the log of one that never published)."""
+    marker = {"commit": args.commit, "branch": args.branch, "lane": lane_id,
+              "attempt": attempt, "started_ts": int(time.time())}
+    if os.environ.get("GITHUB_RUN_ID") and os.environ.get("GITHUB_REPOSITORY"):
+        server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+        marker["run_url"] = (f"{server}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
+                             f"{os.environ['GITHUB_RUN_ID']}")
+    return marker
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", default=str(HERE.parent / "manifest" / "workflows.json"))
@@ -325,11 +337,13 @@ def main():
     # The index as it stands before this run: it also records runs that had
     # execution errors, which the pointer above skips.
     prior_entries = (store.download_json(builder.head_path()) or {}).get("entries") or []
-    # A re-run of a commit (the cron's one retry after infra errors, or a
-    # dispatch naming it) counts its attempts, so the cron knows when to stop.
-    attempt = regression_skip.next_attempt(store.published_summary(args.branch, args.commit))
+    # A re-run of a commit (the cron's one retry, or a dispatch naming it)
+    # counts its attempts, so the cron knows when to stop. A run that died
+    # before publishing left only its start marker, which counts too.
+    attempt = regression_skip.next_attempt(store.published_summary(args.branch, args.commit),
+                                           store.attempt_marker(args.branch, args.commit))
     if attempt > 1:
-        print(f"{args.commit[:8]} already has a result on lane {lane_id}; this is attempt {attempt}")
+        print(f"{args.commit[:8]} was already tried on lane {lane_id}; this is attempt {attempt}")
 
     manifest_path = Path(args.manifest).resolve()
     repo_root = manifest_path.parent.parent
@@ -354,6 +368,13 @@ def main():
 
     if not args.skip_publish:
         store.snapshot_manifest(args.commit, manifest)
+        # Pushed before any GPU job: if this run dies before it publishes (a
+        # failed push, a killed job), the cron still counts the attempt and
+        # stops after regression_skip.MAX_ATTEMPTS instead of re-running the
+        # commit every tick. A marker that cannot be pushed stops the run here,
+        # before it costs anything.
+        store.mark_attempt(args.branch, args.commit, attempt_marker(args, lane_id, attempt))
+        store.checkpoint(f"regression {args.branch}@{args.commit[:8]}: attempt {attempt} started")
 
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(selected)) as pool:

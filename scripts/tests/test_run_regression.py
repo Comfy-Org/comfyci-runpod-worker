@@ -89,6 +89,9 @@ class FakeStore:
     def published_summary(self, branch, commit):
         return self.files.get(f"regression/runs/{branch}/{commit}/summary.json")
 
+    def attempt_marker(self, branch, commit):
+        return self.files.get(f"regression/runs/{branch}/{commit}/attempt.json")
+
 
 def test_summary_out_is_written_on_failure_with_prior_verdicts(tmp_path, monkeypatch):
     import json
@@ -146,6 +149,80 @@ def test_a_rerun_records_its_attempt(tmp_path, monkeypatch, capsys):
     assert run_regression.main() == 0
     assert json.loads(out.read_text(encoding="utf-8"))["attempt"] == 2
     assert "this is attempt 2" in capsys.readouterr().out
+    # A later marker (a retry that died before publishing) raises the count.
+    store.files["regression/runs/master/new/attempt.json"] = {"attempt": 2}
+    assert run_regression.main() == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["attempt"] == 3
+
+
+def test_the_start_marker_is_pushed_before_any_gpu_job(tmp_path, monkeypatch):
+    """A run that dies after its GPU jobs (here: the results push fails) has
+    already pushed its attempt marker, so the cron can count it."""
+    import sys
+    import commit_meta
+    import storage
+    events = []
+
+    class RecordingStore(FakeStore):
+        def snapshot_manifest(self, commit, manifest):
+            events.append("snapshot")
+
+        def mark_attempt(self, branch, commit, marker):
+            events.append(("marker", branch, commit, marker["attempt"], marker["lane"],
+                           marker.get("run_url")))
+
+        def checkpoint(self, message):
+            events.append(("checkpoint", message))
+
+        def publish_summary(self, branch, commit, summary):
+            raise RuntimeError("could not push results")
+
+    store = RecordingStore({"regression/runs/master/new/attempt.json": {"attempt": 1}})
+    monkeypatch.setattr(storage, "from_args", lambda args: store)
+    monkeypatch.setattr(commit_meta, "fetch_commit_meta", lambda sha: None)
+    monkeypatch.setenv("GITHUB_SERVER_URL", "https://github.com")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "Comfy-Org/comfyci-runpod-worker")
+    monkeypatch.setenv("GITHUB_RUN_ID", "42")
+
+    def gpu(wf_id, *a):
+        events.append(("gpu", wf_id))
+        return {"workflow_id": wf_id, "worker_status": "ok", "verdict": "pass", "detail": None}
+
+    monkeypatch.setattr(run_regression, "process_workflow", gpu)
+    monkeypatch.setattr(sys, "argv", ["run_regression.py", "--commit", "new", "--branch", "master",
+                                      "--workflows", "sdxl_t2i"])
+    with pytest.raises(RuntimeError, match="could not push results"):
+        run_regression.main()
+    run_url = "https://github.com/Comfy-Org/comfyci-runpod-worker/actions/runs/42"
+    # Attempt 1 left only its marker, so this is attempt 2.
+    assert events == ["snapshot", ("marker", "master", "new", 2, "main", run_url),
+                      ("checkpoint", "regression master@new: attempt 2 started"),
+                      ("gpu", "sdxl_t2i")]
+
+
+def test_a_marker_that_cannot_be_pushed_stops_the_run_before_the_gpu(tmp_path, monkeypatch):
+    import sys
+    import commit_meta
+    import storage
+
+    class NoPushStore(FakeStore):
+        def snapshot_manifest(self, commit, manifest):
+            pass
+
+        def mark_attempt(self, branch, commit, marker):
+            pass
+
+        def checkpoint(self, message):
+            raise RuntimeError("could not push checkpoint")
+
+    monkeypatch.setattr(storage, "from_args", lambda args: NoPushStore({}))
+    monkeypatch.setattr(commit_meta, "fetch_commit_meta", lambda sha: None)
+    monkeypatch.setattr(run_regression, "process_workflow",
+                        lambda *a: pytest.fail("no GPU job without a pushed marker"))
+    monkeypatch.setattr(sys, "argv", ["run_regression.py", "--commit", "new", "--branch", "master",
+                                      "--workflows", "sdxl_t2i"])
+    with pytest.raises(RuntimeError, match="could not push checkpoint"):
+        run_regression.main()
 
 
 def test_summary_out_is_not_written_when_publishing_fails(tmp_path, monkeypatch):
@@ -156,6 +233,12 @@ def test_summary_out_is_not_written_when_publishing_fails(tmp_path, monkeypatch)
 
     class BrokenStore(FakeStore):
         def snapshot_manifest(self, commit, manifest):
+            pass
+
+        def mark_attempt(self, branch, commit, marker):
+            pass
+
+        def checkpoint(self, message):
             pass
 
         def publish_summary(self, branch, commit, summary):

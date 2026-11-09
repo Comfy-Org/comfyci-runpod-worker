@@ -65,8 +65,9 @@ jobs:
           python-version: '3.12'
       - run: pip install -r scripts/requirements.txt
       # A commit is tested once per lane: any published result (pass, fail or
-      # execution_error) ends it, a result with infra errors gets one retry,
-      # and a dispatch naming a commit always runs (scripts/regression_skip.py).
+      # execution_error) ends it; a result with infra errors, or a start marker
+      # with no result (the run died before publishing), gets one retry; and a
+      # dispatch naming a commit always runs (scripts/regression_skip.py).
       - name: Resolve target commit and skip if already tested on this lane
         id: target
         env:
@@ -85,21 +86,27 @@ jobs:
           # What the lane already published for this commit, read straight from
           # the results branch (raw.githubusercontent.com caches for ~5 min; git does not).
           SUMMARY="$RUNNER_TEMP/published-summary.json"
+          ATTEMPT="$RUNNER_TEMP/published-attempt.json"
           LATEST="$RUNNER_TEMP/published-latest.json"
           : > "$SUMMARY"
+          : > "$ATTEMPT"
           : > "$LATEST"
-          if git fetch --depth 1 --filter=blob:none origin results 2>/dev/null; then
-            RUN_SUMMARY="$PREFIX/runs/master/$COMMIT/summary.json"
-            # The trees came with the fetch, so whether the summary exists is
-            # known without the network; only its content is fetched lazily.
-            if [ -n "$(git ls-tree --name-only FETCH_HEAD -- "$RUN_SUMMARY")" ]; then
-              git show "FETCH_HEAD:$RUN_SUMMARY" > "$SUMMARY" 2>/dev/null \
-                || git show "FETCH_HEAD:$RUN_SUMMARY" > "$SUMMARY" 2>/dev/null \
-                || echo '{"unreadable": true}' > "$SUMMARY"
+          # The trees come with the fetch, so whether a file exists is known
+          # without the network; only its content is fetched lazily.
+          read_published() {
+            if [ -n "$(git ls-tree --name-only FETCH_HEAD -- "$1")" ]; then
+              git show "FETCH_HEAD:$1" > "$2" 2>/dev/null \
+                || git show "FETCH_HEAD:$1" > "$2" 2>/dev/null \
+                || echo '{"unreadable": true}' > "$2"
             fi
+          }
+          if git fetch --depth 1 --filter=blob:none origin results 2>/dev/null; then
+            RUN_DIR="$PREFIX/runs/master/$COMMIT"
+            read_published "$RUN_DIR/summary.json" "$SUMMARY"
+            read_published "$RUN_DIR/attempt.json" "$ATTEMPT"
             git show "FETCH_HEAD:$PREFIX/latest/master.json" > "$LATEST" 2>/dev/null || : > "$LATEST"
           fi
-          args=(--commit "$COMMIT" --summary "$SUMMARY" --latest "$LATEST")
+          args=(--commit "$COMMIT" --summary "$SUMMARY" --attempt "$ATTEMPT" --latest "$LATEST")
           if [ -n "$INPUT_COMMIT" ]; then args+=(--explicit); fi
           python scripts/regression_skip.py "${args[@]}" >> "$GITHUB_OUTPUT"
       - name: Run regression suite

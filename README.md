@@ -137,14 +137,18 @@ defaults loosened to 3× the golden's own re-run noise floor
 Each commit is tested once per lane. The cron (every 30 minutes) skips master
 HEAD on a lane as soon as that lane has published a `summary.json` for it,
 whatever the verdict: a red commit stays red until master moves, it is not
-re-run every tick. A summary with infra errors gets one more attempt (two in
-all, counted in the summary's `attempt`), and a run that died before
-publishing is simply tested again on the next tick. To test a commit again on
-purpose, dispatch **GPU regression** with `commit=<sha>` (and `lane=` for one
-lane). The decision lives in `scripts/regression_skip.py`. The cron used to
-key on the previous-run pointer, which does not advance on execution errors,
-so a red HEAD was re-run on both lanes every half hour (53 runs for 11
-commits during the 2026-11-03/04 z_image timeouts).
+re-run every tick. Before it submits any GPU job, every run pushes a start
+marker, `runs/master/<sha>/attempt.json` (attempt number, Actions run URL), so
+a run that dies before publishing its summary (a failed results push, a killed
+job) is still counted. A summary with infra errors, or a marker with no
+summary, gets one more attempt: two in all per commit per lane, counted in the
+summary's and the marker's `attempt`. A run that cannot push its marker stops
+before any GPU work. To test a commit again on purpose, dispatch **GPU
+regression** with `commit=<sha>` (and `lane=` for one lane). The decision
+lives in `scripts/regression_skip.py`. The cron used to key on the
+previous-run pointer, which does not advance on execution errors, so a red
+HEAD was re-run on both lanes every half hour (53 runs for 11 commits during
+the 2026-11-03/04 z_image timeouts).
 
 A failure vs golden is also classified against the previous tested run
 (`detail` in `summary.json`): `new_drift` when this commit's outputs differ
@@ -650,6 +654,7 @@ regression/
                                            # figures/ only when the frames differ and the
                                            # failure is not inherited
   runs/<branch>/<commit>/summary.json      # per-commit rollup (dashboard entrypoint)
+  runs/<branch>/<commit>/attempt.json      # start marker, pushed before the GPU jobs
   latest/<branch>.json                     # previous-run pointer, written last
   manifest-snapshot/<commit>.json
   golden/<workflow_id>/<tag>/{outputs/, run_r1.json, run_r2.json, noise_floor.json, blessed.json}
