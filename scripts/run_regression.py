@@ -29,6 +29,7 @@ import compare
 import index_builder
 import lanes as lanes_mod
 import packs
+import regression_skip
 import storage
 from submit_and_poll import INFRA_STATUSES, RunPodClient, run_workflow_job
 
@@ -320,6 +321,11 @@ def main():
     # The index as it stands before this run: it also records runs that had
     # execution errors, which the pointer above skips.
     prior_entries = (store.download_json(builder.head_path()) or {}).get("entries") or []
+    # A re-run of a commit (the cron's one retry after infra errors, or a
+    # dispatch naming it) counts its attempts, so the cron knows when to stop.
+    attempt = regression_skip.next_attempt(store.published_summary(args.branch, args.commit))
+    if attempt > 1:
+        print(f"{args.commit[:8]} already has a result on lane {lane_id}; this is attempt {attempt}")
 
     manifest_path = Path(args.manifest).resolve()
     repo_root = manifest_path.parent.parent
@@ -374,6 +380,7 @@ def main():
                "run_ts": int(time.time()), "overall": overall,
                "has_infra_error": any(v == "infra_error" for v in verdicts.values()),
                "lane": lane_id,
+               "attempt": attempt,
                # The worker image and host every workflow ran on (they share one endpoint).
                "env": next((r.get("env") for r in results if r.get("env")), None),
                "commit_meta": meta,

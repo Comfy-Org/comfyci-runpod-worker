@@ -64,6 +64,9 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r scripts/requirements.txt
+      # A commit is tested once per lane: any published result (pass, fail or
+      # execution_error) ends it, a result with infra errors gets one retry,
+      # and a dispatch naming a commit always runs (scripts/regression_skip.py).
       - name: Resolve target commit and skip if already tested on this lane
         id: target
         env:
@@ -79,17 +82,19 @@ jobs:
             COMMIT=$(git ls-remote https://github.com/Comfy-Org/ComfyUI refs/heads/master | cut -f1)
           fi
           echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
-          # Read the lane's last-tested pointer straight from the results branch
-          # (raw.githubusercontent.com caches for ~5 min; git does not).
-          LAST=""
+          # What the lane already published for this commit, read straight from
+          # the results branch (raw.githubusercontent.com caches for ~5 min; git does not).
+          SUMMARY="$RUNNER_TEMP/published-summary.json"
+          LATEST="$RUNNER_TEMP/published-latest.json"
+          : > "$SUMMARY"
+          : > "$LATEST"
           if git fetch --depth 1 --filter=blob:none origin results 2>/dev/null; then
-            LAST=$(git show "FETCH_HEAD:$PREFIX/latest/master.json" 2>/dev/null \
-                   | python3 -c 'import json,sys; print(json.load(sys.stdin).get("commit",""))' || true)
+            git show "FETCH_HEAD:$PREFIX/runs/master/$COMMIT/summary.json" > "$SUMMARY" 2>/dev/null || : > "$SUMMARY"
+            git show "FETCH_HEAD:$PREFIX/latest/master.json" > "$LATEST" 2>/dev/null || : > "$LATEST"
           fi
-          if [ -z "$INPUT_COMMIT" ] && [ "$COMMIT" = "$LAST" ]; then
-            echo "master HEAD $COMMIT already tested on this lane; skipping"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          fi
+          args=(--commit "$COMMIT" --summary "$SUMMARY" --latest "$LATEST")
+          if [ -n "$INPUT_COMMIT" ]; then args+=(--explicit); fi
+          python scripts/regression_skip.py "${args[@]}" >> "$GITHUB_OUTPUT"
       - name: Run regression suite
         if: steps.target.outputs.skip != 'true'
         env:

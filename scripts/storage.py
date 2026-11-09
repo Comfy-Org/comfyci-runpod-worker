@@ -105,6 +105,11 @@ class Storage:
     def run_summary(self, branch: str, commit: str) -> dict | None:
         return self.download_json(f"{self.prefix}/runs/{branch}/{commit}/summary.json")
 
+    def published_summary(self, branch: str, commit: str) -> dict | None:
+        """The summary a commit already has, read without materialising its run
+        directory (a re-run is about to replace those outputs anyway)."""
+        return self.read_blob_json(f"{self.prefix}/runs/{branch}/{commit}/summary.json")
+
     def fetch_run_outputs(self, branch: str, commit: str, workflow_id: str,
                           dest: Path) -> int:
         return self.download_dir(

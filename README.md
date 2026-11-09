@@ -133,6 +133,18 @@ Thresholds come from the manifest entry if set, otherwise from the manifest
 defaults loosened to 3× the golden's own re-run noise floor
 (`noise_floor.json`), so nondeterministic workflows don't false-alarm.
 
+Each commit is tested once per lane. The cron (every 30 minutes) skips master
+HEAD on a lane as soon as that lane has published a `summary.json` for it,
+whatever the verdict: a red commit stays red until master moves, it is not
+re-run every tick. A summary with infra errors gets one more attempt (two in
+all, counted in the summary's `attempt`), and a run that died before
+publishing is simply tested again on the next tick. To test a commit again on
+purpose, dispatch **GPU regression** with `commit=<sha>` (and `lane=` for one
+lane). The decision lives in `scripts/regression_skip.py`. The cron used to
+key on the previous-run pointer, which does not advance on execution errors,
+so a red HEAD was re-run on both lanes every half hour (53 runs for 11
+commits during the 2026-11-03/04 z_image timeouts).
+
 A failure vs golden is also classified against the previous tested run
 (`detail` in `summary.json`): `new_drift` when this commit's outputs differ
 from the previous run (the change happened here), `inherited` when they are

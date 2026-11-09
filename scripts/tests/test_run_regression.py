@@ -70,6 +70,9 @@ class FakeStore:
     def download_json(self, path):
         return self.files.get(path)
 
+    def published_summary(self, branch, commit):
+        return self.files.get(f"regression/runs/{branch}/{commit}/summary.json")
+
 
 def test_summary_out_is_written_on_failure_with_prior_verdicts(tmp_path, monkeypatch):
     import json
@@ -102,6 +105,31 @@ def test_summary_out_is_written_on_failure_with_prior_verdicts(tmp_path, monkeyp
     flux, sdxl = summary["workflows"]["flux_dev_t2i"], summary["workflows"]["sdxl_t2i"]
     assert (flux["prior_verdict"], flux["prior_commit"]) == ("execution_error", "prev")
     assert (sdxl["prior_verdict"], sdxl["prior_commit"]) == ("pass", "old")
+    assert summary["attempt"] == 1
+
+
+def test_a_rerun_records_its_attempt(tmp_path, monkeypatch, capsys):
+    """The cron retries a commit with infra errors once; the summary counts the
+    attempts so the next tick knows the retry was spent."""
+    import json
+    import sys
+    import commit_meta
+    import storage
+    store = FakeStore({"regression/runs/master/new/summary.json": {
+        "commit": "new", "overall": "pass", "has_infra_error": True,
+        "workflows": {"sdxl_t2i": {"verdict": "infra_error"}}}})
+    monkeypatch.setattr(storage, "from_args", lambda args: store)
+    monkeypatch.setattr(commit_meta, "fetch_commit_meta", lambda sha: None)
+    monkeypatch.setattr(run_regression, "process_workflow",
+                        lambda wf_id, *a: {"workflow_id": wf_id, "worker_status": "ok",
+                                           "verdict": "pass", "detail": None})
+    out = tmp_path / "summary.json"
+    monkeypatch.setattr(sys, "argv", ["run_regression.py", "--commit", "new", "--branch", "master",
+                                      "--workflows", "sdxl_t2i", "--skip-publish",
+                                      "--summary-out", str(out)])
+    assert run_regression.main() == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["attempt"] == 2
+    assert "this is attempt 2" in capsys.readouterr().out
 
 
 def test_summary_out_is_not_written_when_publishing_fails(tmp_path, monkeypatch):
