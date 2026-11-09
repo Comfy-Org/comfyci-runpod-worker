@@ -5,6 +5,12 @@ A lane is an environment the corpus runs in: a worker image (python + torch buil
 prefix. Images are declared once under `images` and lanes point at them, so the
 build matrix and the per-commit matrix are both derived from this one file.
 
+A retired lane (cadence "retired") keeps its registry entry, storage prefix
+and published history, but nothing dispatches GPU work to it any more: it is
+left out of the per-commit matrix (even when named with --only), of image
+repoints and of the build matrix, and run_regression.py / golden_baseline.py
+refuse to run it.
+
 A workflow can restrict itself to lanes with a `lanes` list in
 manifest/workflows.json (null = every lane); workflows that need custom-node
 packs must, because only images CI builds (`build` not false) bake the packs'
@@ -38,9 +44,23 @@ def load_json(path: Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-CADENCES = ("per-commit", "nightly", "weekly")
+CADENCES = ("per-commit", "nightly", "weekly", "retired")
+RETIRED = "retired"
 ROLES = ("primary", "lane", "legacy")
 IMAGE_FIELDS = ("python", "cuda", "torch_index", "torch_spec")
+
+
+def is_retired(lane: dict | None) -> bool:
+    """A retired lane's history stays readable, but it runs nothing any more."""
+    return (lane or {}).get("cadence") == RETIRED
+
+
+def retired_only_images(lanes: dict) -> set[str]:
+    """Images that lanes run, but only retired ones: nothing would use a new build."""
+    users: dict[str, list[dict]] = {}
+    for lane in (lanes.get("lanes") or {}).values():
+        users.setdefault(lane.get("image"), []).append(lane)
+    return {image_id for image_id, on in users.items() if on and all(is_retired(l) for l in on)}
 
 
 def _csv(value: str | None) -> set[str] | None:
@@ -48,10 +68,14 @@ def _csv(value: str | None) -> set[str] | None:
 
 
 def image_matrix(lanes: dict, only: str | None = None) -> list[dict]:
-    """Images build-image.yml builds: every image not marked `"build": false`."""
+    """Images build-image.yml builds: every image not marked `"build": false`
+    (unless asked for by name), never one that only retired lanes run."""
     wanted = _csv(only)
+    retired = retired_only_images(lanes)
     out = []
     for image_id, image in (lanes.get("images") or {}).items():
+        if image_id in retired:
+            continue
         if image.get("build") is False and not (wanted and image_id in wanted):
             continue
         if wanted and image_id not in wanted:
@@ -75,7 +99,8 @@ def workflows_for_lane(manifest: dict, lane_id: str, enabled_only: bool = True) 
 def per_commit_matrix(lanes: dict, only: str | None = None,
                       manifest: dict | None = None) -> list[dict]:
     """Lanes regression.yml tests on every new commit: per-commit cadence and an
-    endpoint. With the workflows manifest, each row also names the enabled
+    endpoint, also when `only` names a lane (a retired or unprovisioned lane
+    stays out). With the workflows manifest, each row also names the enabled
     workflows the lane runs, as a csv (the rows feed a matrix `include`, so the
     plan shows what the lane filter leaves without nesting a list)."""
     wanted = _csv(only)
@@ -93,20 +118,36 @@ def per_commit_matrix(lanes: dict, only: str | None = None,
     return out
 
 
+def left_out(lanes: dict, only: str | None) -> list[str]:
+    """Why each lane named in `only` is not in the per-commit matrix."""
+    entries = lanes.get("lanes") or {}
+    notes = []
+    for lane_id in sorted(_csv(only) or ()):
+        lane = entries.get(lane_id)
+        if lane is None:
+            notes.append(f"{lane_id}: not a lane in manifest/lanes.json")
+        elif lane.get("cadence") != "per-commit":
+            notes.append(f"{lane_id}: cadence {lane.get('cadence')!r}, not per-commit")
+        elif not lane.get("endpoint_id"):
+            notes.append(f"{lane_id}: no endpoint_id yet")
+    return notes
+
+
 def lanes_on_image(lanes: dict, image_id: str) -> list[str]:
     """Lanes a fresh build of `image_id` is rolled out to automatically.
 
-    Provisioned lanes on the image, except lanes in the legacy role and lanes
-    whose image is not built by CI (`"build": false`): those keep the sha tag
-    they were blessed on until they retire, and are only moved by hand
-    (`runpod_endpoints.py set-image --lane`).
+    Provisioned lanes on the image, except lanes in the legacy role, retired
+    lanes and lanes whose image is not built by CI (`"build": false`): those
+    keep the sha tag they were blessed on. A legacy lane still in service is
+    moved by hand (`runpod_endpoints.py set-image --lane`), a retired one not
+    at all.
     """
     image = (lanes.get("images") or {}).get(image_id) or {}
     if image.get("build") is False:
         return []
     return [lane_id for lane_id, lane in (lanes.get("lanes") or {}).items()
             if lane.get("image") == image_id and lane.get("endpoint_id")
-            and lane.get("role") != "legacy"]
+            and lane.get("role") != "legacy" and not is_retired(lane)]
 
 
 def validate(lanes: dict, manifest: dict | None = None, packs: dict | None = None) -> list[str]:
@@ -119,8 +160,23 @@ def validate(lanes: dict, manifest: dict | None = None, packs: dict | None = Non
     problems: list[str] = []
     images = lanes.get("images") or {}
     entries = lanes.get("lanes") or {}
-    if lanes.get("primary") not in entries:
-        problems.append(f"primary {lanes.get('primary')!r} is not a lane")
+    primary_id = lanes.get("primary")
+    if primary_id not in entries:
+        problems.append(f"primary {primary_id!r} is not a lane")
+    else:
+        # The primary is the lane PULSE comments for and the dashboard opens on:
+        # it has to be tested on every commit.
+        primary = entries[primary_id]
+        if primary.get("role") != "primary":
+            problems.append(f"primary lane {primary_id}: role must be 'primary', "
+                            f"not {primary.get('role')!r}")
+        if primary.get("cadence") != "per-commit":
+            problems.append(f"primary lane {primary_id}: cadence must be 'per-commit', "
+                            f"not {primary.get('cadence')!r}")
+    for lane_id, lane in entries.items():
+        if lane_id != primary_id and lane.get("role") == "primary":
+            problems.append(f"lane {lane_id}: role 'primary', but the primary lane is "
+                            f"{primary_id!r}")
     for image_id, image in images.items():
         for field in IMAGE_FIELDS:
             if not image.get(field):
@@ -199,6 +255,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(image_matrix(lanes, args.only)))
     elif args.cmd == "per-commit":
         manifest = load_json(MANIFEST_FILE) if MANIFEST_FILE.exists() else None
+        for note in left_out(lanes, args.only):
+            print(f"::notice::not tested: {note}", file=sys.stderr)
         print(json.dumps(per_commit_matrix(lanes, args.only, manifest)))
     elif args.cmd == "lanes-on-image":
         print(json.dumps(lanes_on_image(lanes, args.image)))

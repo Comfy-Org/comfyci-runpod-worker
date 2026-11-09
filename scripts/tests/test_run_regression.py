@@ -1,5 +1,21 @@
 """run_regression: pure decision helpers and the summary handed to later steps."""
+import pytest
+
+import index_builder
 import run_regression
+
+# A registry of its own, so these tests do not follow the committed lane state:
+# "main" owns the default `regression` prefix, "other" is a layout-2 lane.
+LANES = {"schema_version": 2, "primary": "main", "lanes": {
+    "main": {"cadence": "per-commit", "role": "primary", "layout": 1, "prefix": "regression",
+             "endpoint_id": "ep-main"},
+    "other": {"cadence": "per-commit", "role": "lane", "layout": 2,
+              "prefix": "regression/lanes/other", "endpoint_id": "ep-other"}}}
+
+
+@pytest.fixture(autouse=True)
+def registry(monkeypatch):
+    monkeypatch.setattr(index_builder, "load_lanes", lambda path=None: LANES)
 
 IDENT = {"identical": True, "mean_mse": 0.0}
 DIFF = {"identical": False, "mean_mse": 3.4}
@@ -70,13 +86,19 @@ class FakeStore:
     def download_json(self, path):
         return self.files.get(path)
 
+    def published_summary(self, branch, commit):
+        return self.files.get(f"regression/runs/{branch}/{commit}/summary.json")
+
+    def attempt_marker(self, branch, commit):
+        return self.files.get(f"regression/runs/{branch}/{commit}/attempt.json")
+
 
 def test_summary_out_is_written_on_failure_with_prior_verdicts(tmp_path, monkeypatch):
     import json
     import sys
     import commit_meta
     import storage
-    lane = "py312-torch2.11.0-cu128"
+    lane = "main"
     head = {"entries": [{"c": "prev", "t": 2, "m": {"ct": 2},
                          "w": {"flux_dev_t2i": {"v": "execution_error"}}},
                         {"c": "old", "t": 1, "m": {"ct": 1},
@@ -102,6 +124,105 @@ def test_summary_out_is_written_on_failure_with_prior_verdicts(tmp_path, monkeyp
     flux, sdxl = summary["workflows"]["flux_dev_t2i"], summary["workflows"]["sdxl_t2i"]
     assert (flux["prior_verdict"], flux["prior_commit"]) == ("execution_error", "prev")
     assert (sdxl["prior_verdict"], sdxl["prior_commit"]) == ("pass", "old")
+    assert summary["attempt"] == 1
+
+
+def test_a_rerun_records_its_attempt(tmp_path, monkeypatch, capsys):
+    """The cron retries a commit with infra errors once; the summary counts the
+    attempts so the next tick knows the retry was spent."""
+    import json
+    import sys
+    import commit_meta
+    import storage
+    store = FakeStore({"regression/runs/master/new/summary.json": {
+        "commit": "new", "overall": "pass", "has_infra_error": True,
+        "workflows": {"sdxl_t2i": {"verdict": "infra_error"}}}})
+    monkeypatch.setattr(storage, "from_args", lambda args: store)
+    monkeypatch.setattr(commit_meta, "fetch_commit_meta", lambda sha: None)
+    monkeypatch.setattr(run_regression, "process_workflow",
+                        lambda wf_id, *a: {"workflow_id": wf_id, "worker_status": "ok",
+                                           "verdict": "pass", "detail": None})
+    out = tmp_path / "summary.json"
+    monkeypatch.setattr(sys, "argv", ["run_regression.py", "--commit", "new", "--branch", "master",
+                                      "--workflows", "sdxl_t2i", "--skip-publish",
+                                      "--summary-out", str(out)])
+    assert run_regression.main() == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["attempt"] == 2
+    assert "this is attempt 2" in capsys.readouterr().out
+    # A later marker (a retry that died before publishing) raises the count.
+    store.files["regression/runs/master/new/attempt.json"] = {"attempt": 2}
+    assert run_regression.main() == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["attempt"] == 3
+
+
+def test_the_start_marker_is_pushed_before_any_gpu_job(tmp_path, monkeypatch):
+    """A run that dies after its GPU jobs (here: the results push fails) has
+    already pushed its attempt marker, so the cron can count it."""
+    import sys
+    import commit_meta
+    import storage
+    events = []
+
+    class RecordingStore(FakeStore):
+        def snapshot_manifest(self, commit, manifest):
+            events.append("snapshot")
+
+        def mark_attempt(self, branch, commit, marker):
+            events.append(("marker", branch, commit, marker["attempt"], marker["lane"],
+                           marker.get("run_url")))
+
+        def checkpoint(self, message):
+            events.append(("checkpoint", message))
+
+        def publish_summary(self, branch, commit, summary):
+            raise RuntimeError("could not push results")
+
+    store = RecordingStore({"regression/runs/master/new/attempt.json": {"attempt": 1}})
+    monkeypatch.setattr(storage, "from_args", lambda args: store)
+    monkeypatch.setattr(commit_meta, "fetch_commit_meta", lambda sha: None)
+    monkeypatch.setenv("GITHUB_SERVER_URL", "https://github.com")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "Comfy-Org/comfyci-runpod-worker")
+    monkeypatch.setenv("GITHUB_RUN_ID", "42")
+
+    def gpu(wf_id, *a):
+        events.append(("gpu", wf_id))
+        return {"workflow_id": wf_id, "worker_status": "ok", "verdict": "pass", "detail": None}
+
+    monkeypatch.setattr(run_regression, "process_workflow", gpu)
+    monkeypatch.setattr(sys, "argv", ["run_regression.py", "--commit", "new", "--branch", "master",
+                                      "--workflows", "sdxl_t2i"])
+    with pytest.raises(RuntimeError, match="could not push results"):
+        run_regression.main()
+    run_url = "https://github.com/Comfy-Org/comfyci-runpod-worker/actions/runs/42"
+    # Attempt 1 left only its marker, so this is attempt 2.
+    assert events == ["snapshot", ("marker", "master", "new", 2, "main", run_url),
+                      ("checkpoint", "regression master@new: attempt 2 started"),
+                      ("gpu", "sdxl_t2i")]
+
+
+def test_a_marker_that_cannot_be_pushed_stops_the_run_before_the_gpu(tmp_path, monkeypatch):
+    import sys
+    import commit_meta
+    import storage
+
+    class NoPushStore(FakeStore):
+        def snapshot_manifest(self, commit, manifest):
+            pass
+
+        def mark_attempt(self, branch, commit, marker):
+            pass
+
+        def checkpoint(self, message):
+            raise RuntimeError("could not push checkpoint")
+
+    monkeypatch.setattr(storage, "from_args", lambda args: NoPushStore({}))
+    monkeypatch.setattr(commit_meta, "fetch_commit_meta", lambda sha: None)
+    monkeypatch.setattr(run_regression, "process_workflow",
+                        lambda *a: pytest.fail("no GPU job without a pushed marker"))
+    monkeypatch.setattr(sys, "argv", ["run_regression.py", "--commit", "new", "--branch", "master",
+                                      "--workflows", "sdxl_t2i"])
+    with pytest.raises(RuntimeError, match="could not push checkpoint"):
+        run_regression.main()
 
 
 def test_summary_out_is_not_written_when_publishing_fails(tmp_path, monkeypatch):
@@ -112,6 +233,12 @@ def test_summary_out_is_not_written_when_publishing_fails(tmp_path, monkeypatch)
 
     class BrokenStore(FakeStore):
         def snapshot_manifest(self, commit, manifest):
+            pass
+
+        def mark_attempt(self, branch, commit, marker):
+            pass
+
+        def checkpoint(self, message):
             pass
 
         def publish_summary(self, branch, commit, summary):
@@ -146,7 +273,7 @@ def test_lane_filter_skips_workflows_restricted_to_other_lanes(tmp_path, monkeyp
             "sdxl_t2i": {"enabled": True, "workflow_path": "x", "models": []},
             "kjnodes_sdxl_t2i": {"enabled": True, "workflow_path": "x", "models": [],
                                  "custom_nodes": ["ComfyUI-KJNodes"],
-                                 "lanes": ["py313-torch2.14.1-cu130"]},
+                                 "lanes": ["other"]},
         }}))
     monkeypatch.setattr(storage, "from_args", lambda args: FakeStore({}))
     monkeypatch.setattr(commit_meta, "fetch_commit_meta", lambda sha: None)
@@ -156,16 +283,16 @@ def test_lane_filter_skips_workflows_restricted_to_other_lanes(tmp_path, monkeyp
                                                                 "verdict": "pass", "detail": None})
     out = tmp_path / "summary.json"
     monkeypatch.setattr(sys, "argv", ["run_regression.py", "--manifest", str(manifest), "--commit", "new",
-                                      "--branch", "master", "--lane", "py312-torch2.11.0-cu128",
+                                      "--branch", "master", "--lane", "main",
                                       "--workflows", "sdxl_t2i,kjnodes_sdxl_t2i",
                                       "--skip-publish", "--summary-out", str(out)])
     assert run_regression.main() == 0
     assert ran == ["sdxl_t2i"]
     assert set(json.loads(out.read_text())["workflows"]) == {"sdxl_t2i"}
-    assert "[kjnodes_sdxl_t2i] not run on lane py312-torch2.11.0-cu128" in capsys.readouterr().out
+    assert "[kjnodes_sdxl_t2i] not run on lane main" in capsys.readouterr().out
 
     monkeypatch.setattr(sys, "argv", ["run_regression.py", "--manifest", str(manifest), "--commit", "new",
-                                      "--branch", "master", "--lane", "py312-torch2.11.0-cu128",
+                                      "--branch", "master", "--lane", "main",
                                       "--workflows", "kjnodes_sdxl_t2i", "--skip-publish"])
     assert run_regression.main() == 0
     assert ran == ["sdxl_t2i"]
@@ -176,3 +303,22 @@ def test_custom_node_errors_are_execution_failures():
     assert "custom_node_error" in run_regression.EXEC_FAIL_STATUSES
     assert "custom_node_install_error" in run_regression.INFRA_STATUSES
     assert not run_regression.EXEC_FAIL_STATUSES & run_regression.INFRA_STATUSES
+
+
+def test_a_retired_lane_runs_nothing(monkeypatch):
+    """A retired lane is refused before any GPU job, named or reached through
+    the default prefix; its endpoint is scaled to zero."""
+    import sys
+    import storage
+    reg = {"primary": "new", "lanes": {
+        "old": {"cadence": "retired", "role": "legacy", "layout": 1, "prefix": "regression",
+                "endpoint_id": "ep-old"},
+        "new": {"cadence": "per-commit", "role": "primary", "layout": 2,
+                "prefix": "regression/lanes/new", "endpoint_id": "ep-new"}}}
+    monkeypatch.setattr(index_builder, "load_lanes", lambda path=None: reg)
+    monkeypatch.setattr(storage, "from_args", lambda args: pytest.fail("no store for a retired lane"))
+    for extra in (["--lane", "old"], []):
+        monkeypatch.setattr(sys, "argv", ["run_regression.py", "--commit", "new", "--branch", "master",
+                                          "--skip-publish", *extra])
+        with pytest.raises(SystemExit, match="lane 'old' is retired.*the primary is 'new'"):
+            run_regression.main()

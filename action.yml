@@ -29,6 +29,13 @@ inputs:
     description: ComfyUI repo url override (forks / PR testing)
     required: false
     default: ''
+  lane:
+    description: >
+      Lane id from manifest/lanes.json to run on (normally its `primary`).
+      Empty means the lane of the default `regression` prefix, which is retired,
+      so the run would be refused.
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
@@ -60,4 +67,5 @@ runs:
           --workflows "${{ inputs.workflows }}" \
           --results-workdir "$RUNNER_TEMP/results-checkout" \
           ${{ inputs.gcs-bucket != '' && format('--bucket {0}', inputs.gcs-bucket) || '' }} \
-          ${{ inputs.repo-url != '' && format('--repo-url {0}', inputs.repo-url) || '' }}
+          ${{ inputs.repo-url != '' && format('--repo-url {0}', inputs.repo-url) || '' }} \
+          ${{ inputs.lane != '' && format('--lane {0}', inputs.lane) || '' }}

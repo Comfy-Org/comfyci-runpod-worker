@@ -84,6 +84,11 @@ class Storage:
         """Called once after all writes; git backend commits + pushes here."""
         self._run_derived()
 
+    def checkpoint(self, message: str):
+        """Publish what has been written so far, before the long part of a run,
+        so it survives the run dying later. Derived writers wait for
+        finalize(). A no-op where every write is already published."""
+
     # -- layout helpers shared by all backends ------------------------------
     @property
     def root(self) -> str:
@@ -104,6 +109,18 @@ class Storage:
 
     def run_summary(self, branch: str, commit: str) -> dict | None:
         return self.download_json(f"{self.prefix}/runs/{branch}/{commit}/summary.json")
+
+    def published_summary(self, branch: str, commit: str) -> dict | None:
+        """The summary a commit already has, read without materialising its run
+        directory (a re-run is about to replace those outputs anyway)."""
+        return self.read_blob_json(f"{self.prefix}/runs/{branch}/{commit}/summary.json")
+
+    def attempt_marker(self, branch: str, commit: str) -> dict | None:
+        """The start marker the latest run of a commit pushed before its GPU jobs."""
+        return self.read_blob_json(f"{self.prefix}/runs/{branch}/{commit}/attempt.json")
+
+    def mark_attempt(self, branch: str, commit: str, marker: dict):
+        self.upload_json(f"{self.prefix}/runs/{branch}/{commit}/attempt.json", marker)
 
     def fetch_run_outputs(self, branch: str, commit: str, workflow_id: str,
                           dest: Path) -> int:
@@ -336,14 +353,21 @@ class GitHubStorage(Storage):
         if not self._commit(message):
             print("storage: nothing new to publish")
             return
+        self._push(message, "results", derived=True)
+
+    def checkpoint(self, message: str):
+        if self._commit(message):
+            self._push(message, "checkpoint", derived=False)
+
+    def _push(self, message: str, what: str, derived: bool):
         url = self._url(True)
         for attempt in range(1, self.PUSH_ATTEMPTS + 1):
             r = self._git("push", "-q", url, f"HEAD:refs/heads/{self.branch}", check=False)
             if r.returncode == 0:
-                print(f"storage: pushed results to {self.repo_slug}@{self.branch}")
+                print(f"storage: pushed {what} to {self.repo_slug}@{self.branch}")
                 return
             if attempt == self.PUSH_ATTEMPTS:
-                raise RuntimeError(f"could not push results: {r.stderr[-500:]}")
+                raise RuntimeError(f"could not push {what}: {r.stderr[-500:]}")
             # The remote advanced under us (concurrent publisher). Commit-scoped
             # files cannot conflict, so re-apply them on top of the new remote
             # head; derived files are regenerated from that head instead of
@@ -356,7 +380,8 @@ class GitHubStorage(Storage):
                 f = self._p(path)
                 f.parent.mkdir(parents=True, exist_ok=True)
                 f.write_bytes(data)
-            self._run_derived()
+            if derived:
+                self._run_derived()
             self._commit(message)
             time.sleep(2 + random.uniform(0, 3))
 

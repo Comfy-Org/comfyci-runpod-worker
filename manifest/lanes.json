@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "primary": "py312-torch2.11.0-cu128",
+  "primary": "py313-torch2.14.1-cu130",
   "endpoint_defaults": {
     "gpu_pools": [
       "ADA_24"
@@ -36,13 +36,20 @@
       "torch_index": "https://download.pytorch.org/whl/cu128",
       "torch_spec": "torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0",
       "build": false,
-      "note": "Built before images were data; its endpoint stays on the sha tag it runs today (5564e37) until the lane retires, so it is not rebuilt."
+      "note": "Built before images were data and never rebuilt. Its lane is retired: the endpoint stays on the sha tag it last ran (5564e37), scaled to 0 workers, and only the published history is used."
     },
     "cu130-t2141": {
       "python": "3.13",
       "cuda": "13.0",
       "torch_index": "https://download.pytorch.org/whl/cu130",
       "torch_spec": "torch==2.14.1 torchvision==0.29.1"
+    },
+    "cu132-t2150": {
+      "python": "3.13",
+      "cuda": "13.2",
+      "torch_index": "https://download.pytorch.org/whl/cu132",
+      "torch_spec": "torch==2.15.0 torchvision==0.29.2",
+      "note": "torchvision 0.29.2 is a single py3-none wheel for torch>=2.14 (there is no 0.30). Python 3.13 on purpose: 3.14 needs an opencv/numpy bump in custom_nodes.json, which would also move the cu130 image."
     }
   },
   "lanes": {
@@ -52,9 +59,9 @@
       "torch": "2.11.0",
       "cuda": "12.8",
       "gpu": "RTX 4090",
-      "cadence": "per-commit",
-      "blocking": true,
-      "role": "primary",
+      "cadence": "retired",
+      "blocking": false,
+      "role": "legacy",
       "layout": 1,
       "prefix": "regression",
       "image": "cu128-t2110",
@@ -67,13 +74,28 @@
       "cuda": "13.0",
       "gpu": "RTX 4090",
       "cadence": "per-commit",
-      "blocking": false,
-      "role": "lane",
+      "blocking": true,
+      "role": "primary",
       "layout": 2,
       "prefix": "regression/lanes/py313-torch2.14.1-cu130",
       "image": "cu130-t2141",
       "endpoint_id": "2192t0ar23kdb5",
       "min_cuda_driver": "13.0"
+    },
+    "py313-torch2.15.0-cu132": {
+      "label": "py3.13 / torch 2.15.0 / cu132 / RTX 4090",
+      "python": "3.13",
+      "torch": "2.15.0",
+      "cuda": "13.2",
+      "gpu": "RTX 4090",
+      "cadence": "per-commit",
+      "blocking": false,
+      "role": "lane",
+      "layout": 2,
+      "prefix": "regression/lanes/py313-torch2.15.0-cu132",
+      "image": "cu132-t2150",
+      "endpoint_id": null,
+      "min_cuda_driver": "13.2"
     }
   }
 }

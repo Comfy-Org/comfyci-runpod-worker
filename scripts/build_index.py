@@ -5,7 +5,7 @@ tool if an index file ever needs regenerating. Normal runs maintain the index
 incrementally from run_regression.py.
 
 Usage:
-  python build_index.py --branch master [--lane py312-torch2.11.0-cu128] [--no-meta]
+  python build_index.py --branch master [--lane py313-torch2.14.1-cu130] [--no-meta]
 Env: GITHUB_TOKEN for commit metadata lookups and (github storage) the push.
 """
 from __future__ import annotations

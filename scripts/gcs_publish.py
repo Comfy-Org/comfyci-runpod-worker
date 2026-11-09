@@ -3,6 +3,7 @@
 Layout under gs://<bucket>/<prefix>/ (prefix defaults to "regression"):
   runs/<branch>/<commit>/<workflow_id>/{outputs/, run.json, comparison.json, figures/}
   runs/<branch>/<commit>/summary.json
+  runs/<branch>/<commit>/attempt.json   -- start marker, written before the GPU jobs
   latest/<branch>.json                  -- pointer to the newest complete run, written LAST
   manifest-snapshot/<commit>.json
   golden/<workflow_id>/<tag>/{outputs/, run_r1.json, run_r2.json, noise_floor.json, blessed.json}

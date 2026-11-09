@@ -114,7 +114,8 @@ this repo per template.
    missing weights without telling you anything new.
 
 4. Merge. `sync-models.yml` downloads the new models onto the network volume
-   automatically.
+   automatically, through a one-shot job on the primary lane's endpoint (every
+   lane shares the volume, so one sync serves them all).
 5. Generate + bless a golden for it: run the **Golden baselines** workflow with
    the current release tag and `workflows: <id>`, inspect, bless.
 6. Flip `"enabled": true` in a follow-up PR.
@@ -132,6 +133,25 @@ this repo per template.
 Thresholds come from the manifest entry if set, otherwise from the manifest
 defaults loosened to 3× the golden's own re-run noise floor
 (`noise_floor.json`), so nondeterministic workflows don't false-alarm.
+
+Each commit is tested once per lane. The cron (every 30 minutes) skips master
+HEAD on a lane as soon as that lane has published a `summary.json` for it,
+whatever the verdict: a red commit stays red until master moves, it is not
+re-run every tick. Before it submits any GPU job, every run pushes a start
+marker, `runs/master/<sha>/attempt.json` (attempt number, Actions run URL), so
+a run that dies before publishing its summary (a failed results push, a killed
+job) is still counted. A summary with infra errors, or a marker with no
+summary, gets one more attempt: two in all per commit per lane, counted in the
+summary's and the marker's `attempt`. A run that cannot push its marker stops
+before any GPU work. To test a commit again on purpose, dispatch **GPU
+regression** with `commit=<sha>` (and `lane=` for one lane), when no GPU
+regression run is in progress, or check afterwards that the dispatch ran:
+all runs share one concurrency group, and GitHub cancels a pending run as
+soon as a newer one (the next cron tick) queues behind the running one. The
+decision lives in `scripts/regression_skip.py`. The cron used to key on the
+previous-run pointer, which does not advance on execution errors, so a red
+HEAD was re-run on both lanes every half hour (53 runs for 11 commits during
+the 2026-11-03/04 z_image timeouts).
 
 A failure vs golden is also classified against the previous tested run
 (`detail` in `summary.json`): `new_drift` when this commit's outputs differ
@@ -241,6 +261,28 @@ tests) keeps the file consistent. Goldens are per lane: cu130+ images enable
 comfy-kitchen kernels that cu128 cannot, so a new lane always starts with its
 own baselines.
 
+Today's lanes:
+
+| Lane | Image | Role | Cadence |
+|---|---|---|---|
+| `py313-torch2.14.1-cu130` | `cu130-t2141` | primary, blocking | per-commit |
+| `py313-torch2.15.0-cu132` | `cu132-t2150` | lane, informational | per-commit (from its first endpoint) |
+| `py312-torch2.11.0-cu128` | `cu128-t2110` (never rebuilt) | legacy | retired: history only |
+
+- **Role**: exactly one lane is `primary`, the one `primary` names. It is the
+  lane PULSE comments for, the one the dashboard opens on, and the endpoint
+  the model sync runs on, so `validate` requires it to be per-commit. The
+  others are `lane`, or `legacy` for a lane whose endpoint is never repointed
+  automatically.
+- **Cadence**: `per-commit` lanes with an `endpoint_id` run on every new master
+  commit. `nightly` and `weekly` are accepted but nothing schedules them yet.
+  `retired` means history only: the lane stays out of the per-commit matrix
+  (even with `lane=`), of image builds and repoints, and `run_regression.py`,
+  golden generation and `runpod_endpoints.py create/set-image` refuse it.
+  Blessing or promoting its goldens still works (storage only).
+- **`blocking`** is informational: it is shown on the dashboard, and nothing
+  gates ComfyUI merges on it.
+
 A workflow can restrict itself to lanes with `lanes` in
 `manifest/workflows.json` (a list of lane ids; null, the default, means every
 lane). `run_regression.py`, `golden_baseline.py` and the per-commit plan
@@ -248,15 +290,48 @@ lane). `run_regression.py`, `golden_baseline.py` and the per-commit plan
 the workflow is named explicitly, and the dashboard shows a skipped cell as
 not run. Workflows that need custom-node packs must use it (see below).
 
-Adding a lane:
+**Always pass `lane=`** to **Golden baselines** and **Build run index**: left
+empty, they resolve to the lane that owns the bare `regression` prefix
+(layout 1), which is the retired cu128 lane.
+
+### Adding a lane
+
+The cu132 lane is the worked example.
 
 1. Add the image under `images` (python, cuda, `torch_index`, `torch_spec`
    with exact torch and torchvision pins; no torchaudio, ComfyUI dropped it)
    and the lane under `lanes` with `"endpoint_id": null`, `layout: 2` and
-   `prefix: regression/lanes/<lane id>`. Merge.
+   `prefix: regression/lanes/<lane id>`:
+
+   ```json
+   "cu132-t2150": {"python": "3.13", "cuda": "13.2",
+                   "torch_index": "https://download.pytorch.org/whl/cu132",
+                   "torch_spec": "torch==2.15.0 torchvision==0.29.2"}
+
+   "py313-torch2.15.0-cu132": {"label": "py3.13 / torch 2.15.0 / cu132 / RTX 4090",
+     "python": "3.13", "torch": "2.15.0", "cuda": "13.2", "gpu": "RTX 4090",
+     "cadence": "per-commit", "blocking": false, "role": "lane", "layout": 2,
+     "prefix": "regression/lanes/py313-torch2.15.0-cu132", "image": "cu132-t2150",
+     "endpoint_id": null, "min_cuda_driver": "13.2"}
+   ```
+
+   Check the pins on the index first: torchvision does not always have a
+   release per torch release (torch 2.15.0 pairs with torchvision 0.29.2, a
+   single `py3-none` wheel for torch 2.14 and later; there is no 0.30). Add
+   the lane to the `lanes` filter of the pack workflows if they should run
+   there. `min_cuda_driver` is the endpoint's host driver floor; RunPod's
+   serverless 4090 hosts report CUDA 13.2 (driver 595.x). Merge, or build and
+   provision from the branch first (see the cu132 order below).
 2. `build-image.yml` builds every buildable image on push to main (or dispatch
    it from the branch with the image id) and tags it `:<image>` and
-   `:<image>-<sha>`.
+   `:<image>-<sha>`. Every image CI builds bakes every pack in
+   `manifest/custom_nodes.json`, so a pack requirement that does not install
+   on the lane's Python breaks the build. **Python 3.14**: the registry's
+   `opencv-python(-headless)==4.12.0.88` pin needs `numpy<2.3`, and no numpy
+   below 2.3.2 has cp314 wheels, so a 3.14 image needs the opencv pin bumped
+   (4.13.0.92 or later, never 4.13.0.90). That pin is global, so the bump
+   also moves the cu130 image (numpy and opencv) and needs its pack goldens
+   checked; that is why the cu132 lane stays on 3.13.
 3. Create the serverless endpoint from the `:<image>-<sha>` tag, once, by hand
    (it is the one billable step; idle endpoints cost nothing at 0 minimum
    workers):
@@ -269,9 +344,11 @@ Adding a lane:
    The request comes from `endpoint_defaults` in `lanes.json` (pool, workers,
    volume, data center, registry credential, timeouts) plus the lane's CUDA
    floor; `--dry-run` prints it, `--write` records the new id as the lane's
-   `endpoint_id`. Commit that. From then on `build-image.yml` repoints the lane
-   at each new sha tag (`runpod_endpoints.py set-image`); the legacy lane is
-   never moved. A repoint is a rolling release: workers already running the
+   `endpoint_id`. Commit that. The account has a 10-worker quota across all
+   endpoints; if the create is refused, give the lane `"workers_max": 2`.
+   From then on `build-image.yml` repoints the lane at each new sha tag
+   (`runpod_endpoints.py set-image`); legacy and retired lanes are never
+   moved. A repoint is a rolling release: workers already running the
    old image keep serving jobs until RunPod replaces them, which can take a
    long time when the new image is large and the new workers sit throttled
    behind them, so a run right after a repoint may silently use the old image
@@ -284,6 +361,120 @@ Adding a lane:
 5. The per-commit cron picks the lane up on its next tick (a lane with a null
    `endpoint_id` is skipped), and ci.comfy.org lists it in the lane selector
    after the first publish.
+
+### Changing the primary lane
+
+1. In `lanes.json`, set `primary` to the new lane, give it `role: primary`
+   (and `blocking: true`), and move the old primary to `role: lane` or
+   `legacy`. `validate` refuses a primary that is not per-commit or not in the
+   primary role, and a second lane in that role. The new primary needs its
+   goldens blessed and an `endpoint_id`.
+2. What follows the flip on merge: PULSE comments for the new primary only,
+   its run links lose the `?lane=` suffix, the dashboard opens on it, and the
+   model sync runs on its endpoint (`scripts/sync_models.py`; the
+   `RUNPOD_ENDPOINT_ID` secret is only a fallback when the primary has no
+   endpoint).
+3. The run index (`index/lanes.json`) picks the new primary up at the next
+   publish. To publish it at once, dispatch **Build run index** with
+   `branch=master` and `lane=<new primary>` (CPU only).
+
+### Retiring a lane
+
+Keep the lane in `lanes.json`: its history stays readable only while the
+registry still describes it (a removed lane's index entry freezes with its
+last role, and every default-prefix path breaks if the layout-1 lane goes).
+
+1. Set `cadence: retired` and `role: legacy` (and `blocking: false`). Keep
+   `layout`, `prefix`, its image entry and its `endpoint_id`. If it was the
+   primary, change the primary first (above).
+2. Merge. The cron stops testing it at the next tick; image builds and
+   repoints leave it alone.
+3. Scale its endpoint to max 0 workers in the RunPod console, once no GPU
+   regression run that started before the merge is still using it. Do not
+   delete it yet: an idle endpoint costs nothing and max 0 frees its share of
+   the worker quota. ci.comfy.org needs to know the `retired` cadence, or it
+   shows the lane as stale a day after its last run.
+4. The model sync already follows the primary, so nothing depends on the
+   retired endpoint. From now on always pass `lane=` to **Golden baselines**
+   and **Build run index**.
+
+### Moving from cu128 to cu132 (operational order)
+
+The PR that makes cu130 the primary, retires cu128 and adds the cu132 lane,
+in order:
+
+1. Deploy the dashboard's support for the `retired` cadence (comfyci-dashboard,
+   "Handle retired lanes and share lane ordering") first, before the bless in
+   step 4. That bless is the first publish of the branch's registry to
+   `index/lanes.json`: cu130 as the primary and cu128 as `retired`, `legacy`
+   and informational, while main still tests cu128 as its blocking primary.
+   Without that support the dashboard only knows per-commit, nightly and
+   weekly: its lane selector captions cu128 "retired · informational", its
+   lane page turns amber after 24 hours without a run ("no run in the last
+   24 h on this retired lane") and adds "the worker may be stalled" after 48,
+   and the frontend lane caption calls it "every core commit". Main's next
+   publish restores cu128's old entry; the first publish after the merge
+   (step 5) retires it for good.
+2. Build the cu132 image from the branch (CPU, GitHub-hosted):
+   `gh workflow run build-image.yml --ref lanes-cu132 -f images=cu132-t2150 -f repoint=false`.
+   It is tagged `cu132-t2150-<branch head sha>`.
+3. Create the endpoint and record it on the branch:
+
+   ```
+   python scripts/runpod_endpoints.py create \
+       --lane py313-torch2.15.0-cu132 --tag cu132-t2150-<sha> --dry-run
+   RUNPOD_API_KEY=... python scripts/runpod_endpoints.py create \
+       --lane py313-torch2.15.0-cu132 --tag cu132-t2150-<sha> --write
+   ```
+
+   Commit and push the `lanes.json` change to the branch. 3 + 3 + 3 workers
+   plus comfy-pulse's 1 fills the 10-worker quota exactly; if the create is
+   refused, add `"workers_max": 2` to the lane for the create rather than
+   scaling cu128 down while it is still the primary on main, and take it out
+   again before you commit the `endpoint_id` (step 7 raises the endpoint to
+   3). Only `create` reads `workers_max`, so dropping it changes nothing on
+   the endpoint and a re-create gets 3, whereas dropping it after the merge
+   is one more `lanes.json` change on main, which rebuilds both images and
+   repoints both lanes again.
+4. Generate goldens from the branch (a fresh endpoint has no stale workers):
+   `gh workflow run golden-baseline.yml --ref lanes-cu132 -f lane=py313-torch2.15.0-cu132 -f ref=v0.42.0 -f workflows=all -f bless=false`
+   (v0.42.0 is the tag the cu130 goldens use). Inspect
+   `regression/lanes/py313-torch2.15.0-cu132/golden/<workflow>/v0.42.0/` on the
+   results branch, then bless:
+   `gh workflow run golden-baseline.yml --ref lanes-cu132 -f lane=py313-torch2.15.0-cu132 -f ref=v0.42.0 -f workflows=all -f bless_only=true -f reason="cu132 lane baseline"`.
+   A bless from the branch publishes the branch's registry to
+   `index/lanes.json` (cu130 primary, cu128 retired; hence step 1) until
+   main's next publish rewrites it; step 9 makes it stick.
+5. Merge. That starts **Build worker images** (rebuilds `cu130-t2141` and
+   `cu132-t2150` from scratch, then repoints both lanes) and **Sync models**
+   (on the cu130 endpoint), and the cron stops testing cu128 from its next
+   tick. Wait for both runs to finish.
+6. Expect the cron to test master HEAD on cu132 within 30 minutes of the
+   merge, before the repoint or before the stale workers are flushed, so on
+   the branch's image or a mix of old and new workers. A commit is tested
+   once per lane, so the cron does not test it again on the rebuilt image;
+   step 8 does.
+7. When no **GPU regression**, **Golden baselines** or **Sync models** run is
+   in progress (max workers 0 empties an endpoint's worker list within
+   seconds, cutting off any job a worker is running):
+   - scale the cu128 endpoint `xwdhxbhd9qixjj` to max 0 workers. Keep it and
+     its `endpoint_id`; nothing runs on it any more, and this frees its 3
+     workers of the quota;
+   - flush stale workers on the cu130 and cu132 endpoints: max workers 0,
+     then back to the previous max. If the cu132 endpoint was created with
+     max 2 (step 3), raise it to 3 now that cu128 is at 0;
+   - check that `isStale` is gone from both worker lists.
+8. Test master HEAD on the rebuilt images, both lanes in one run (no `lane=`):
+   `gh workflow run regression.yml -f commit=<master HEAD sha>`. Check that
+   the run is not cancelled (a cron tick that queues behind a running run
+   cancels a pending dispatch; dispatch it again if so). In each lane's
+   `runs/master/<sha>/summary.json`, every workflow's `env.image_sha` must
+   equal the merge commit, the sha in the new `-<sha>` image tags; one that
+   does not ran on a stale worker: flush again and re-dispatch. Re-bless
+   drifted workflows with `from_run`.
+9. Publish the primary flip: `gh workflow run build-index.yml -f branch=master -f lane=py313-torch2.14.1-cu130`.
+10. The `RUNPOD_ENDPOINT_ID` secret (set 2026-08-18, so the cu128 endpoint) is
+    now only the sync's fallback: point it at the cu130 endpoint or delete it.
 
 ## Custom-node packs
 
@@ -454,18 +645,32 @@ with Actions read on the frontend repo) is optional and reserved for phase 2
    availability), then one serverless endpoint per lane from its image with
    the volume attached (see *Lanes*). Optionally set `HF_TOKEN` as an endpoint
    env var for gated models.
-3. **Repo secrets** (this repo): `RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID`, and
-   optionally `HF_TOKEN` (gated models) and `PULSE_GH_TOKEN` (PR comments,
-   see above). For the GCS phase, additionally
+3. **Repo secrets** (this repo): `RUNPOD_API_KEY`, and optionally `HF_TOKEN`
+   (gated models; sent with the sync job) and `PULSE_GH_TOKEN` (PR comments,
+   see above). Every lane names its endpoint in `manifest/lanes.json`;
+   `RUNPOD_ENDPOINT_ID` is only a fallback for the model sync when the primary
+   lane has no `endpoint_id`. For the GCS phase, additionally
    `GCS_SERVICE_ACCOUNT_JSON` (write access to the CI bucket) and `GCS_BUCKET`
    (`comfy-ci-results`).
-4. **Seed the volume**: run `sync-models.yml` (workflow_dispatch).
-5. **First goldens**: run **Golden baselines** with the latest release tag and
-   `bless: true`.
+4. **Seed the volume**: run `sync-models.yml` (workflow_dispatch). The sync
+   runs on the primary lane's endpoint (`scripts/sync_models.py`). Only one
+   endpoint may write the network volume at a time: the workflow is a single
+   concurrency group, so a sync queued while another runs waits for it, and
+   never start a sync by other means (another endpoint, a pod) while one is
+   running. GitHub keeps only one waiting run per group: a newer queued sync
+   cancels an older waiting one. Each sync fetches every model of the
+   manifest it checked out, so a later sync from main covers an earlier one,
+   but a sync dispatched from a branch (`--ref <branch>`, to stage models
+   before a merge) does not: run the sync from main again after it.
+   Regression and golden jobs only read the volume and can run alongside a
+   sync.
+5. **First goldens**: run **Golden baselines** with the latest release tag,
+   `lane: <lane id>` and `bless: true`.
 6. Done — `regression.yml` now tests each new master commit on its own.
 7. **(GCS phase) Wire into core CI**: add the job below to ComfyUI's
-   `.github/workflows/test-ci.yml` plus the `RUNPOD_API_KEY` /
-   `RUNPOD_ENDPOINT_ID` secrets there, and retire the scheduled poller:
+   `.github/workflows/test-ci.yml` plus the `RUNPOD_API_KEY` secret there, and
+   retire the scheduled poller. Pass the lane (the action's default resolves
+   to the retired layout-1 lane and is refused):
 
 ```yaml
   gpu-regression:
@@ -477,9 +682,9 @@ with Actions read on the frontend repo) is optional and reserved for phase 2
           comfy-commit: ${{ github.sha }}
           branch: ${{ github.ref_name }}
           gcs-bucket: comfy-ci-results
+          lane: py313-torch2.14.1-cu130   # `primary` in manifest/lanes.json
         env:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
-          RUNPOD_ENDPOINT_ID: ${{ secrets.RUNPOD_ENDPOINT_ID }}
           GCS_SERVICE_ACCOUNT_JSON: ${{ secrets.GCS_SERVICE_ACCOUNT_JSON }}
 ```
 
@@ -493,6 +698,7 @@ regression/
                                            # figures/ only when the frames differ and the
                                            # failure is not inherited
   runs/<branch>/<commit>/summary.json      # per-commit rollup (dashboard entrypoint)
+  runs/<branch>/<commit>/attempt.json      # start marker, pushed before the GPU jobs
   latest/<branch>.json                     # previous-run pointer, written last
   manifest-snapshot/<commit>.json
   golden/<workflow_id>/<tag>/{outputs/, run_r1.json, run_r2.json, noise_floor.json, blessed.json}
