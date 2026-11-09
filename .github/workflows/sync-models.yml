@@ -9,7 +9,11 @@ on:
     paths: ['manifest/**']
   workflow_dispatch:
 
-# One writer on the volume at a time: a second sync waits for the first.
+# One writer on the volume at a time: a sync queued while another runs waits
+# for it. GitHub keeps only one waiting run per group, so a newer queued sync
+# cancels an older waiting one. Each sync fetches every model of the manifest
+# it checked out, so a later sync from main covers an earlier one; a sync
+# dispatched from a branch does not, so run the sync from main again after it.
 concurrency:
   group: sync-models
   cancel-in-progress: false

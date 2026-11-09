@@ -617,9 +617,15 @@ with Actions read on the frontend repo) is optional and reserved for phase 2
 4. **Seed the volume**: run `sync-models.yml` (workflow_dispatch). The sync
    runs on the primary lane's endpoint (`scripts/sync_models.py`). Only one
    endpoint may write the network volume at a time: the workflow is a single
-   concurrency group, so never start a second sync by hand (or from another
-   endpoint) while one is running; regression and golden jobs only read the
-   volume and can run alongside it.
+   concurrency group, so a sync queued while another runs waits for it, and
+   never start a sync by other means (another endpoint, a pod) while one is
+   running. GitHub keeps only one waiting run per group: a newer queued sync
+   cancels an older waiting one. Each sync fetches every model of the
+   manifest it checked out, so a later sync from main covers an earlier one,
+   but a sync dispatched from a branch (`--ref <branch>`, to stage models
+   before a merge) does not: run the sync from main again after it.
+   Regression and golden jobs only read the volume and can run alongside a
+   sync.
 5. **First goldens**: run **Golden baselines** with the latest release tag,
    `lane: <lane id>` and `bless: true`.
 6. Done — `regression.yml` now tests each new master commit on its own.
