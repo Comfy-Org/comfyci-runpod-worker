@@ -1,7 +1,9 @@
 # comfyci-runpod-worker
 
 GPU regression testing for [ComfyUI](https://github.com/Comfy-Org/ComfyUI) on
-[RunPod serverless](https://docs.runpod.io/serverless/overview), feeding
+[RunPod serverless](https://docs.runpod.io/serverless/overview). Every result
+is shown in the Actions run that produced it (see
+[What a run shows](#what-a-run-shows)); the same data feeds
 [ci.comfy.org](https://ci.comfy.org/).
 
 For every new commit on ComfyUI master, the [GPU regression](.github/workflows/regression.yml)
@@ -15,7 +17,8 @@ time), then compares the fixed-seed outputs against two baselines:
 
 Metrics (per frame): MSE, PSNR mean/min, max abs channel diff, % pixels
 changed, plus diff heatmaps and side-by-side strips. Everything is published
-under `regression/` where the dashboard reads it.
+under `regression/`. The run's own job summaries are rendered from there, and
+the dashboard reads the same files.
 
 ## Results storage
 
@@ -44,7 +47,8 @@ pick with `--storage` / `REGRESSION_STORAGE`):
 | `.github/workflows/build-index.yml` | Backfills or repairs the run index for a branch/lane (workflow_dispatch) |
 | `scripts/` | Orchestration run on the (CPU) CI runner: submit/poll, compare, publish, golden generation |
 | `scripts/template_api_export.py`, `scripts/import_template.py` | Turn a workflow template into a corpus entry (see [Adding a workflow](#adding-a-workflow)) |
-| `.github/workflows/regression.yml` | Scheduled poller that tests each new master commit (interim, until the core CI job below) |
+| `.github/workflows/regression.yml` | Scheduled poller that tests each new master commit on every per-commit lane and reports the results in the run: one job summary per lane, one for all lanes, and the run's files as an artifact (interim, until the core CI job below) |
+| `scripts/run_report.py` | Renders those job summaries from the results branch (see [What a run shows](#what-a-run-shows)) |
 | `action.yml` | Composite action for ComfyUI's `test-ci.yml` (GCS phase) |
 
 ## Adding a workflow
@@ -162,9 +166,96 @@ previous run that did not fail (the golden changed, not the code). Inherited
 failures publish no figures (`figures: false`): the figures of the first
 failing commit already show the diff. `summary.json` carries
 `schema_version: 2` and `has_infra_error` (infra errors never turn `overall`
-red). Each workflow also records `prior_verdict` / `prior_commit`: its most
-recent red or green verdict before this commit, read from the run index, which
-(unlike the previous-run pointer) includes runs that had execution errors.
+red), and `run_url` / `run_id`: the Actions run that tested the commit (null
+outside Actions). Each workflow also records `prior_verdict` / `prior_commit`:
+its most recent red or green verdict before this commit, read from the run
+index, which (unlike the previous-run pointer) includes runs that had
+execution errors.
+
+## What a run shows
+
+Everything a run found is on the run's own page. Nobody needs ci.comfy.org to
+read a result.
+
+**Where to look.** Open the repo's **Actions** tab, pick **GPU regression**,
+then the run. Each lane job is named after its lane and the commit it tested
+(`py313-torch2.14.1-cu130 · ba546e92`), and one more job is called
+`All lanes · <sha>`. Every one of them writes a job summary, shown on the run
+page below the job graph. `scripts/run_report.py` renders the summaries from
+the results branch, read at one pinned commit, and from the files the run left
+on the runner.
+
+**A lane's summary** covers one commit on one lane:
+
+- a headline: whether an output broke, and whether that is new at this commit
+  or inherited from an earlier one. A run that covers several commits says
+  "new in this run": the change is in one of them;
+- the commit, its parent and pull request, when it was tested, how many
+  commits the run covers, the lane, the branch and the environment (GPU,
+  driver, Python, torch, CUDA, ComfyUI version, worker image, baked packs);
+- "What needs attention", one block per workflow that did not pass. For a
+  changed output: each metric next to its limit, the comparison with the
+  previous tested commit, where the reference (the golden) came from, the diff
+  figures and the two commands that approve the new output. For an execution
+  or infra error: the worker status, the error message, the node, the
+  traceback and the tail of the server log. A changed output that was approved
+  as the reference after the run is labelled "accepted", is no longer counted
+  as open and sits under a heading of its own. The label needs both: the
+  output is the lane's reference today, and that reference is another one than
+  the run was compared with;
+- a table of every workflow: result, an output thumbnail that links to the
+  full image, metrics, timings, peak memory and the output sha;
+- for a workflow that passed without being bit-identical: its numbers next to
+  the limits, the noise floor and the diff figures, folded;
+- every output file, a link to each `run.json`, schema notes, the status of
+  custom-node packs, and the workflows that did not run on the lane;
+- the lane's newest 20 commits with their results, each linked to the run that
+  tested it, and the lane's open failures.
+
+**The "All lanes" summary** shows the commit on every lane, the workflows the
+lanes disagree on, each lane's open failures, and the newest 25 commits as a
+table with one column per lane.
+
+**A commit that was already tested.** A cron tick that finds the commit
+tested on a lane tests nothing there. Its summary shows the published result
+and links to the run that tested it.
+
+**Any commit, again.** Dispatch **GPU regression** with `report_only: true`
+(plus `commit=<sha>`, and `lane=` for one lane) to get the same summaries for
+a commit without testing it. No GPU job starts and nothing is written. Such a
+run neither waits for a test run nor cancels one. It shows every lane in
+`manifest/lanes.json`, a retired lane and one without an endpoint too; a test
+run only has jobs for the provisioned per-commit lanes. An abbreviated
+`commit` (7 characters or more) is expanded to the full sha first, in a test
+run as well.
+
+**Attached files.** Each lane job that tested something attaches an artifact
+named `gpu-regression-<lane>-<sha8>`: the run records, comparisons, outputs,
+figures and `summary.json`. It is also what is left when the publish to the
+results branch failed; the summary then says so, and reports from those files,
+also when an earlier attempt already published a result for the commit.
+
+**How long it lasts, and who can read it.** GitHub keeps a run, its summaries
+and its artifacts for 90 days on a public repository, then deletes them. The
+results branch keeps everything, and a report-only run brings the summary of
+any commit back. Reading a run's summary or downloading its artifact needs a
+GitHub login (any account). The images in a summary load from the results
+branch, pinned to the commit the report read. A summary stays under GitHub's
+1 MiB limit: when a run is too large, log tails, tracebacks, file lists and
+history rows are shortened in that order, and the summary says which.
+
+**What stays on ci.comfy.org.** The site reads the same files. A summary is a
+page about one commit, so the views over many runs are only there: a lane's
+pass rate and how fresh its last run is, the ComfyUI version of each run, each
+workflow's last change and its MSE over time, the history of custom-node pack
+imports, and anything older than the newest 20 runs. Each lane summary links
+to its commit's page on the site.
+
+To render a report on your own machine: `python scripts/run_report.py lane
+--commit <sha> --branch master --lane <lane id> --results-dir <clone> --out
+report.md` (`overview` for all lanes). `<clone>` is a clone of this repository
+kept for this: the script fetches the results branch into it without file
+contents, which turns it into a blobless partial clone.
 
 ## Accepting an intentional change (re-bless)
 
@@ -198,9 +289,12 @@ registry from `manifest/lanes.json`, per-branch latest pointers and the
 current golden tag and output sha per workflow. Entries carry the commit
 subject, author and PR (looked up with the Actions token; the PR title, author
 and avatar too when the commit landed through a PR), the tested range
-to the previous run (HEAD polling can skip commits), per-workflow verdicts
-with the drift class, output sha, metrics and timings. Entries are ordered by
-commit time, so re-testing an older commit never reorders history. The
+to the previous run (HEAD polling can skip commits), the id of the Actions run
+that tested the commit and the repository it ran in (`run` and `run_repo`, so
+a history row can link to it; absent on entries indexed before they were
+recorded), per-workflow verdicts with the drift class, output sha, metrics and
+timings. Entries are ordered by commit time, so re-testing an older commit
+never reorders history. The history tables in a run's job summaries and the
 dashboard's history and matrix views read only these files.
 
 **Build run index** (workflow_dispatch) backfills or repairs a branch/lane
@@ -212,8 +306,12 @@ whenever an index file needs regenerating.
 After each run, `scripts/notify_pr.py` can leave one comment on the ComfyUI
 pull request that landed the tested commit. Its first line starts with
 **(PULSE)**; below it, a row per workflow (verdict, new or inherited, PSNR,
-mean MSE, % pixels changed, exec time, peak VRAM), the lane and the run's page
-on ci.comfy.org.
+mean MSE, % pixels changed, exec time, peak VRAM), the lane, and two links:
+"Run details" to the Actions run that tested the commit, whose job summary
+holds the full report (`run_url` in `summary.json`), and "results page" to the
+commit's page on ci.comfy.org. The comment stays on the pull request and
+GitHub deletes the run after 90 days, so the second link is the one that
+lasts. A summary without a run has only the page, as "Run details".
 
 - **When**: a workflow's outputs changed at this commit (`detail: new_drift`),
   or it hit an execution error while its prior run (`prior_verdict`) produced
@@ -370,7 +468,7 @@ The cu132 lane is the worked example.
    primary role, and a second lane in that role. The new primary needs its
    goldens blessed and an `endpoint_id`.
 2. What follows the flip on merge: PULSE comments for the new primary only,
-   its run links lose the `?lane=` suffix, the dashboard opens on it, and the
+   the dashboard opens on it, and the
    model sync runs on its endpoint (`scripts/sync_models.py`; the
    `RUNPOD_ENDPOINT_ID` secret is only a fallback when the primary has no
    endpoint).
@@ -716,7 +814,7 @@ frontend/                                  # ComfyUI_frontend CI index (see abov
 ```
 
 Run outputs also carry 256-px WebP previews under `<workflow_id>/outputs/thumbs/`
-for the dashboard's list views.
+for the run's job summary and the dashboard's list views.
 
 ## Notes
 
