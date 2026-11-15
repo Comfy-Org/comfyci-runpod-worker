@@ -273,15 +273,24 @@ def write_summary(path: Path, summary: dict):
     path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
 
+def actions_run() -> tuple[str | None, int | None]:
+    """(url, id) of the Actions run this process belongs to; (None, None)
+    outside Actions. The run's page shows the report of every lane it tested."""
+    run_id, repo = os.environ.get("GITHUB_RUN_ID"), os.environ.get("GITHUB_REPOSITORY")
+    if not (run_id and repo):
+        return None, None
+    server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+    return f"{server}/{repo}/actions/runs/{run_id}", int(run_id) if run_id.isdigit() else None
+
+
 def attempt_marker(args, lane_id: str, attempt: int) -> dict:
     """runs/<branch>/<commit>/attempt.json: which attempt started, and the
     Actions run behind it (to find the log of one that never published)."""
     marker = {"commit": args.commit, "branch": args.branch, "lane": lane_id,
               "attempt": attempt, "started_ts": int(time.time())}
-    if os.environ.get("GITHUB_RUN_ID") and os.environ.get("GITHUB_REPOSITORY"):
-        server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
-        marker["run_url"] = (f"{server}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
-                             f"{os.environ['GITHUB_RUN_ID']}")
+    run_url, _ = actions_run()
+    if run_url:
+        marker["run_url"] = run_url
     return marker
 
 
@@ -401,11 +410,15 @@ def main():
         prior = priors.get(r["workflow_id"]) or {}
         r["prior_verdict"] = prior.get("verdict")
         r["prior_commit"] = prior.get("commit")
+    run_url, run_id = actions_run()
     summary = {"schema_version": 2, "branch": args.branch, "commit": args.commit,
                "run_ts": int(time.time()), "overall": overall,
                "has_infra_error": any(v == "infra_error" for v in verdicts.values()),
                "lane": lane_id,
                "attempt": attempt,
+               # The Actions run that tested the commit (null outside Actions):
+               # its page carries the full report, and the index links rows to it.
+               "run_url": run_url, "run_id": run_id,
                # The worker image and host every workflow ran on (they share one endpoint).
                "env": next((r.get("env") for r in results if r.get("env")), None),
                "commit_meta": meta,

@@ -127,6 +127,43 @@ def test_summary_out_is_written_on_failure_with_prior_verdicts(tmp_path, monkeyp
     assert summary["attempt"] == 1
 
 
+def test_summary_names_the_actions_run_that_tested_the_commit(tmp_path, monkeypatch):
+    """The run report and the PR comment link to the run; the index keeps its
+    id. Outside Actions both keys are null, never missing."""
+    import json
+    import sys
+    import commit_meta
+    import storage
+    monkeypatch.setattr(storage, "from_args", lambda args: FakeStore({}))
+    monkeypatch.setattr(commit_meta, "fetch_commit_meta", lambda sha: None)
+    monkeypatch.setattr(run_regression, "process_workflow",
+                        lambda wf_id, *a: {"workflow_id": wf_id, "worker_status": "ok",
+                                           "verdict": "pass", "detail": None})
+    out = tmp_path / "summary.json"
+    monkeypatch.setattr(sys, "argv", ["run_regression.py", "--commit", "new", "--branch", "master",
+                                      "--workflows", "sdxl_t2i", "--skip-publish",
+                                      "--summary-out", str(out)])
+    for key in ("GITHUB_RUN_ID", "GITHUB_REPOSITORY", "GITHUB_SERVER_URL"):
+        monkeypatch.delenv(key, raising=False)
+    assert run_regression.main() == 0
+    summary = json.loads(out.read_text(encoding="utf-8"))
+    assert "run_url" in summary and summary["run_url"] is None and summary["run_id"] is None
+    assert run_regression.actions_run() == (None, None)
+
+    monkeypatch.setenv("GITHUB_REPOSITORY", "Comfy-Org/comfyci-runpod-worker")
+    monkeypatch.setenv("GITHUB_RUN_ID", "43658104127")
+    assert run_regression.main() == 0
+    summary = json.loads(out.read_text(encoding="utf-8"))
+    run_url = "https://github.com/Comfy-Org/comfyci-runpod-worker/actions/runs/43658104127"
+    assert summary["run_url"] == run_url and summary["run_id"] == 43658104127
+    # One helper for the summary and the start marker: they name the same run.
+    args = type("Args", (), {"commit": "new", "branch": "master"})()
+    assert run_regression.attempt_marker(args, "main", 1)["run_url"] == run_url
+    # Every key the summary had before is still there.
+    assert {"schema_version", "branch", "commit", "run_ts", "overall", "has_infra_error", "lane",
+            "attempt", "env", "commit_meta", "tested_range", "workflows"} <= set(summary)
+
+
 def test_a_rerun_records_its_attempt(tmp_path, monkeypatch, capsys):
     """The cron retries a commit with infra errors once; the summary counts the
     attempts so the next tick knows the retry was spent."""
