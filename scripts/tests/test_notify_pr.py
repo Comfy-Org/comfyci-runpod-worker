@@ -357,7 +357,7 @@ def test_body_stays_bounded_with_many_workflows():
     wfs["zz_changed"] = _wf("fail", "new_drift")
     body = notify_pr.render_changed(_summary(wfs), None)
     assert len(body) <= notify_pr.MAX_BODY
-    assert "`zz_changed`" in body and "+40 more on the dashboard" in body
+    assert "`zz_changed`" in body and "+40 more in the run details" in body
     assert body.startswith("**(PULSE)**")
 
 
@@ -366,3 +366,46 @@ def test_dashboard_link_names_a_non_primary_lane():
     s = _summary(DRIFT, lane="py313")
     assert notify_pr.dashboard_url(s, lanes).endswith(f"/regression/master/{SHA}?lane=py313")
     assert notify_pr.dashboard_url(_summary(DRIFT), lanes).endswith(f"/regression/master/{SHA}")
+
+
+RUN_URL = "https://github.com/Comfy-Org/comfyci-runpod-worker/actions/runs/43658104127"
+
+
+def test_run_details_link_to_the_actions_run_that_tested_the_commit():
+    """The run's page holds the full report, so the comment points there. The
+    comment outlives the run (GitHub deletes it after 90 days): the commit's
+    page on the dashboard is linked next to it."""
+    lanes = {"primary": LANE, "lanes": {}}
+    s = {**_summary(DRIFT), "run_url": RUN_URL, "run_id": 43658104127}
+    page = f"https://ci.comfy.org/regression/master/{SHA}"
+    for body in (notify_pr.render_changed(s, lanes), notify_pr.render_resolved(s, lanes)):
+        assert f"[Run details]({RUN_URL}) · [results page]({page})" in body.splitlines()
+        assert len(body) < notify_pr.MAX_BODY
+    # A lane that is not the primary keeps its ?lane= on the page link.
+    other = {**s, "lane": "py313"}
+    assert f"· [results page]({page}?lane=py313)" in notify_pr.render_changed(other, lanes)
+
+
+@pytest.mark.parametrize("run_url", [
+    None, "", 42, "https://evil.example/actions/runs/1",
+    # The right shape on another host or scheme: the host is pinned.
+    "https://evil.example/a/b/actions/runs/1", "https://github.com.evil.example/a/b/actions/runs/1",
+    "https://github.com@evil.example/a/b/actions/runs/1", "http://github.com/a/b/actions/runs/1",
+    "https://github.com/a/b/actions/runs/1) [x](https://evil.example",
+    "javascript:alert(1)"])
+def test_run_details_fall_back_to_the_dashboard(run_url):
+    """A summary from before the run link existed, or one whose link is not a
+    plain Actions run URL, has the dashboard link alone."""
+    lanes = {"primary": LANE, "lanes": {}}
+    s = {**_summary(DRIFT), "run_url": run_url}
+    assert notify_pr.details_url(s, lanes) == f"https://ci.comfy.org/regression/master/{SHA}"
+    body = notify_pr.render_changed(s, lanes)
+    assert f"[Run details](https://ci.comfy.org/regression/master/{SHA})" in body.splitlines()
+    assert "evil" not in body and "results page" not in body
+
+
+def test_posted_comment_carries_the_run_link(tmp_path, monkeypatch, env, gh):
+    on(monkeypatch)
+    assert run(tmp_path, {**_summary(DRIFT), "run_url": RUN_URL}) == "created on #16488"
+    (_, _, _, payload, _), = gh.writes()
+    assert f"[Run details]({RUN_URL})" in payload["body"]
