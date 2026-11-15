@@ -66,6 +66,26 @@ runs:
           --storage "${{ inputs.storage }}" \
           --workflows "${{ inputs.workflows }}" \
           --results-workdir "$RUNNER_TEMP/results-checkout" \
+          --summary-out "$RUNNER_TEMP/summary.json" \
           ${{ inputs.gcs-bucket != '' && format('--bucket {0}', inputs.gcs-bucket) || '' }} \
           ${{ inputs.repo-url != '' && format('--repo-url {0}', inputs.repo-url) || '' }} \
           ${{ inputs.lane != '' && format('--lane {0}', inputs.lane) || '' }}
+    # The lane's report in the job summary (scripts/run_report.py). With github
+    # storage it reads the results checkout the suite just pushed from; with gcs
+    # there is none, and it reports from the summary and run records on the runner.
+    # The action runs in its caller's repository, so the report is told where
+    # golden-baseline.yml and the image builds live: the repository checked out above.
+    - name: Report
+      if: always() && inputs.lane != ''
+      continue-on-error: true
+      shell: bash
+      env:
+        REPORT_COMMIT: ${{ inputs.comfy-commit }}
+        REPORT_BRANCH: ${{ inputs.branch }}
+        REPORT_LANE: ${{ inputs.lane }}
+        REPORT_WORKER_REPO: comfy-org/comfyci-runpod-worker
+      run: |
+        python comfyci-runpod-worker/scripts/run_report.py lane \
+          --commit "$REPORT_COMMIT" --branch "$REPORT_BRANCH" --lane "$REPORT_LANE" \
+          --summary "$RUNNER_TEMP/summary.json" --workdir regression-work \
+          --results-dir "$RUNNER_TEMP/results-checkout" --no-fetch

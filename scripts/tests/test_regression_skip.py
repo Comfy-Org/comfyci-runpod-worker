@@ -1,10 +1,12 @@
 """regression_skip: when the cron tests a commit on a lane, and when it leaves it alone."""
 import json
+import re
 from pathlib import Path
 
 import pytest
 
 import regression_skip
+from conftest import workflow_steps
 
 SHA = "5f415e31abfd837870bbc733ba1e158de71ed985"
 ROOT = Path(__file__).resolve().parents[2]
@@ -171,3 +173,69 @@ def test_the_workflow_decides_with_the_published_summary():
     assert "python scripts/regression_skip.py" in regression
     assert 'if [ -n "$INPUT_COMMIT" ]; then args+=(--explicit); fi' in regression
     assert "steps.target.outputs.skip != 'true'" in regression
+
+
+REPORT_ONLY = ("REPORT_ONLY: ${{ github.event_name == 'workflow_dispatch' && "
+               "(inputs.report_only == true || inputs.report_only == 'true') }}")
+
+
+def test_a_report_only_dispatch_starts_no_gpu_job():
+    """report_only shows what is published. The skip step answers skip=true
+    before it reads anything, and every step that tests, attaches or comments
+    runs only when skip is not true."""
+    steps = dict(workflow_steps(".github/workflows/regression.yml"))
+    skip = steps["Skip if already tested on this lane"]
+    assert REPORT_ONLY in skip
+    block = re.search(r'\n( +)if \[ "\$REPORT_ONLY" = "true" \]; then\n(.*?)\n\1fi\n', skip, re.S)
+    assert block, "the report-only early exit is gone"
+    assert block.group(2).splitlines()[-2:] == [
+        block.group(1) + '  echo "skip=true" >> "$GITHUB_OUTPUT"', block.group(1) + "  exit 0"]
+    # Nothing is fetched or decided before it.
+    for later in ("git fetch", "regression_skip.py", "read_published"):
+        assert block.start() < skip.index(later)
+    assert "id: target" in skip
+    # The commit every lane reports on is the one resolved once for the run.
+    assert "COMMIT: ${{ needs.lanes.outputs.commit }}" in skip
+    for name, condition in (("Run regression suite", "if: steps.target.outputs.skip != 'true'"),
+                            ("Attach the run's files",
+                             "if: always() && steps.target.outputs.skip != 'true'"),
+                            ("PR comment (PULSE)",
+                             "if: always() && steps.target.outputs.skip != 'true'")):
+        assert condition in steps[name], name
+    assert "RUNPOD_API_KEY" in steps["Run regression suite"]
+    assert not [name for name, text in steps.items()
+                if "RUNPOD_API_KEY" in text and name != "Run regression suite"]
+
+
+def test_a_report_only_dispatch_plans_every_lane_and_runs_beside_test_runs():
+    """Reading results needs no endpoint and no cadence: a report-only run also
+    shows a retired lane. It gets a concurrency group of its own, so it never
+    waits for a test run or holds one up."""
+    text = (ROOT / ".github" / "workflows" / "regression.yml").read_text(encoding="utf-8")
+    plan = dict(workflow_steps(".github/workflows/regression.yml"))["plan"]
+    assert REPORT_ONLY in plan
+    assert re.search(r'if \[ "\$REPORT_ONLY" = "true" \]; then\n +matrix=\$\(python lanes\.py '
+                     r'report "\$\{only\[@\]\}"\)\n +else\n +matrix=\$\(python lanes\.py '
+                     r'per-commit "\$\{only\[@\]\}"\)\n +fi', plan)
+    assert ("  group: ${{ github.event_name == 'workflow_dispatch' && (inputs.report_only == true "
+            "|| inputs.report_only == 'true') && format('gpu-regression-report-{0}', "
+            "github.run_id) || 'gpu-regression' }}\n  cancel-in-progress: false") in text
+    assert "report_only:\n" in text and "type: boolean\n        default: false" in text
+
+
+def test_the_commit_is_resolved_once_to_a_full_sha():
+    """Results are stored under 40 character directories. An abbreviated input
+    is expanded before any lane uses it, and one that does not resolve stops
+    the run."""
+    step = dict(workflow_steps(".github/workflows/regression.yml"))["Resolve target commit"]
+    assert "GH_TOKEN: ${{ github.token }}" in step
+    assert 'FULL=$(gh api "repos/Comfy-Org/ComfyUI/commits/$COMMIT" --jq .sha) || FULL=""' in step
+    assert ('if ! [[ "$FULL" =~ ^[0-9a-f]{40}$ ]] || [ "${FULL:0:${#COMMIT}}" != "$COMMIT" ]; '
+            "then") in step
+    assert 'if [ -n "$COMMIT" ] && [ "${#COMMIT}" -lt 40 ]; then' in step
+    assert step.index("gh api") < step.index('echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"')
+    assert 'echo "short=${COMMIT:0:8}" >> "$GITHUB_OUTPUT"' in step
+    text = (ROOT / ".github" / "workflows" / "regression.yml").read_text(encoding="utf-8")
+    assert "commit: ${{ steps.commit.outputs.commit }}" in text
+    # No lane job reads the raw input as the commit to test or report.
+    assert "COMMIT: ${{ inputs.commit }}" not in text.replace("INPUT_COMMIT: ", "")

@@ -20,6 +20,8 @@ golden_baseline.py and the per-commit plan share.
   python scripts/lanes.py images [--only a,b]      JSON list of images to build
   python scripts/lanes.py per-commit [--only a,b]  JSON list of provisioned per-commit lanes
                                                    (each with the workflow ids enabled on it)
+  python scripts/lanes.py report [--only a,b]      JSON list of the lanes a report-only run shows:
+                                                   every lane, retired and unprovisioned ones too
   python scripts/lanes.py lanes-on-image <image>   JSON list of lanes an image repoint applies to
   python scripts/lanes.py validate                 exit 1 with the problems, if any
 """
@@ -116,6 +118,16 @@ def per_commit_matrix(lanes: dict, only: str | None = None,
             row["workflows"] = ",".join(workflows_for_lane(manifest, lane_id))
         out.append(row)
     return out
+
+
+def report_matrix(lanes: dict, only: str | None = None) -> list[dict]:
+    """Lanes a report-only run of regression.yml shows: every lane, whatever
+    its cadence or endpoint. Such a run reads published results and starts no
+    GPU job, so a retired lane's history can be shown like any other."""
+    wanted = _csv(only)
+    return [{"lane": lane_id, "prefix": lane.get("prefix", "regression")}
+            for lane_id, lane in (lanes.get("lanes") or {}).items()
+            if not wanted or lane_id in wanted]
 
 
 def left_out(lanes: dict, only: str | None) -> list[str]:
@@ -245,6 +257,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--only", default=None)
     p = sub.add_parser("per-commit")
     p.add_argument("--only", default=None)
+    p = sub.add_parser("report")
+    p.add_argument("--only", default=None)
     p = sub.add_parser("lanes-on-image")
     p.add_argument("image")
     sub.add_parser("validate")
@@ -258,6 +272,11 @@ def main(argv: list[str] | None = None) -> int:
         for note in left_out(lanes, args.only):
             print(f"::notice::not tested: {note}", file=sys.stderr)
         print(json.dumps(per_commit_matrix(lanes, args.only, manifest)))
+    elif args.cmd == "report":
+        for lane_id in sorted((_csv(args.only) or set()) - set(lanes.get("lanes") or {})):
+            print(f"::notice::not shown: {lane_id}: not a lane in manifest/lanes.json",
+                  file=sys.stderr)
+        print(json.dumps(report_matrix(lanes, args.only)))
     elif args.cmd == "lanes-on-image":
         print(json.dumps(lanes_on_image(lanes, args.image)))
     elif args.cmd == "validate":

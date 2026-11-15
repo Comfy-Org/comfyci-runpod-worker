@@ -371,3 +371,31 @@ def test_per_commit_plan_explains_lanes_it_leaves_out(monkeypatch, capsys):
     out = capsys.readouterr()
     assert json.loads(out.out) == []
     assert "not tested: old: cadence 'retired', not per-commit" in out.err
+
+
+def test_a_report_only_plan_lists_every_lane(monkeypatch, capsys):
+    """A report-only run reads published results and starts no GPU job, so a
+    retired lane, an unprovisioned one and a nightly one are shown as well."""
+    reg = _registry(old={"cadence": "retired", "role": "legacy", "image": "old"},
+                    main={"role": "primary"}, new={"endpoint_id": None},
+                    slow={"cadence": "nightly"})
+    assert lanes_mod.report_matrix(reg) == [
+        {"lane": "old", "prefix": "regression"},
+        {"lane": "main", "prefix": "regression/lanes/main"},
+        {"lane": "new", "prefix": "regression/lanes/new"},
+        {"lane": "slow", "prefix": "regression/lanes/slow"}]
+    assert [row["lane"] for row in lanes_mod.report_matrix(reg, "old, slow")] == ["old", "slow"]
+    assert lanes_mod.report_matrix(reg, "ghost") == []
+    # The test plan of the same registry: the one provisioned per-commit lane.
+    assert [r["lane"] for r in lanes_mod.per_commit_matrix(reg)] == ["main"]
+    monkeypatch.setattr(lanes_mod, "load_lanes", lambda path=None: reg)
+    assert lanes_mod.main(["report", "--only", "old,ghost"]) == 0
+    out = capsys.readouterr()
+    assert json.loads(out.out) == [{"lane": "old", "prefix": "regression"}]
+    assert "::notice::not shown: ghost: not a lane in manifest/lanes.json" in out.err
+    assert lanes_mod.main(["report"]) == 0
+    assert len(json.loads(capsys.readouterr().out)) == 4
+    # The committed registry: the retired lane is listed where its history is.
+    assert {"lane": LEGACY, "prefix": "regression"} in lanes_mod.report_matrix(REGISTRY)
+    regression = (ROOT / ".github" / "workflows" / "regression.yml").read_text(encoding="utf-8")
+    assert 'lanes.py report "${only[@]}"' in regression
