@@ -29,6 +29,7 @@ import compare
 import index_builder
 import lanes as lanes_mod
 import packs
+import regression_skip
 import storage
 from submit_and_poll import INFRA_STATUSES, RunPodClient, run_workflow_job
 
@@ -272,6 +273,27 @@ def write_summary(path: Path, summary: dict):
     path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
 
+def actions_run() -> tuple[str | None, int | None]:
+    """(url, id) of the Actions run this process belongs to; (None, None)
+    outside Actions. The run's page shows the report of every lane it tested."""
+    run_id, repo = os.environ.get("GITHUB_RUN_ID"), os.environ.get("GITHUB_REPOSITORY")
+    if not (run_id and repo):
+        return None, None
+    server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+    return f"{server}/{repo}/actions/runs/{run_id}", int(run_id) if run_id.isdigit() else None
+
+
+def attempt_marker(args, lane_id: str, attempt: int) -> dict:
+    """runs/<branch>/<commit>/attempt.json: which attempt started, and the
+    Actions run behind it (to find the log of one that never published)."""
+    marker = {"commit": args.commit, "branch": args.branch, "lane": lane_id,
+              "attempt": attempt, "started_ts": int(time.time())}
+    run_url, _ = actions_run()
+    if run_url:
+        marker["run_url"] = run_url
+    return marker
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", default=str(HERE.parent / "manifest" / "workflows.json"))
@@ -302,6 +324,10 @@ def main():
         if not lane_id:
             raise SystemExit(f"no lane in manifest/lanes.json has prefix {args.prefix!r}; "
                              "pass --lane")
+    if lanes_mod.is_retired(lanes["lanes"][lane_id]):
+        raise SystemExit(f"lane {lane_id!r} is retired (cadence 'retired' in manifest/lanes.json): "
+                         "its results stay readable but it runs nothing; pass --lane with an "
+                         f"active lane (the primary is {lanes.get('primary')!r})")
     layout = lanes["lanes"][lane_id].get("layout", 1)
     # The lane names its endpoint (and so its worker image); a lane without one
     # is not provisioned yet and must not fall through to another lane's endpoint.
@@ -320,6 +346,13 @@ def main():
     # The index as it stands before this run: it also records runs that had
     # execution errors, which the pointer above skips.
     prior_entries = (store.download_json(builder.head_path()) or {}).get("entries") or []
+    # A re-run of a commit (the cron's one retry, or a dispatch naming it)
+    # counts its attempts, so the cron knows when to stop. A run that died
+    # before publishing left only its start marker, which counts too.
+    attempt = regression_skip.next_attempt(store.published_summary(args.branch, args.commit),
+                                           store.attempt_marker(args.branch, args.commit))
+    if attempt > 1:
+        print(f"{args.commit[:8]} was already tried on lane {lane_id}; this is attempt {attempt}")
 
     manifest_path = Path(args.manifest).resolve()
     repo_root = manifest_path.parent.parent
@@ -344,6 +377,13 @@ def main():
 
     if not args.skip_publish:
         store.snapshot_manifest(args.commit, manifest)
+        # Pushed before any GPU job: if this run dies before it publishes (a
+        # failed push, a killed job), the cron still counts the attempt and
+        # stops after regression_skip.MAX_ATTEMPTS instead of re-running the
+        # commit every tick. A marker that cannot be pushed stops the run here,
+        # before it costs anything.
+        store.mark_attempt(args.branch, args.commit, attempt_marker(args, lane_id, attempt))
+        store.checkpoint(f"regression {args.branch}@{args.commit[:8]}: attempt {attempt} started")
 
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(selected)) as pool:
@@ -370,10 +410,15 @@ def main():
         prior = priors.get(r["workflow_id"]) or {}
         r["prior_verdict"] = prior.get("verdict")
         r["prior_commit"] = prior.get("commit")
+    run_url, run_id = actions_run()
     summary = {"schema_version": 2, "branch": args.branch, "commit": args.commit,
                "run_ts": int(time.time()), "overall": overall,
                "has_infra_error": any(v == "infra_error" for v in verdicts.values()),
                "lane": lane_id,
+               "attempt": attempt,
+               # The Actions run that tested the commit (null outside Actions):
+               # its page carries the full report, and the index links rows to it.
+               "run_url": run_url, "run_id": run_id,
                # The worker image and host every workflow ran on (they share one endpoint).
                "env": next((r.get("env") for r in results if r.get("env")), None),
                "commit_meta": meta,

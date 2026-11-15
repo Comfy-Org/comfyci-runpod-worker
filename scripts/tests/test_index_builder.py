@@ -139,6 +139,63 @@ def test_merge_entry_keeps_other_workflows_on_partial_rerun():
     assert index_builder.merge_entry(None, new) is new
 
 
+def test_entry_carries_the_actions_run_id():
+    """History rows link to the run that tested each commit. Summaries from
+    before the id was recorded give None; an id that is not an int is dropped."""
+    s = _summary("a" * 40, 1700000100, "pass", IDENT, None, None)
+    assert index_builder.entry_from_summary(s, LANE, 1)["run"] is None
+    assert index_builder.entry_from_summary({**s, "run_id": 43658104127}, LANE, 1)["run"] == (
+        43658104127)
+    for bad in ("43658104127", None, True, 1.5):
+        assert index_builder.entry_from_summary({**s, "run_id": bad}, LANE, 1)["run"] is None
+
+
+def test_entry_names_the_repository_the_run_was_in():
+    """The action also runs from other repositories (ComfyUI's own workflow):
+    an id alone would link a history row into the wrong one."""
+    s = {**_summary("a" * 40, 1700000100, "pass", IDENT, None, None), "run_id": 555}
+    worker = "https://github.com/Comfy-Org/comfyci-runpod-worker/actions/runs/555"
+    assert index_builder.entry_from_summary({**s, "run_url": worker}, LANE, 1)["run_repo"] == (
+        "Comfy-Org/comfyci-runpod-worker")
+    comfy = "https://github.com/Comfy-Org/ComfyUI/actions/runs/555"
+    assert index_builder.entry_from_summary({**s, "run_url": comfy}, LANE, 1)["run_repo"] == (
+        "Comfy-Org/ComfyUI")
+    # Only a plain Actions run on github.com names one.
+    for bad in (None, 5, "https://evil.example/a/b/actions/runs/555", comfy + "/../x",
+                "https://github.com.evil.example/a/b/actions/runs/555", "http" + comfy[5:]):
+        entry = index_builder.entry_from_summary({**s, "run_url": bad}, LANE, 1)
+        assert entry["run"] == 555 and entry["run_repo"] is None
+    # No id, no repository: the pair names one run.
+    assert index_builder.entry_from_summary({**s, "run_id": None, "run_url": comfy}, LANE, 1)[
+        "run_repo"] is None
+
+
+def test_merge_entry_keeps_the_run_id_a_rerun_does_not_have():
+    old = {"c": "x", "t": 1, "o": "pass", "run": 7, "w": {"flux": {"v": "pass"}}}
+    # A run outside Actions (run None) never erases the link.
+    assert index_builder.merge_entry(old, {"c": "x", "t": 2, "o": "pass", "run": None,
+                                           "w": {"flux": {"v": "pass"}}})["run"] == 7
+    # A later run in Actions replaces it: the row links to the newest test.
+    assert index_builder.merge_entry(old, {"c": "x", "t": 2, "o": "pass", "run": 9,
+                                           "w": {"flux": {"v": "pass"}}})["run"] == 9
+    # An entry indexed before the key existed gains it, and stays valid without it.
+    legacy = {"c": "x", "t": 1, "o": "pass", "w": {"flux": {"v": "pass"}}}
+    assert index_builder.merge_entry(legacy, {"c": "x", "t": 2, "o": "pass", "run": 9,
+                                              "w": {}})["run"] == 9
+    assert "run" not in index_builder.merge_entry(legacy, {"c": "x", "t": 2, "o": "pass",
+                                                           "run": None, "w": {}})
+    # The repository travels with the id: a newer run replaces both, also when
+    # its own repository is not known, and a run outside Actions keeps both.
+    old = {**old, "run_repo": "Comfy-Org/ComfyUI"}
+    newer = {"c": "x", "t": 2, "o": "pass", "run": 9, "run_repo": "Comfy-Org/worker", "w": {}}
+    merged = index_builder.merge_entry(old, newer)
+    assert (merged["run"], merged["run_repo"]) == (9, "Comfy-Org/worker")
+    merged = index_builder.merge_entry(old, {**newer, "run_repo": None})
+    assert (merged["run"], merged["run_repo"]) == (9, None)
+    merged = index_builder.merge_entry(old, {**newer, "run": None, "run_repo": None})
+    assert (merged["run"], merged["run_repo"]) == (7, "Comfy-Org/ComfyUI")
+
+
 def _seed_files():
     return {
         "regression/runs/master/aaa/summary.json": _summary("aaa", 1722470400, "pass", IDENT, None, None),

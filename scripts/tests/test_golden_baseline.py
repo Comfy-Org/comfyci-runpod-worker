@@ -202,3 +202,19 @@ def test_lane_filter_skips_workflows_restricted_to_other_lanes(tmp_path, capsys)
     with pytest.raises(SystemExit, match="no workflows selected for lane legacy"):
         _run_main(tmp_path, remote, root, "--ref", "v0.33.2", "--workflows", "flux", "--bless-only")
     assert "[flux] not run on lane legacy (manifest lanes: elsewhere); skipped" in capsys.readouterr().out
+
+
+def test_a_retired_lane_can_be_blessed_but_not_generated(tmp_path):
+    """Generating dispatches GPU work, which a retired lane never gets;
+    blessing and promoting only touch storage, so its goldens stay manageable."""
+    remote = _remote(tmp_path)
+    root = _manifest(tmp_path)
+    retired = json.loads(json.dumps(LANES))
+    retired["lanes"]["legacy"].update({"cadence": "retired", "role": "legacy",
+                                       "endpoint_id": "ep-retired"})
+    (root / "manifest" / "lanes.json").write_text(json.dumps(retired))
+    with pytest.raises(SystemExit, match="is retired"):
+        _run_main(tmp_path, remote, root, "--ref", "c" * 40, "--workflows", "flux")
+    rc = _run_main(tmp_path / "bless", remote, root, "--ref", "v0.33.2", "--workflows", "flux",
+                   "--bless-only", "--reason", "still readable")
+    assert rc == 0

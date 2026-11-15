@@ -325,7 +325,8 @@
         "ComfyUI-KJNodes"
       ],
       "lanes": [
-        "py313-torch2.14.1-cu130"
+        "py313-torch2.14.1-cu130",
+        "py313-torch2.15.0-cu132"
       ],
       "gpu_type": null,
       "timeout_s": null,
@@ -352,7 +353,8 @@
         "ComfyUI-VideoHelperSuite"
       ],
       "lanes": [
-        "py313-torch2.14.1-cu130"
+        "py313-torch2.14.1-cu130",
+        "py313-torch2.15.0-cu132"
       ],
       "gpu_type": null,
       "timeout_s": null,
@@ -388,7 +390,8 @@
         "ComfyUI-Impact-Subpack"
       ],
       "lanes": [
-        "py313-torch2.14.1-cu130"
+        "py313-torch2.14.1-cu130",
+        "py313-torch2.15.0-cu132"
       ],
       "gpu_type": null,
       "timeout_s": 900,
@@ -404,7 +407,8 @@
         "ComfyUI-Manager"
       ],
       "lanes": [
-        "py313-torch2.14.1-cu130"
+        "py313-torch2.14.1-cu130",
+        "py313-torch2.15.0-cu132"
       ],
       "gpu_type": null,
       "timeout_s": null,

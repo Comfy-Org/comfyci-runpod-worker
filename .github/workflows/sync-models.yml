@@ -1,12 +1,22 @@
 # Keep the RunPod network volume in sync with the manifest: merging a PR that
 # adds a workflow's models is all it takes — this downloads them onto the
-# volume via a one-shot job on the same endpoint.
+# volume via a one-shot job on the primary lane's endpoint (manifest/lanes.json;
+# the RUNPOD_ENDPOINT_ID secret is only a fallback when the primary has none).
 name: Sync models to network volume
 on:
   push:
     branches: [main]
     paths: ['manifest/**']
   workflow_dispatch:
+
+# One writer on the volume at a time: a sync queued while another runs waits
+# for it. GitHub keeps only one waiting run per group, so a newer queued sync
+# cancels an older waiting one. Each sync fetches every model of the manifest
+# it checked out, so a later sync from main covers an earlier one; a sync
+# dispatched from a branch does not, so run the sync from main again after it.
+concurrency:
+  group: sync-models
+  cancel-in-progress: false
 
 jobs:
   sync:
@@ -20,6 +30,7 @@ jobs:
       - name: Sync
         env:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          # Fallback only: sync_models.py uses the primary lane's endpoint.
           RUNPOD_ENDPOINT_ID: ${{ secrets.RUNPOD_ENDPOINT_ID }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python scripts/sync_models.py

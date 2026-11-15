@@ -29,7 +29,7 @@ on:
         description: why this baseline is being (re)blessed (stored in blessed.json/current.json)
         default: ''
       lane:
-        description: lane id from manifest/lanes.json (empty = lane of the default prefix)
+        description: lane id from manifest/lanes.json (empty = the layout-1 lane, which is retired, so goldens cannot be generated there; always pass one)
         default: ''
       force:
         description: overwrite an existing golden/<workflow>/<tag>/

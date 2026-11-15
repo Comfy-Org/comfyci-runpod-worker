@@ -1,0 +1,2273 @@
+"""Run report: everything a GPU regression run found, as Markdown for the job
+summary ($GITHUB_STEP_SUMMARY), so reading a result never means leaving the
+Actions run.
+
+  python scripts/run_report.py lane --commit SHA --branch master --lane LANE_ID
+        [--summary FILE] [--workdir DIR] [--skipped] [--artifact-url URL]
+        [--results-dir DIR] [--no-fetch] [--out FILE]
+  python scripts/run_report.py overview --commit SHA --branch master
+        [--results-dir DIR] [--no-fetch] [--out FILE]
+
+`lane` reports one commit on one lane: the result of every workflow, what
+needs attention and why, the environment and the lane's recent history.
+`overview` puts every lane side by side, for the commit and for recent commits.
+
+The data is the results branch, read at one pinned commit. By default the
+script fetches the branch into --results-dir (the workflow's own checkout) and
+reads files with `git cat-file`; nothing is checked out. --summary and
+--workdir name what the run that just finished left on the runner: they win
+over the published copy, and they let a run that could not publish still report.
+
+Every string read from results is untrusted (commit subjects, PR titles, error
+messages, log tails). It is escaped before it enters the summary and never
+printed: a log line that starts with "::" is a workflow command. Links are
+built only from checked parts (hex shas, integer ids, fixed hosts).
+
+GitHub drops a step summary over 1 MiB whole, so the report stays under
+MAX_BYTES by shortening, in this order: log tails, tracebacks, output file
+lists, history rows. The report never fails the job: main() returns 0.
+
+Env: GITHUB_STEP_SUMMARY (where to write; otherwise --out), RESULTS_REPO /
+RESULTS_BRANCH (as in storage.py), REPORT_DASHBOARD_URL (footer link; empty
+drops the line), GITHUB_REPOSITORY / GITHUB_RUN_ID (links to Actions runs),
+REPORT_WORKER_REPO (the repository of golden-baseline.yml and the image builds,
+when the report runs in another one: action.yml sets it).
+"""
+from __future__ import annotations
+
+import argparse
+import html
+import json
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import quote
+
+import lanes as lanes_mod
+import regression_skip
+
+# Standard library only, like lanes.py and regression_skip.py: a job renders the
+# report without installing anything.
+COMFY_URL = "https://github.com/Comfy-Org/ComfyUI"
+DEFAULT_RESULTS_REPO = "Comfy-Org/comfyci-runpod-worker"  # the defaults storage.py uses
+DEFAULT_RESULTS_BRANCH = "results"
+DEFAULT_DASHBOARD_URL = "https://ci.comfy.org"
+MAX_BYTES = 900_000
+HISTORY_ROWS = 20
+MATRIX_ROWS = 25
+GIT_TIMEOUT_S = 180
+THUMB_PX = 96
+FIGURE_PX = 720
+INLINE_PNG_MAX_BYTES = 4 * 1024 * 1024
+TRACEBACK_CHARS = 8000
+
+SHA_RE = re.compile(r"[0-9a-f]{7,40}")
+FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
+HEX64_RE = re.compile(r"[0-9a-f]{64}")
+SLUG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9_.-]{1,100}")
+WORKFLOW_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,99}")
+LANE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}")
+SEGMENT_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,127}")
+BRANCH_RE = re.compile(r"[A-Za-z0-9._/-]{1,100}")
+RUN_URL_RE = re.compile(r"https://github\.com/" + SLUG_RE.pattern + r"/actions/runs/[0-9]{1,20}")
+ARTIFACT_URL_RE = re.compile(RUN_URL_RE.pattern + r"/artifacts/[0-9]{1,20}")
+PACK_REPO_RE = re.compile(r"https://github\.com/" + SLUG_RE.pattern)
+DASHBOARD_RE = re.compile(r"https?://[A-Za-z0-9.-]{1,200}(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]{0,200})?")
+
+
+class ReportError(Exception):
+    """The report cannot be built from what it was given (a fixed, safe message)."""
+
+
+# -- small helpers --------------------------------------------------------------
+def as_dict(v) -> dict:
+    return v if isinstance(v, dict) else {}
+
+
+def as_list(v) -> list:
+    return v if isinstance(v, list) else []
+
+
+def is_num(v) -> bool:
+    """A finite number that a float can hold. JSON also carries Infinity, NaN
+    and integers past the float range: none of them formats or divides here."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and abs(v) < 1e300
+
+
+def as_int(v) -> int | None:
+    """`v` when it is a real integer (JSON true is not a count), else None."""
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def fmt(v, spec: str, suffix: str = "") -> str:
+    return f"{v:{spec}}{suffix}" if is_num(v) else ""
+
+
+def plural(n: int, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+def utc(ts) -> str:
+    """'2026-11-14 12:30 UTC', or '' when `ts` is not a usable epoch."""
+    if not is_num(ts) or ts <= 0:
+        return ""
+    try:
+        return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    except (OverflowError, OSError, ValueError):
+        return ""
+
+
+def size_text(n) -> str:
+    if not is_num(n) or n < 0:
+        return ""
+    if n < 1024:
+        return f"{int(n)} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n / (1024 * 1024):.2f} MB"
+
+
+def is_sha(v) -> bool:
+    return isinstance(v, str) and bool(SHA_RE.fullmatch(v))
+
+
+def is_branch(v) -> bool:
+    """A branch name that is safe in a path and a URL (no '..', no empty part)."""
+    if not isinstance(v, str) or not BRANCH_RE.fullmatch(v) or v.startswith("-") or ".." in v:
+        return False
+    return all(part and not part.startswith(".") for part in v.split("/"))
+
+
+def is_workflow_id(v) -> bool:
+    return isinstance(v, str) and bool(WORKFLOW_RE.fullmatch(v))
+
+
+# -- escaping -------------------------------------------------------------------
+ZW = chr(0x200B)  # zero-width space: breaks @mentions, #123 and URL autolinks
+# An OSC sequence is dropped with its text only when it is closed on its own
+# line. One that never closes loses its two opening bytes (the last branch) and
+# keeps the rest: it must not take the remainder of a log with it.
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b\r\n]*(?:\x07|\x1b\\)|\x1b[@-_]?")
+# C0/C1 controls (tab and newline aside), then by code point: zero-width and
+# direction marks, line separators, invisible operators, lone surrogates (UTF-8
+# cannot encode them, so the summary could not be written), the byte order mark.
+_CONTROL_RE = re.compile(
+    r"[\x00-\x08\x0b-\x1f\x7f-\x9f"
+    + "".join(f"{chr(a)}-{chr(b)}" for a, b in ((0x200B, 0x200F), (0x2028, 0x202E),
+                                               (0x2060, 0x206F), (0xD800, 0xDFFF),
+                                               (0xFEFF, 0xFEFF))) + "]")
+_SPECIAL_RE = re.compile(r"[\\`*_\[\]~#|<>&$@]|://|[wW]{3}\.|[gG][hH]-(?=[0-9])")
+_ENTITIES = {"&": "&amp;", "<": "&lt;", ">": "&gt;", "|": "&#124;"}
+
+
+def clean(value, limit: int | None = None, lines: bool = False) -> str:
+    """Untrusted text without ANSI codes or control characters; one line unless
+    `lines`. Longer than `limit`, it is cut and marked."""
+    text = value if isinstance(value, str) else "" if value is None else str(value)
+    text = _ANSI_RE.sub("", text).replace("\r\n", "\n").replace("\r", "\n")
+    if lines:
+        text = text.replace("\t", "    ")
+    else:
+        text = " ".join(text.split())
+    text = _CONTROL_RE.sub("", text)
+    if limit is not None and len(text) > limit:
+        text = text[:max(limit - 1, 0)].rstrip() + "…"
+    return text
+
+
+def _escape_special(m: re.Match) -> str:
+    t = m.group(0)
+    if t in _ENTITIES:
+        return _ENTITIES[t]
+    if t == "#":
+        return "\\#" + ZW
+    if t == "@":
+        return "@" + ZW
+    if t == "$":  # GitHub renders $...$ as math
+        return ZW + "$" + ZW
+    if t == "://":
+        return ":" + ZW + "//"
+    if len(t) > 1:  # "www." and "GH-"
+        return t[:-1] + ZW + t[-1]
+    return "\\" + t
+
+
+def md(value, limit: int | None = 300) -> str:
+    """Untrusted text as inline Markdown: no markup, no HTML, no table break,
+    no mention, no issue or URL autolink."""
+    return _SPECIAL_RE.sub(_escape_special, clean(value, limit))
+
+
+def code(value, limit: int | None = 200) -> str:
+    """Untrusted text in code type. Backticks would let it close the span."""
+    text = md(value, limit)
+    return f"<code>{text}</code>" if text else ""
+
+
+def tick(value: str) -> str:
+    """Code type for a value already checked to be a plain token."""
+    return f"`{value}`"
+
+
+def pre(text: str) -> str:
+    """A <pre> block of untrusted text. No line may start with '::'."""
+    body = html.escape(text, quote=False)
+    body = re.sub(r"(?m)^::", "&#58;:", body)
+    return f"<pre>\n{body}\n</pre>"
+
+
+def attr(value: str) -> str:
+    return html.escape(value, quote=True)
+
+
+def table(headers: list[str], rows: list[list[str]]) -> list[str]:
+    out = ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
+    for row in rows:
+        out.append("| " + " | ".join((c or "").replace("\n", " ") for c in row) + " |")
+    return out
+
+
+def details(summary: str, body: list[str]) -> list[str]:
+    return [f"<details><summary>{summary}</summary>", "", *body, "", "</details>"]
+
+
+# -- links ------------------------------------------------------------------------
+def results_repo() -> str:
+    repo = os.environ.get("RESULTS_REPO") or DEFAULT_RESULTS_REPO
+    return repo if SLUG_RE.fullmatch(repo) else DEFAULT_RESULTS_REPO
+
+
+def results_branch() -> str:
+    branch = os.environ.get("RESULTS_BRANCH") or DEFAULT_RESULTS_BRANCH
+    return branch if is_branch(branch) else DEFAULT_RESULTS_BRANCH
+
+
+def actions_repo() -> str:
+    """The repository whose Actions runs test commits (this one, in CI)."""
+    repo = os.environ.get("GITHUB_REPOSITORY") or ""
+    return repo if SLUG_RE.fullmatch(repo) else results_repo()
+
+
+def worker_repo() -> str:
+    """The repository that holds golden-baseline.yml and builds the worker
+    image. That is the workflow's own repository, except in the composite
+    action, which runs in its caller's: action.yml names it in REPORT_WORKER_REPO."""
+    repo = os.environ.get("REPORT_WORKER_REPO") or ""
+    return repo if SLUG_RE.fullmatch(repo) else actions_repo()
+
+
+def run_url(run_id, repo=None) -> str | None:
+    """An Actions run by its id, in `repo` when that is a plain slug (an index
+    entry names the repository that ran it), else in this workflow's own."""
+    if (as_int(run_id) or 0) <= 0:
+        return None
+    repo = repo if isinstance(repo, str) and SLUG_RE.fullmatch(repo) else actions_repo()
+    return f"https://github.com/{repo}/actions/runs/{run_id}"
+
+
+def entry_run_url(entry: dict) -> str | None:
+    """The Actions run that tested an index entry's commit."""
+    return run_url(entry.get("run"), entry.get("run_repo"))
+
+
+def checked_run_url(url) -> str | None:
+    return url if isinstance(url, str) and RUN_URL_RE.fullmatch(url) else None
+
+
+def this_run_url() -> str | None:
+    run_id = os.environ.get("GITHUB_RUN_ID") or ""
+    return run_url(int(run_id)) if run_id.isdigit() else None
+
+
+def sha_link(sha, n: int = 7) -> str:
+    """`sha7` linked to the ComfyUI commit; escaped text when it is not a sha."""
+    if is_sha(sha):
+        return f"[{tick(sha[:n])}]({COMFY_URL}/commit/{sha})"
+    return code(sha, 40)
+
+
+def pr_link(pr) -> str:
+    if (as_int(pr) or 0) <= 0:
+        return ""
+    return f"[#{pr}]({COMFY_URL}/pull/{pr})"
+
+
+def compare_link(prev, sha) -> str:
+    if is_sha(prev) and is_sha(sha):
+        return f"[compare]({COMFY_URL}/compare/{prev}...{sha})"
+    return ""
+
+
+def join_path(*parts) -> str | None:
+    """A results path from untrusted parts; None when a segment is not a plain name."""
+    segments: list[str] = []
+    for part in parts:
+        if not isinstance(part, str):
+            return None
+        for seg in part.split("/"):
+            if (seg in ("", ".", "..") or len(seg) > 200 or "\\" in seg
+                    or clean(seg, lines=True) != seg or "\n" in seg):
+                return None
+            segments.append(seg)
+    return "/".join(segments)
+
+
+def dashboard_url() -> str | None:
+    base = os.environ.get("REPORT_DASHBOARD_URL")
+    if base is None:
+        return DEFAULT_DASHBOARD_URL
+    base = base.strip().rstrip("/")
+    return base if base and DASHBOARD_RE.fullmatch(base) else None
+
+
+# -- results reader ---------------------------------------------------------------
+class Reader:
+    """Read-only view of the results branch at one commit. This base class
+    reads nothing: it stands in when the branch cannot be reached."""
+
+    sha: str | None = None  # the results commit every read and link is pinned to
+
+    def read_json(self, path: str) -> dict | None:
+        """The JSON object at `path`; None when absent or unreadable."""
+        return None
+
+    def list_dir(self, path: str) -> list[str]:
+        """Names directly under `path`, from the trees alone."""
+        return []
+
+    def prefetch(self, paths: list[str]) -> None:
+        """Load many files in one round trip; reads work without it."""
+
+
+class DictReader(Reader):
+    """In-memory results tree {path: object}, for tests and local renders."""
+
+    def __init__(self, files: dict[str, dict], sha: str | None = "0" * 40):
+        self.files = files
+        self.sha = sha
+
+    def read_json(self, path: str) -> dict | None:
+        data = self.files.get(path)
+        return data if isinstance(data, dict) else None
+
+    def list_dir(self, path: str) -> list[str]:
+        base = path.strip("/") + "/"
+        return sorted({p[len(base):].split("/", 1)[0] for p in self.files if p.startswith(base)})
+
+
+class GitReader(Reader):
+    """The results branch through a git checkout that can fetch it.
+
+    The fetch is blobless, which also makes origin a promisor remote: trees are
+    local and a file's content is fetched the first time it is read. Every read
+    names the commit the fetch returned, never FETCH_HEAD, so a publish that
+    lands while the report is being built cannot mix two states.
+    """
+
+    def __init__(self, workdir: str | Path, fetch: bool = True, branch: str | None = None):
+        self.workdir = str(workdir)
+        ref = "HEAD"
+        if fetch:
+            self._git("fetch", "--depth", "1", "--filter=blob:none", "origin",
+                      branch or results_branch(), check=True)
+            ref = "FETCH_HEAD"
+        sha = self._git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}",
+                        check=True).stdout.decode("ascii", "replace").strip()
+        if not FULL_SHA_RE.fullmatch(sha):
+            raise ReportError("the results checkout has no commit")
+        self.sha = sha
+        # Only a partial clone has blobs left to fetch. A filtered fetch into a
+        # full clone would turn it into one, so prefetch leaves those alone.
+        self._partial = fetch or self._git(
+            "config", "--get", "remote.origin.promisor").stdout.strip() == b"true"
+
+    def _git(self, *args: str, check: bool = False, stdin: bytes | None = None):
+        # Output is captured, never echoed: it can quote file content.
+        r = subprocess.run(["git", "-C", self.workdir, *args], input=stdin, capture_output=True,
+                           timeout=GIT_TIMEOUT_S, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+        if check and r.returncode != 0:
+            raise ReportError("git could not read the results branch")
+        return r
+
+    def read_json(self, path: str) -> dict | None:
+        try:
+            r = self._git("cat-file", "-p", f"{self.sha}:{path}")
+            data = json.loads(r.stdout.decode("utf-8")) if r.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError, ValueError, RecursionError):
+            return None  # RecursionError: JSON nested deeper than the parser goes
+        return data if isinstance(data, dict) else None
+
+    def list_dir(self, path: str) -> list[str]:
+        try:
+            r = self._git("ls-tree", "-z", "--name-only", f"{self.sha}:{path.strip('/')}")
+        except (OSError, subprocess.SubprocessError):
+            return []
+        if r.returncode != 0:
+            return []
+        return [n for n in r.stdout.decode("utf-8", "replace").split("\0") if n]
+
+    def prefetch(self, paths: list[str]) -> None:
+        """One fetch for the blobs behind `paths`, the way GitHubStorage.prefetch
+        does it. A lazy read costs a round trip per file against GitHub."""
+        wanted = sorted({p for p in paths if p})
+        oids: list[str] = []
+        if not self._partial:
+            return
+        try:
+            for i in range(0, len(wanted), 50):
+                r = self._git("ls-tree", "-z", self.sha, "--", *wanted[i:i + 50])
+                if r.returncode != 0:
+                    return
+                for line in r.stdout.decode("utf-8", "replace").split("\0"):
+                    meta = line.partition("\t")[0].split()
+                    if len(meta) == 3 and meta[1] == "blob":
+                        oids.append(meta[2])
+            if oids:
+                # Bytes, not text: text mode would write CRLF on Windows.
+                self._git("-c", "fetch.negotiationAlgorithm=noop", "fetch", "--no-tags",
+                          "--no-write-fetch-head", "--recurse-submodules=no",
+                          "--filter=blob:none", "--stdin", "origin",
+                          stdin=("\n".join(oids) + "\n").encode())
+        except (OSError, subprocess.SubprocessError):
+            return  # reads fall back to one lazy fetch per file
+
+
+def raw_url(reader: Reader, path: str | None) -> str | None:
+    """A file on the results branch, pinned to the commit the report read."""
+    if not reader.sha or not path:
+        return None
+    return (f"https://raw.githubusercontent.com/{results_repo()}/{reader.sha}/"
+            f"{quote(path, safe='/')}")
+
+
+def tree_url(reader: Reader, path: str | None) -> str | None:
+    if not reader.sha or not path:
+        return None
+    return f"https://github.com/{results_repo()}/tree/{reader.sha}/{quote(path, safe='/')}"
+
+
+# -- results and labels -----------------------------------------------------------
+# One icon and one wording per result, used in every table and sentence.
+CHECK, CROSS, WARN, AMBER, BLANK, DASH, QUERY = "✅", "❌", "⚠️", "🟡", "⚪", "➖", "❔"
+LABELS = {
+    "pass": (CHECK, "pass"),
+    "new": (CROSS, "output changed (new at this commit)"),
+    "inherited": (CROSS, "output changed (inherited)"),
+    "changed": (CROSS, "output changed"),
+    "accepted": (AMBER, "output changed (accepted)"),
+    "exec": (CROSS, "execution error"),
+    "infra": (WARN, "infra error"),
+    "no_ref": (BLANK, "no reference yet"),
+    "not_run": (DASH, "not run"),
+    "unknown": (QUERY, "unknown"),
+}
+# A run that covers several commits cannot pin a new change on the one it tested.
+NEW_IN_RUN = "output changed (new in this run)"
+RED = ("new", "inherited", "changed", "exec")
+GREEN = ("pass", "accepted")
+DRIFT = ("new", "inherited", "changed", "accepted")
+ATTENTION_ORDER = ("new", "exec", "changed", "inherited", "infra", "no_ref", "unknown",
+                   "accepted")
+LEGEND = (f"Result labels: {CHECK} pass, the output matches the reference within its limits. "
+          f"{CROSS} output changed, it differs beyond the limits: new at this commit (new in "
+          "this run, when the run covers several commits), inherited from an earlier commit, "
+          f"or {AMBER} accepted, when the changed output was approved as the reference "
+          f"afterwards. {CROSS} execution error, the workflow did not finish. "
+          f"{WARN} infra error, an infrastructure problem and not a verdict on the commit. "
+          f"{BLANK} no reference yet. {DASH} not run. The reference is the approved (golden) "
+          "output of a workflow on a lane.")
+
+
+def label(state: str, batch: bool = False) -> str:
+    return f"{icon(state)} {words(state, batch)}"
+
+
+def icon(state: str) -> str:
+    return LABELS.get(state, LABELS["unknown"])[0]
+
+
+def words(state: str, batch: bool = False) -> str:
+    """The wording of a result; `batch` when its run covers several commits."""
+    if state == "new" and batch:
+        return NEW_IN_RUN
+    return LABELS.get(state, LABELS["unknown"])[1]
+
+
+def is_batch(n) -> bool:
+    """Whether a tested range of `n` commits holds more than the tested one."""
+    return (as_int(n) or 0) > 1
+
+
+def cell_state(verdict, detail=None, sha=None, tag=None, reference=None) -> str:
+    """The result label a verdict gets. A failure whose output is the lane's
+    reference today was approved after the run: it is no longer open. The
+    reference must have changed since the run (`tag` is the one the run was
+    compared with): the sha is the first PNG alone, and a run that fails on a
+    later frame can share it with the reference it failed against."""
+    # A list or an object is not a verdict, and cannot be a dict key below.
+    verdict = verdict if isinstance(verdict, str) else None
+    detail = detail if isinstance(detail, str) else None
+    if verdict == "pass":
+        return "pass"
+    if verdict == "fail":
+        ref = as_dict(reference)
+        if sha and sha == ref.get("sha") and tag and ref.get("tag") and tag != ref["tag"]:
+            return "accepted"
+        return {"inherited": "inherited", "new_drift": "new"}.get(detail, "changed")
+    return {"execution_error": "exec", "infra_error": "infra",
+            "no_baseline": "no_ref"}.get(verdict, "unknown")
+
+
+def workflow_name(wf) -> str:
+    return tick(wf) if is_workflow_id(wf) else code(wf, 100)
+
+
+def rollup(states: dict[str, str]) -> str:
+    """One result for a commit on a lane, from its workflows' results."""
+    vals = list(states.values())
+    n = len(vals)
+    if not n:
+        return label("not_run")
+    red = sum(s in RED for s in vals)
+    if red:
+        return f"{CROSS} {red} of {n} failed"
+    for state in ("infra", "unknown", "no_ref"):
+        k = vals.count(state)
+        if k:
+            return f"{icon(state)} {k} of {n} {words(state)}"
+    return label("pass")
+
+
+def not_passing(states: dict[str, str], cap: int = 6, batch: bool = False) -> str:
+    """The workflows that did not pass, spelled out with their result."""
+    names = [f"{workflow_name(wf)} {words(s, batch)}" for wf, s in states.items() if s != "pass"]
+    more = len(names) - cap
+    return "; ".join(names[:cap]) + (f"; +{more} more" if more > 0 else "")
+
+
+def first_png(run: dict) -> dict:
+    """The first PNG by file name: the output that identifies a run."""
+    pngs = sorted((o for o in as_list(run.get("outputs")) if isinstance(o, dict)
+                   and str(o.get("filename", "")).endswith(".png")),
+                  key=lambda o: str(o.get("filename")))
+    return pngs[0] if pngs else {}
+
+
+def entries_of(head: dict | None) -> list[dict]:
+    """Index entries, newest commit first (commit time, else run time)."""
+    entries = [e for e in as_list(as_dict(head).get("entries"))
+               if isinstance(e, dict) and isinstance(e.get("c"), str)]
+    return sorted(entries, key=entry_key, reverse=True)
+
+
+def entry_key(e: dict):
+    ct, t = as_dict(e.get("m")).get("ct"), e.get("t")
+    return (ct if is_num(ct) and ct else t if is_num(t) else 0, e["c"])
+
+
+def entry_states(entry: dict, references: dict) -> dict[str, str]:
+    out = {}
+    for wf, cell in as_dict(entry.get("w")).items():
+        cell = as_dict(cell)
+        out[wf] = cell_state(cell.get("v"), cell.get("d"), cell.get("sha"), cell.get("g"),
+                             references.get(wf))
+    return out
+
+
+def failing_since(fb: dict, entries: list[dict] | tuple = ()) -> str:
+    """'failing since <sha7> (#pr, author, subject), first seen <date>, N runs,
+    reference <tag>, last passed at <sha7>'. A chain that started in a run of
+    several commits names that run: it cannot be pinned on one pull request."""
+    fb = as_dict(fb)
+    if not fb.get("commit"):
+        return ""
+    start = next((e for e in entries if e["c"] == fb["commit"]), {})
+    n = as_dict(start.get("range")).get("n")
+    if is_batch(n):
+        who = f"a run that covered {n} commits"
+    else:
+        who = ", ".join(x for x in (pr_link(fb.get("pr")), md(fb.get("author"), 60),
+                                    md(as_dict(start.get("m")).get("s"), 80)) if x)
+    parts = [f"failing since {sha_link(fb['commit'])}" + (f" ({who})" if who else "")]
+    if utc(fb.get("run_ts")):
+        parts.append(f"first seen {utc(fb['run_ts'])[:10]}")
+    if is_num(fb.get("runs")):
+        parts.append(plural(int(fb["runs"]), "run"))
+    golden = fb.get("golden")
+    if isinstance(golden, str) and SEGMENT_RE.fullmatch(golden):
+        parts.append(f"reference {tick(golden)}")
+    if fb.get("prev_good"):
+        parts.append(f"last passed at {sha_link(fb['prev_good'])}")
+    return ", ".join(parts)
+
+
+def open_failures(head: dict | None, entries: list[dict] | tuple = ()) -> list[str]:
+    kinds = {"fail": words("changed"), "execution_error": words("exec")}
+    out = []
+    for wf, fb in as_dict(as_dict(head).get("first_bad")).items():
+        since = failing_since(fb, entries)
+        if since:
+            kind = as_dict(fb).get("kind")
+            kind = kinds.get(kind, "") if isinstance(kind, str) else ""
+            out.append(f"- {workflow_name(wf)}: " + (f"{kind}, " if kind else "") + since)
+    return out
+
+
+# -- size budget --------------------------------------------------------------------
+@dataclass(frozen=True)
+class Limits:
+    """How much of the long parts a render keeps."""
+    log_chars: int = 6000
+    traceback_lines: int = 40
+    files_per_workflow: int = 200
+    history_rows: int = HISTORY_ROWS
+    matrix_rows: int = MATRIX_ROWS
+
+    def shortened(self) -> list[str]:
+        full, out = Limits(), []
+        if self.log_chars < full.log_chars:
+            out.append(f"log tails cut to their last {self.log_chars} characters"
+                       if self.log_chars else "log tails left out")
+        if self.traceback_lines < full.traceback_lines:
+            out.append(f"tracebacks cut to their last {self.traceback_lines} lines"
+                       if self.traceback_lines else "tracebacks left out")
+        if self.files_per_workflow < full.files_per_workflow:
+            out.append(f"output file lists cut to {self.files_per_workflow} files per workflow"
+                       if self.files_per_workflow else "output file lists left out")
+        if self.history_rows < full.history_rows or self.matrix_rows < full.matrix_rows:
+            rows = max(self.history_rows, self.matrix_rows)
+            out.append(f"recent commits cut to {rows} rows" if rows
+                       else "recent commits left out")
+        return out
+
+
+# The order GitHub's limit takes things away in: the least needed first.
+SHRINK_STEPS = ({"log_chars": 1500}, {"log_chars": 0},
+                {"traceback_lines": 5}, {"traceback_lines": 0},
+                {"files_per_workflow": 3}, {"files_per_workflow": 0},
+                {"history_rows": 10, "matrix_rows": 10}, {"history_rows": 5, "matrix_rows": 5},
+                {"history_rows": 0, "matrix_rows": 0})
+
+
+def byte_size(text: str) -> int:
+    return len(text.encode("utf-8"))
+
+
+def fit(render, max_bytes: int = MAX_BYTES) -> str | None:
+    """render(limits) at the fullest limits that fit; None when nothing fits."""
+    limits = Limits()
+    text = render(limits)
+    for step in SHRINK_STEPS:
+        if byte_size(text) <= max_bytes:
+            break
+        limits = replace(limits, **step)
+        text = render(limits)
+    return text if byte_size(text) <= max_bytes else None
+
+
+def shortened_note(limits: Limits) -> list[str]:
+    cut = limits.shortened()
+    if not cut:
+        return []
+    return ["Shortened to stay under GitHub's size limit for a job summary: "
+            + "; ".join(cut) + ". The linked files hold everything."]
+
+
+# -- one lane: gather ---------------------------------------------------------------
+@dataclass
+class View:
+    """One workflow of the run, with its result worked out."""
+    wf: str
+    name: str            # the id as Markdown
+    safe: bool           # the id is a plain name: usable in paths and commands
+    cell: dict
+    run: dict
+    state: str
+    origin: str | None   # a red result: "new" or "inherited" when known
+    prior: dict          # {verdict, commit} of its last red or green result before
+    sha: str | None      # output sha256
+    chain: dict = field(default_factory=dict)  # the open failing chain it is part of
+
+
+@dataclass
+class LaneData:
+    commit: str
+    branch: str
+    lane_id: str
+    lane: dict
+    prefix: str
+    run_dir: str | None
+    reader: Reader
+    summary: dict | None = None
+    source: str | None = None       # "local", "published" or "workdir"
+    published: bool = False         # the results branch holds this very summary
+    earlier: dict = field(default_factory=dict)  # a published summary the report does not show
+    left_nothing: bool = False      # a run that tested left no record: the published one is shown
+    marker: dict = field(default_factory=dict)
+    head: dict = field(default_factory=dict)
+    registry: dict = field(default_factory=dict)
+    entries: list[dict] = field(default_factory=list)  # the head's entries, newest first
+    entry: dict = field(default_factory=dict)     # this commit's index entry
+    views: list[View] = field(default_factory=list)
+    references: dict = field(default_factory=dict)  # wf -> golden current.json
+    noise: dict = field(default_factory=dict)       # wf -> noise_floor.json
+    figures: dict = field(default_factory=dict)     # wf -> figure file names
+    first_figures: dict = field(default_factory=dict)  # wf -> (dir, names) at first_bad
+    manifest: dict = field(default_factory=dict)
+    manifest_is_snapshot: bool = False  # the manifest the run used, not today's
+    packs: dict = field(default_factory=dict)
+    skipped: bool = False
+    artifact_url: str | None = None
+
+    @property
+    def files_ok(self) -> bool:
+        """This run's files can be linked: published, at a known results commit."""
+        return bool(self.published and self.reader.sha and self.run_dir)
+
+    @property
+    def lane_references(self) -> dict:
+        lanes = as_dict(self.registry.get("lanes"))
+        return as_dict(as_dict(lanes.get(self.lane_id)).get("goldens"))
+
+    @property
+    def first_bad(self) -> dict:
+        return as_dict(self.head.get("first_bad"))
+
+    @property
+    def retired(self) -> bool:
+        return lanes_mod.is_retired(self.lane)
+
+
+def read_json_file(path: Path | str | None) -> dict | None:
+    try:
+        return regression_skip.read_optional_json(str(path) if path else None)
+    except RecursionError:  # JSON nested deeper than the parser goes
+        return None
+
+
+def load_json_or_empty(path: Path) -> dict:
+    return read_json_file(path) or {}
+
+
+def lane_prefix(lane: dict) -> str:
+    prefix = lane.get("prefix")
+    return prefix if isinstance(prefix, str) and join_path(prefix) else "regression"
+
+
+def summary_from_workdir(workdir: str | None, commit: str, branch: str,
+                         lane_id: str) -> dict | None:
+    """A summary rebuilt from <workdir>/<wf>/{run,comparison}.json: what a run
+    that stopped before it published still knows. Same cell shape as
+    run_regression.process_workflow returns."""
+    root = Path(workdir) if workdir else None
+    if not root or not root.is_dir():
+        return None
+    cells = {}
+    for d in sorted(p for p in root.iterdir() if p.is_dir() and is_workflow_id(p.name)):
+        run, cmp_ = read_json_file(d / "run.json"), read_json_file(d / "comparison.json")
+        if not run and not cmp_:
+            continue
+        run, cmp_ = run or {}, cmp_ or {}
+        thumbs = d / "outputs" / "thumbs"
+        thumb = min((p.name for p in thumbs.glob("*.webp")), default=None) if thumbs.is_dir() \
+            else None
+        cells[d.name] = {
+            "workflow_id": d.name, "worker_status": run.get("status"),
+            **{k: cmp_.get(k) for k in ("verdict", "detail", "vs_golden", "vs_previous",
+                                        "thresholds_used", "golden_tag", "previous_commit",
+                                        "previous_verdict", "figures")},
+            "output_sha256": first_png(run).get("sha256"), "thumbnail": thumb,
+            **{k: run.get(k) for k in ("gpu_name", "timings", "vram_peak_mb", "rss_peak_mb",
+                                       "comfy_version", "torch_version", "python_version",
+                                       "env", "custom_nodes")}}
+    if not cells:
+        return None
+    verdicts = [c.get("verdict") for c in cells.values()]
+    return {"schema_version": 2, "branch": branch, "commit": commit, "lane": lane_id,
+            "run_ts": None,
+            "overall": "fail" if any(v in ("fail", "execution_error") for v in verdicts)
+            else "pass",
+            "has_infra_error": "infra_error" in verdicts,
+            "env": next((c["env"] for c in cells.values() if c.get("env")), None),
+            "workflows": cells}
+
+
+def prior_result(entries: list[dict], commit: str, wf: str, cell: dict,
+                 committed_ts=None) -> dict:
+    """{verdict, commit} of the workflow's most recent red or green result
+    before `commit`. The summary carries it; one that does not (an older one,
+    or one rebuilt from the runner's files) gets it from the index, by the rule
+    of index_builder.prior_verdicts."""
+    if cell.get("prior_verdict"):
+        return {"verdict": cell["prior_verdict"], "commit": cell.get("prior_commit")}
+    for e in entries:  # newest first
+        if e["c"] == commit or (is_num(committed_ts) and entry_key(e)[0] > committed_ts):
+            continue
+        verdict = as_dict(as_dict(e.get("w")).get(wf)).get("v")
+        if verdict in ("pass", "fail", "execution_error"):
+            return {"verdict": verdict, "commit": e["c"]}
+    return {}
+
+
+def origin_of(state: str, prior: dict, fb: dict, commit: str) -> str | None:
+    """Whether a red result started at this commit or was already there."""
+    if state in ("new", "inherited"):
+        return state
+    if state != "exec":
+        return None
+    if prior.get("verdict") in ("pass", "fail"):
+        return "new"
+    if prior.get("verdict") == "execution_error":
+        return "inherited"
+    if fb.get("commit"):
+        return "new" if fb["commit"] == commit else "inherited"
+    return None
+
+
+def not_identical(cell: dict) -> bool:
+    """A comparison ran and found a difference, with the reference or the previous run."""
+    return any(m and not m.get("error") and not m.get("identical")
+               for m in (as_dict(cell.get("vs_golden")), as_dict(cell.get("vs_previous"))))
+
+
+def chain_of(d: LaneData, wf: str, committed_ts=None) -> dict:
+    """The lane's open failing chain of `wf`, when this commit is part of it.
+    head.first_bad describes the chains that are open now: a report about an
+    older commit must not take a chain that started later as its own."""
+    fb = as_dict(d.first_bad.get(wf))
+    start = next((e for e in d.entries if e["c"] == fb.get("commit")), None)
+    here = entry_key(d.entry)[0] if d.entry else committed_ts
+    if start is None or fb.get("commit") == d.commit or not is_num(here) or not here:
+        return fb  # no order to check: the start is older than the head, or this commit is new
+    return fb if entry_key(start)[0] <= here else {}
+
+
+def gather_lane(reader: Reader, lanes: dict, commit: str, branch: str, lane_id: str,
+                summary_file: str | None = None, workdir: str | None = None,
+                skipped: bool = False, artifact_url: str | None = None,
+                manifest: dict | None = None, packs: dict | None = None) -> LaneData:
+    lane = as_dict(as_dict(lanes.get("lanes")).get(lane_id))
+    if not lane:
+        raise ReportError("the lane is not in manifest/lanes.json")
+    prefix = lane_prefix(lane)
+    root = prefix.split("/")[0]
+    run_dir = join_path(prefix, "runs", branch, commit)
+    d = LaneData(commit=commit, branch=branch, lane_id=lane_id, lane=lane, prefix=prefix,
+                 run_dir=run_dir, reader=reader, skipped=skipped, packs=as_dict(packs),
+                 artifact_url=artifact_url if isinstance(artifact_url, str)
+                 and ARTIFACT_URL_RE.fullmatch(artifact_url) else None)
+
+    head_path = join_path(root, "index", branch, f"{lane_id}.json")
+    registry_path = f"{root}/index/lanes.json"
+    snapshot_path = join_path(prefix, "manifest-snapshot", f"{commit}.json")
+    summary_path = run_dir and f"{run_dir}/summary.json"
+    marker_path = run_dir and f"{run_dir}/attempt.json"
+    reader.prefetch([p for p in (head_path, registry_path, snapshot_path, summary_path,
+                                 marker_path) if p])
+
+    published = reader.read_json(summary_path) if summary_path else None
+    local = read_json_file(summary_file)
+    if local and local.get("commit") == commit and local.get("lane") == lane_id:
+        d.summary, d.source = local, "local"
+        d.published = bool(published) and published.get("run_ts") == local.get("run_ts")
+    else:
+        # A run that tested the commit and could not publish reports from its own
+        # records: a summary an earlier attempt published must not stand in for it.
+        rebuilt = None if skipped else summary_from_workdir(workdir, commit, branch, lane_id)
+        if rebuilt:
+            d.summary, d.source = rebuilt, "workdir"
+        elif published:
+            d.summary, d.source, d.published = published, "published", True
+            # It was told where a run's files would be, and found none of them.
+            d.left_nothing = not skipped and bool(summary_file or workdir)
+    if published and not d.published:
+        d.earlier = published
+    d.marker = (reader.read_json(marker_path) if marker_path else None) or {}
+    d.head = (reader.read_json(head_path) if head_path else None) or {}
+    d.registry = reader.read_json(registry_path) or {}
+    d.entries = entries_of(d.head)
+    d.entry = next((e for e in d.entries if e["c"] == commit), {})
+    # The manifest the run used, when its snapshot is published; else today's.
+    snapshot = reader.read_json(snapshot_path) if snapshot_path else None
+    d.manifest, d.manifest_is_snapshot = snapshot or as_dict(manifest), bool(snapshot)
+    if not d.summary:
+        return d
+
+    cells = {wf: as_dict(cell) for wf, cell in as_dict(d.summary.get("workflows")).items()}
+    # The index entry and the runner's records each describe one run: the entry
+    # the published one, the records the run that just finished here.
+    index_cells = as_dict(d.entry.get("w")) if d.published else {}
+    run_paths = {wf: join_path(run_dir, wf, "run.json") if run_dir else None for wf in cells}
+    local_runs = {wf: read_json_file(Path(workdir) / wf / "run.json")
+                  for wf in cells if workdir and d.source != "published" and is_workflow_id(wf)}
+    wanted = [p for wf, p in run_paths.items() if p and d.published and not local_runs.get(wf)]
+    for wf, cell in cells.items():
+        if cell.get("verdict") == "fail" and is_workflow_id(wf):
+            wanted.append(f"{prefix}/golden/{wf}/current.json")
+            tag = cell.get("golden_tag")
+            if isinstance(tag, str) and SEGMENT_RE.fullmatch(tag):
+                wanted.append(f"{prefix}/golden/{wf}/{tag}/noise_floor.json")
+    reader.prefetch(wanted)
+
+    committed_ts = commit_meta(d).get("committed_ts")
+    for wf, cell in cells.items():
+        safe = is_workflow_id(wf)
+        run = local_runs.get(wf) or {}
+        if not run and run_paths[wf] and d.published:  # else it is another run's record
+            run = reader.read_json(run_paths[wf]) or {}
+        index_cell = as_dict(index_cells.get(wf))
+        # Summaries older than `detail` were classified by the index builder.
+        detail = cell.get("detail") or index_cell.get("d")
+        sha = cell.get("output_sha256") or first_png(run).get("sha256") or index_cell.get("sha")
+        state = cell_state(cell.get("verdict"), detail, sha,
+                           cell.get("golden_tag") or index_cell.get("g"),
+                           d.lane_references.get(wf))
+        fb = chain_of(d, wf, committed_ts)
+        prior = prior_result(d.entries, commit, wf, cell, committed_ts)
+        d.views.append(View(wf=wf, name=workflow_name(wf), safe=safe, cell=cell, run=run,
+                            state=state, origin=origin_of(state, prior, fb, commit),
+                            prior=prior, sha=sha if isinstance(sha, str) else None, chain=fb))
+        if not safe or not (state in DRIFT or (state == "pass" and not_identical(cell))):
+            continue
+        if state in DRIFT:
+            d.references[wf] = reader.read_json(f"{prefix}/golden/{wf}/current.json") or {}
+        tag = cell.get("golden_tag")
+        if isinstance(tag, str) and SEGMENT_RE.fullmatch(tag):
+            d.noise[wf] = reader.read_json(f"{prefix}/golden/{wf}/{tag}/noise_floor.json") or {}
+        if d.files_ok:
+            d.figures[wf] = reader.list_dir(f"{run_dir}/{wf}/figures")
+        start = fb.get("commit")
+        if state == "inherited" and is_sha(start) and start != commit:
+            first_dir = join_path(prefix, "runs", branch, start, wf, "figures")
+            if first_dir:
+                d.first_figures[wf] = (first_dir, reader.list_dir(first_dir))
+    return d
+
+
+# -- one lane: sections ---------------------------------------------------------------
+def lane_label(lane_id: str, lane: dict) -> str:
+    return md(lane.get("label") or lane_id, 120)
+
+
+def lane_icon(views: list[View]) -> str:
+    """The icon of the lane's result: the one its row in a history table gets."""
+    return rollup({v.wf: v.state for v in views}).split(" ", 1)[0]
+
+
+def headline(views: list[View], covers=None) -> str:
+    """One sentence for the run; `covers` is how many commits it tested at once."""
+    n = len(views)
+    if not n:
+        return "The summary lists no workflows."
+    count = {s: sum(v.state == s for v in views) for s in LABELS}
+    red = [v for v in views if v.state in RED]
+    extra = []
+    if red:
+        new = sum(v.origin == "new" for v in red)
+        inherited = sum(v.origin == "inherited" for v in red)
+        here = "new in this run" if is_batch(covers) else "new at this commit"
+        text = f"{len(red)} of {plural(n, 'workflow')} failed"
+        if new == len(red):
+            text += f", {here}" + (f", which covers {covers} commits." if is_batch(covers) else ".")
+        elif inherited == len(red):
+            text += ", inherited from an earlier commit."
+        elif new or inherited:
+            parts = [f"{new} {here}" if new else "",
+                     f"{inherited} inherited" if inherited else "",
+                     f"{len(red) - new - inherited} not classified"
+                     if len(red) > new + inherited else ""]
+            text += ": " + ", ".join(p for p in parts if p) + "."
+        else:
+            text += "."
+        if count["infra"]:
+            extra.append(f"{plural(count['infra'], 'workflow')} hit infrastructure errors "
+                         "(not a verdict on the commit).")
+    elif count["infra"]:
+        text = (f"No failures; {plural(count['infra'], 'workflow')} hit infrastructure errors "
+                "(not a verdict on the commit).")
+    elif count["pass"] == n:
+        text = ("The workflow matches its reference." if n == 1
+                else f"All {n} workflows match their reference.")
+    elif count["pass"]:
+        text = f"No failures; {count['pass']} of {plural(n, 'workflow')} match their reference."
+    else:
+        text = "No failures."
+    if count["accepted"]:
+        extra.append(f"{plural(count['accepted'], 'changed output')} accepted as the reference "
+                     "after the run.")
+    if count["no_ref"]:
+        extra.append(f"{plural(count['no_ref'], 'workflow')} with no reference yet.")
+    if count["unknown"]:
+        extra.append(f"{plural(count['unknown'], 'workflow')} without a result.")
+    return " ".join([text, *extra])
+
+
+def tested_run_url(d: LaneData) -> str | None:
+    """The Actions run that tested the commit."""
+    summary = as_dict(d.summary)
+    url = checked_run_url(summary.get("run_url")) or run_url(summary.get("run_id"))
+    if not url and d.published:  # the index entry names the run that published
+        url = entry_run_url(d.entry)
+    if not url and d.source in ("local", "workdir") and not d.skipped:
+        url = this_run_url()
+    # The start marker names the run of the latest attempt: this one, if it matches.
+    if not url and d.marker and (not d.summary or d.marker.get("attempt") == run_attempt(d)):
+        url = checked_run_url(d.marker.get("run_url"))
+    return url
+
+
+def run_attempt(d: LaneData) -> int | None:
+    """Which attempt at the commit the reported run was. A run rebuilt from the
+    runner's files has no summary to say so; its start marker does."""
+    attempt = as_int(as_dict(d.summary).get("attempt"))
+    if attempt is None and d.source == "workdir":
+        attempt = as_int(d.marker.get("attempt"))
+    return attempt
+
+
+def attempts_spent(d: LaneData) -> int:
+    """The attempts the cron counts for the commit (regression_skip.attempts):
+    the latest of the reported run and the start marker, which a run that died
+    before it published still pushed."""
+    return max(run_attempt(d) or 1, as_int(d.marker.get("attempt")) or 0, 1)
+
+
+def attempt_text(attempt) -> str:
+    if (as_int(attempt) or 0) < 1:
+        return ""
+    if attempt <= regression_skip.MAX_ATTEMPTS:
+        return f"attempt {attempt} of {regression_skip.MAX_ATTEMPTS}"
+    return f"attempt {attempt}"
+
+
+def earlier_text(summary: dict, url: str | None) -> str:
+    """', tested <when> in [an earlier run](url)', as far as both are known."""
+    when = utc(summary.get("run_ts"))
+    return (f", tested {when}" if when else "") + (f" in [an earlier run]({url})" if url else "")
+
+
+def title_block(d: LaneData) -> list[str]:
+    mark = lane_icon(d.views) if d.summary else DASH
+    out = [f"## {mark} GPU regression · {lane_label(d.lane_id, d.lane)} · "
+           f"{tick(d.commit[:8])}"]
+    summary = as_dict(d.summary)
+    if d.skipped and d.summary:
+        note = ("This run did not test this commit again: the lane already has a result for it"
+                + earlier_text(summary, tested_run_url(d)))
+        out += ["", "> [!NOTE]", f"> {note}. The report below shows that result."]
+    if d.summary and not d.reader.sha:
+        out += ["", "> [!WARNING]",
+                "> The results branch could not be read. History, reference details, images "
+                "and links to published files are left out."]
+    elif d.source == "workdir":
+        text = ("> This run stopped before it published its results. The report is rebuilt "
+                "from the files on the runner, so images and links to published files are "
+                "missing. The attached files hold the outputs.")
+        if d.earlier:
+            url = (checked_run_url(d.earlier.get("run_url")) or run_url(d.earlier.get("run_id"))
+                   or entry_run_url(d.entry))
+            text += (" The results branch holds an earlier result for this commit"
+                     + earlier_text(d.earlier, url) + ": the history table still shows that one.")
+        out += ["", "> [!WARNING]", text]
+    elif d.source == "local" and not d.published:
+        out += ["", "> [!WARNING]",
+                "> The results branch does not hold this run's summary. The report is built "
+                "from the files on the runner, so images and links to published files are "
+                "left out."]
+    elif d.left_nothing:
+        out += ["", "> [!WARNING]",
+                "> This run left no result on the runner. The report below shows the result "
+                "that is already published for this commit"
+                + earlier_text(summary, tested_run_url(d)) + "."]
+    if d.summary:
+        out += ["", headline(d.views, tested_range(d).get("n"))]
+    return out
+
+
+def no_summary_block(d: LaneData) -> list[str]:
+    """Nothing is published for the commit: say so, show the start marker."""
+    if not d.reader.sha:
+        return ["The results branch could not be read, so the published result of this commit "
+                "on this lane cannot be shown."]
+    if d.skipped:
+        out = ["This run did not test this commit, and the lane has no published result for it."]
+    else:
+        out = ["No result is published for this commit on this lane: the run stopped before "
+               "it wrote a summary."]
+    if d.marker:
+        bits = [attempt_text(d.marker.get("attempt")),
+                f"started {utc(d.marker.get('started_ts'))}" if utc(d.marker.get("started_ts"))
+                else ""]
+        url = checked_run_url(d.marker.get("run_url"))
+        if url:
+            bits.append(f"[the run that started it]({url})")
+        bits = [b for b in bits if b]
+        if bits:
+            out += ["", "The last start marker on the results branch: " + ", ".join(bits) + "."]
+        if d.skipped and (as_int(d.marker.get("attempt")) or 0) >= regression_skip.MAX_ATTEMPTS:
+            out.append(f"The cron stops after {plural(regression_skip.MAX_ATTEMPTS, 'attempt')}. "
+                       "Dispatch **GPU regression** with this commit to test it again.")
+    else:
+        out += ["", "There is no start marker for it either."]
+    return out
+
+
+def commit_meta(d: LaneData) -> dict:
+    meta = as_dict(as_dict(d.summary).get("commit_meta"))
+    if meta:
+        return meta
+    m = as_dict(d.entry.get("m"))  # summaries older than commit_meta: the index has it
+    return {"subject": m.get("s"), "author": m.get("a"), "committed_ts": m.get("ct"),
+            "pr": m.get("pr"), "pr_title": m.get("pt"), "pr_author": m.get("pa")}
+
+
+def tested_range(d: LaneData) -> dict:
+    rng = as_dict(as_dict(d.summary).get("tested_range"))
+    if rng:
+        return {"prev": rng.get("prev"), "n": rng.get("commits_between")}
+    if d.entry.get("prev"):
+        return {"prev": d.entry.get("prev"), "n": as_dict(d.entry.get("range")).get("n")}
+    return {}
+
+
+def tested_between(d: LaneData, prev) -> int:
+    """How many commits after `prev` and before this one the lane has results
+    for. The range starts at the previous-run pointer, which skips runs that
+    did not finish every workflow: commits inside it can have been tested."""
+    start = next((e for e in d.entries if e["c"] == prev), None)
+    if not start or not d.entry:
+        return 0
+    low, high = entry_key(start), entry_key(d.entry)
+    return sum(low < entry_key(e) < high for e in d.entries)
+
+
+def commit_rows(commit: str, meta: dict) -> list[list[str]]:
+    bits = [sha_link(commit, 12), md(meta.get("subject"), 200)]
+    if meta.get("author"):
+        bits.append(f"by {md(meta['author'], 60)}")
+    if utc(meta.get("committed_ts")):
+        bits.append(f"committed {utc(meta['committed_ts'])}")
+    parents = [sha_link(p) for p in as_list(meta.get("parents"))[:4] if is_sha(p)]
+    if parents:
+        bits.append(("parent " if len(parents) == 1 else "parents ") + ", ".join(parents))
+    rows = [["Commit", " · ".join(b for b in bits if b)]]
+    if pr_link(meta.get("pr")):
+        bits = [pr_link(meta["pr"]), md(meta.get("pr_title"), 200)]
+        if meta.get("pr_author"):
+            bits.append(f"by {md(meta['pr_author'], 60)}")
+        rows.append(["Pull request", " · ".join(b for b in bits if b)])
+    return rows
+
+
+def backends_text(lines) -> str:
+    """Kernel backends from ComfyUI's startup log lines. The worker sends other
+    startup lines along (torch version, the GPU): they are not backends, and
+    the row already has them."""
+    out = []
+    for line in as_list(lines)[:12]:
+        m = re.search(r"backend\s+([\w.-]+):\s*\{'available':\s*(True|False)"
+                      r"(?:,\s*'disabled':\s*(True|False))?", clean(line, 400))
+        if not m:
+            continue
+        if m.group(2) == "False":
+            out.append(f"{md(m.group(1))} (not available)")
+        else:
+            out.append(md(m.group(1)) + (" (disabled)" if m.group(3) == "True" else ""))
+    return ", ".join(o for o in out if o)
+
+
+def environment_text(summary: dict) -> str:
+    env = as_dict(summary.get("env"))
+    cells = [as_dict(c) for c in as_dict(summary.get("workflows")).values()]
+
+    def first(key):
+        return next((c[key] for c in cells if c.get(key)), None)
+
+    python = env.get("python") or first("python_version")
+    python = python.split()[0] if isinstance(python, str) and python.split() else None
+    parts = [("GPU", first("gpu_name")), ("driver", env.get("driver_version")),
+             ("Python", python), ("torch", env.get("torch") or first("torch_version")),
+             ("CUDA", env.get("cuda")), ("ComfyUI", first("comfy_version")),
+             ("worker image", env.get("image"))]
+    out = [f"{name} {md(value, 80)}" for name, value in parts if value]
+    build = env.get("image_sha")  # the commit of the worker repository the image was built from
+    if is_sha(build):
+        out.append(f"image build [{tick(build[:7])}](https://github.com/{worker_repo()}/commit/"
+                   f"{build})")
+    baked = env.get("custom_nodes_sha256")  # the custom-node packs baked into the image
+    if isinstance(baked, str) and HEX64_RE.fullmatch(baked):
+        out.append(f"baked packs {tick(baked[:12])}")
+    backends = backends_text(env.get("runtime_backends"))
+    if backends:
+        out.append(f"backends: {backends}")
+    return " · ".join(out)
+
+
+def facts_block(d: LaneData) -> list[str]:
+    summary = as_dict(d.summary)
+    meta = commit_meta(d)
+    rows = commit_rows(d.commit, meta)
+
+    tested = [utc(summary.get("run_ts"))]
+    run_ts, committed = summary.get("run_ts"), meta.get("committed_ts")
+    if is_num(run_ts) and is_num(committed) and run_ts >= committed > 0:
+        minutes = (run_ts - committed) / 60
+        tested.append(f"{minutes:.0f} min after the commit" if minutes < 120
+                      else f"{minutes / 60:.1f} h after the commit")
+    # The attempt is named where it tells something: a retry happened or can follow.
+    # "attempt 1 of 2" on a run with a verdict reads as if a second one were due.
+    attempt = run_attempt(d)
+    if (attempt or 0) > 1 or d.source == "workdir" or any(v.state == "infra" for v in d.views):
+        tested.append(attempt_text(attempt))
+    url = tested_run_url(d)
+    if url:
+        tested.append(f"[Actions run]({url})")
+    tested = [t for t in tested if t]
+    if tested:
+        rows.append(["Tested", " · ".join(tested)])
+
+    rng = tested_range(d)
+    if rng.get("prev"):
+        n, prev = as_int(rng.get("n")), sha_link(rng["prev"])
+        cmp_ = compare_link(rng["prev"], d.commit)
+        between = tested_between(d, rng["prev"])
+        if n == 1:
+            covers = f"1 commit since {prev}"
+        elif n is not None and n > 1 and between:
+            # The previous-run pointer only moves on a run that finished every workflow.
+            covers = (f"{n} commits since {prev}" + (f" ({cmp_})" if cmp_ else "")
+                      + ", the commit of the previous run that finished every workflow. The "
+                      f"lane tested {between} of them in between; outputs are still compared "
+                      f"with that run, so a change seen here is in one of the {n}")
+        elif n is not None and n > 1:
+            covers = (f"{n} commits since {prev}" + (f" ({cmp_})" if cmp_ else "")
+                      + ": a change seen here is in one of them")
+        elif n is not None:
+            covers = (f"no new commit since {prev}, the previous tested commit: this commit "
+                      "is not ahead of it")
+        else:
+            covers = f"commits since {prev}, count unknown" + (f" ({cmp_})" if cmp_ else "")
+        rows.append(["Covers", covers])
+
+    lane = d.lane
+    lane_bits = [lane_label(d.lane_id, lane),
+                 tick(d.lane_id) if LANE_RE.fullmatch(d.lane_id) else code(d.lane_id),
+                 f"branch {tick(d.branch) if is_branch(d.branch) else code(d.branch)}",
+                 f"role {md(lane.get('role'), 30)}" if lane.get("role") else "",
+                 "retired: history only" if d.retired
+                 else f"cadence {md(lane.get('cadence'), 30)}" if lane.get("cadence") else "",
+                 "blocking" if lane.get("blocking") else "informational"]
+    rows.append(["Lane", " · ".join(b for b in lane_bits if b)])
+    env = environment_text(summary)
+    if env:
+        rows.append(["Environment", env])
+    return table(["", ""], rows)
+
+
+def with_limit(value, spec: str, limit, sign: str, crossed: bool, extra: str = "") -> str:
+    """A number next to its limit; bold when it crossed the limit."""
+    if not is_num(value):
+        return ""
+    text = f"{value:{spec}}"
+    if not is_num(limit):
+        return text + extra
+    return (f"**{text}**" if crossed else text) + f"{extra} (limit {sign} {limit:g})"
+
+
+def metric_cells(metrics, th=None, other: str = "the reference") -> list[str]:
+    """Mean MSE, PSNR mean (min), % pixels changed, max abs diff, frames."""
+    m, th = as_dict(metrics), as_dict(th)
+    if m.get("error"):
+        return [f"comparison failed: {md(m['error'], 300)}", "", "", "", ""]
+    if not m:
+        return ["not compared", "", "", "", ""]
+    ref, cand = m.get("frame_count_ref"), m.get("frame_count_cand")
+    frames = fmt(m.get("frames_compared"), "g")
+    if is_num(ref) and is_num(cand) and ref != cand:
+        frames = f"**{cand:g} here, {ref:g} in {other}**"
+    if m.get("identical"):
+        return ["bit-identical", "", "", "", frames]
+    mse, psnr, pct = m.get("mean_mse"), m.get("mean_psnr_db"), m.get("mean_pct_pixels_changed")
+    lim_mse, lim_psnr, lim_pct = (th.get("max_mean_mse"), th.get("min_mean_psnr_db"),
+                                  th.get("max_pct_pixels_changed"))
+    low = fmt(m.get("min_psnr_db"), ".2f")
+    return [with_limit(mse, ".4f", lim_mse, "≤", is_num(mse) and is_num(lim_mse)
+                       and mse > lim_mse),
+            with_limit(psnr, ".2f", lim_psnr, "≥", is_num(psnr) and is_num(lim_psnr)
+                       and psnr < lim_psnr, f", min {low}" if low else ""),
+            with_limit(pct, ".3f", lim_pct, "≤", is_num(pct) and is_num(lim_pct)
+                       and pct > lim_pct),
+            fmt(m.get("max_abs_diff"), "g"), frames]
+
+
+def reference_text(ref: dict) -> str:
+    """Where a reference came from: tag, when it was approved, by whom, why."""
+    tag = ref.get("tag")
+    text = tick(tag) if isinstance(tag, str) and SEGMENT_RE.fullmatch(tag) else code(tag, 60)
+    approved = " ".join(b for b in (utc(ref.get("blessed_ts")),
+                                    f"by {md(ref['blessed_by'], 60)}" if ref.get("blessed_by")
+                                    else "") if b)
+    if approved:
+        text += f", approved {approved}"
+    if ref.get("reason"):
+        text += f". Reason: {md(ref['reason'], 400)}"
+    return text
+
+
+FIGURES = (("side_by_side_golden.png", "Reference, this commit and their difference"),
+           ("diff_heatmap_golden.png", "Difference from the reference, worst frame"),
+           ("side_by_side_prev.png", "Previous tested commit, this commit and their difference"),
+           ("diff_heatmap_prev.png", "Difference from the previous tested commit, worst frame"))
+
+
+def figure_lines(d: LaneData, v: View) -> list[str]:
+    if not d.files_ok or not v.safe:  # an id that is no plain name builds no URL
+        return []
+    listed = set(d.figures.get(v.wf) or [])
+    if not listed and v.cell.get("figures") is True:
+        listed = {name for name, _ in FIGURES[:2]}  # the summary says they were rendered
+    out: list[str] = []
+    previous: list[str] = []
+    for name, caption in FIGURES:
+        url = raw_url(d.reader, f"{d.run_dir}/{v.wf}/figures/{name}")
+        if name not in listed or not url:
+            continue
+        img = (f'<a href="{attr(url)}"><img src="{attr(url)}" width="{FIGURE_PX}" '
+               f'alt="{attr(caption)}"></a>')
+        (previous if name.endswith("_prev.png") else out).extend([f"**{caption}**", "", img, ""])
+    if previous:
+        out += details("Figures against the previous tested commit", previous[:-1]) + [""]
+    return out[:-1] if out else out
+
+
+def rebless_lines(d: LaneData, v: View) -> list[str]:
+    """The two commands that make this commit's output the reference."""
+    if d.retired or not (FULL_SHA_RE.fullmatch(d.commit) and v.safe
+                         and LANE_RE.fullmatch(d.lane_id)):
+        return []
+    base = (f"gh workflow run golden-baseline.yml --repo {worker_repo()} -f ref={d.commit} "
+            f"-f workflows={v.wf} -f lane={d.lane_id}")
+    return ["If the change is intended, approve the new output as the reference. Make a "
+            "candidate from this commit first, look at its output, then approve it with the "
+            "second command:", "", "```", f"{base} -f bless=false", "```", "", "```",
+            f"{base} -f bless_only=true", "```"]
+
+
+def batch_size(d: LaneData) -> int | None:
+    """How many commits the run tested at once, when that is more than one."""
+    n = tested_range(d).get("n")
+    return n if is_batch(n) else None
+
+
+def covers_text(d: LaneData, clause: str) -> str:
+    """' This run covers N commits, so <clause> (compare).' for a run that
+    tested several commits at once, else ''."""
+    n = batch_size(d)
+    if not n:
+        return ""
+    cmp_ = compare_link(tested_range(d).get("prev"), d.commit)
+    return f" This run covers {n} commits, so {clause}" + (f" ({cmp_})." if cmp_ else ".")
+
+
+def comparison_table(d: LaneData, v: View) -> list[str]:
+    """The output against its reference, the previous run and the noise floor,
+    each number next to its limit."""
+    cell = v.cell
+    prev = cell.get("previous_commit")
+    tag = cell.get("golden_tag")
+    tag_text = tick(tag) if isinstance(tag, str) and SEGMENT_RE.fullmatch(tag) else code(tag, 60)
+    rows = [[f"Reference {tag_text}".strip(),
+             *metric_cells(cell.get("vs_golden"), cell.get("thresholds_used"))]]
+    if cell.get("vs_previous") is not None or prev:
+        rows.append([f"Previous tested commit {sha_link(prev) if prev else ''}".strip(),
+                     *metric_cells(cell.get("vs_previous"), None, "the previous run")])
+    noise = as_dict(d.noise.get(v.wf))
+    if noise:
+        how = "" if noise.get("measured", True) else ", not measured, taken from " + (
+            code(noise.get("inherited_from"), 60) or "an earlier reference")
+        rows.append([f"Noise floor (the reference rendered twice{how})",
+                     *metric_cells(noise, None, "the first render")])
+    return table(["Compared with", "Mean MSE", "PSNR dB mean, min", "% pixels changed",
+                  "Max abs diff", "Frames"], rows)
+
+
+def drift_block(d: LaneData, v: View) -> list[str]:
+    cell = v.cell
+    prev = cell.get("previous_commit")
+    vs_prev = as_dict(cell.get("vs_previous"))
+    out: list[str] = []
+    if v.state == "accepted":
+        out.append("The output differs from the reference this run was compared with. The "
+                   "lane's reference was approved again after the run and is now this very "
+                   "output, so nothing is open.")
+    elif v.state == "new":
+        out.append("The output differs from the reference beyond its limits, and it differs from "
+                   f"the previous tested commit{' ' + sha_link(prev) if prev else ''}: the change "
+                   f"is new {'in this run' if batch_size(d) else 'at this commit'}."
+                   + covers_text(d, "the change is in one of them"))
+    elif v.state == "inherited":
+        out.append("The output differs from the reference beyond its limits. It is identical "
+                   f"to the previous tested commit{' ' + sha_link(prev) if prev else ''}, which "
+                   "already failed: the change is inherited from an earlier commit.")
+    elif vs_prev.get("identical"):
+        out.append("The output differs from the reference beyond its limits, yet it is "
+                   f"identical to the previous tested commit{' ' + sha_link(prev) if prev else ''}"
+                   ", which did not fail: the reference changed in between, not the output.")
+    else:
+        out.append("The output differs from the reference beyond its limits. There is no "
+                   "previous run to tell whether the change is new at this commit.")
+    since = failing_since(v.chain, d.entries)
+    if since and v.state != "accepted":
+        out += ["", since[0].upper() + since[1:] + "."]
+    out += ["", *comparison_table(d, v)]
+
+    tag = cell.get("golden_tag")
+    ref = as_dict(d.references.get(v.wf))
+    if ref.get("tag"):
+        if ref["tag"] == tag:
+            out += ["", f"Reference: {reference_text(ref)}"]
+        else:
+            tag_text = (tick(tag) if isinstance(tag, str) and SEGMENT_RE.fullmatch(tag)
+                        else code(tag, 60))
+            out += ["", f"The lane's reference today is {reference_text(ref)}",
+                    "", f"It is not the reference this run was compared with ({tag_text})."]
+    if v.state == "accepted":
+        return out
+    # Runs from before inherited failures stopped rendering figures have their own.
+    figures = figure_lines(d, v) if v.state != "inherited" or d.figures.get(v.wf) else []
+    if figures:
+        out += ["", *figures]
+    elif v.state == "inherited":
+        first_dir, names = d.first_figures.get(v.wf) or (None, [])
+        links = [f"[{caption}]({raw_url(d.reader, f'{first_dir}/{name}')})"
+                 for name, caption in FIGURES if name in names and raw_url(d.reader, first_dir)]
+        if links:
+            out += ["", "An inherited failure has no figures of its own. The figures of the "
+                    f"first failing commit {sha_link(v.chain.get('commit'))} show the same "
+                    "difference: " + ", ".join(links) + "."]
+        else:
+            out += ["", "An inherited failure has no figures of its own. They are on the commit "
+                    "where the change started."]
+    commands = rebless_lines(d, v)
+    if commands:
+        out += ["", *commands]
+    return out
+
+
+def failure_detail(d: LaneData, v: View, limits: Limits) -> list[str]:
+    """Why a workflow has no verdict: the worker's failure record by shape."""
+    run, cell = v.run, v.cell
+    err = run.get("error")
+    if err is None:
+        err = cell.get("error")  # a harness error is a string on the summary cell
+    if isinstance(err, str):
+        err = {"message": err}
+    err = as_dict(err)
+    bullets: list[str] = []
+    if err.get("message"):
+        bullets.append(f"**Message:** {md(err['message'], 2000)}")
+    if err.get("node_type") or err.get("node_id"):
+        bullets.append(f"**Node:** type {code(err.get('node_type'), 120) or 'unknown'}, "
+                       f"id {code(err.get('node_id'), 40) or 'unknown'}")
+    if is_num(err.get("timeout_s")):
+        text = f"**Timeout:** the worker gave up after {err['timeout_s']:g} s"
+        if err.get("prompt_id"):
+            text += f" (prompt {code(err['prompt_id'], 80)})"
+        bullets.append(text)
+    if is_num(err.get("returncode")):
+        bullets.append(f"**Server exit code:** {err['returncode']:g}")
+    if err.get("startup_failure"):
+        bullets.append(f"**Server start:** {md(err['startup_failure'], 300)}")
+    for key, name in (("missing", "Missing models"), ("missing_nodes", "Missing node classes"),
+                      ("stripped_inputs", "Inputs removed"),
+                      ("filled_defaults", "Inputs filled from defaults")):
+        items = as_list(err.get(key))
+        if items:
+            more = f", +{len(items) - 20} more" if len(items) > 20 else ""
+            bullets.append(f"**{name}:** " + ", ".join(code(i, 200) for i in items[:20]) + more)
+    if err.get("error"):
+        bullets.append(f"**Validation:** {md(err['error'], 1000)}")
+    packs = as_dict(err.get("custom_nodes"))
+    if packs:
+        bullets.append("**Custom-node packs:** " + "; ".join(
+            f"{code(name, 80)} {md(as_dict(info).get('import'), 30) or 'unknown'}"
+            + (f" ({as_dict(info)['seconds']:g} s)" if is_num(as_dict(info).get("seconds"))
+               else "") for name, info in list(packs.items())[:20]))
+    if not err:
+        bullets.append("The worker recorded no detail for this failure.")
+
+    job = []
+    if run.get("runpod_job_id"):
+        job.append(f"RunPod job {code(run['runpod_job_id'], 80)}")
+    delay = run.get("delay_s")
+    if is_num(run.get("delay_ms")):
+        delay = run["delay_ms"] / 1000
+    elif is_num(delay) and not is_num(as_dict(d.summary).get("schema_version")):
+        delay = delay / 1000  # records older than schema 2 hold milliseconds here
+    if is_num(delay):
+        job.append(f"queued {delay:.1f} s")
+    if is_num(run.get("execution_ms")):
+        job.append(f"ran {run['execution_ms'] / 1000:.1f} s")
+    if is_num(run.get("attempt")):
+        job.append(f"RunPod attempt {run['attempt']:g}")
+    if job:
+        bullets.append(", ".join(job))
+    out = [f"- {b}" for b in bullets]
+
+    if err.get("detail"):
+        out += ["", "The server rejected the prompt:", "",
+                pre(clean(err["detail"], 4000, lines=True))]
+    trace = err.get("traceback")
+    if isinstance(trace, list):
+        trace = "\n".join(str(t).rstrip("\n") for t in trace)
+    if isinstance(trace, str) and trace.strip():
+        lines = clean(trace, lines=True).strip("\n").split("\n")
+        if limits.traceback_lines:
+            cut = lines[-limits.traceback_lines:]
+            title = ("Traceback" if len(cut) == len(lines)
+                     else f"Traceback (last {len(cut)} of {len(lines)} lines)")
+            out += ["", f"{title}:", "", pre("\n".join(cut)[-TRACEBACK_CHARS:])]
+        else:
+            out += ["", "A traceback was recorded; it is left out here to keep the summary small."]
+    tail = err.get("log_tail")
+    if isinstance(tail, str) and tail.strip():
+        text = clean(tail, lines=True).strip("\n")
+        if limits.log_chars:
+            shown = text[-limits.log_chars:]
+            what = (f"Server log tail ({len(shown)} characters)" if len(shown) == len(text)
+                    else f"Server log tail (last {len(shown)} of {len(text)} characters)")
+            out += ["", *details(what, [pre(shown)])]
+        else:
+            out += ["", "A server log tail was recorded; it is left out here to keep the "
+                    "summary small."]
+    return out
+
+
+def error_block(d: LaneData, v: View, limits: Limits) -> list[str]:
+    cell = v.cell
+    status = code(cell.get("worker_status") or v.run.get("status"), 60) or "unknown"
+    if v.state == "exec":
+        out = [f"The workflow did not finish on this commit. Worker status: {status}."]
+        prior = v.prior.get("verdict")
+        at = f" at {sha_link(v.prior['commit'])}" if v.prior.get("commit") else ""
+        here = "in this run" if batch_size(d) else "at this commit"
+        started = covers_text(d, "the error started in one of them")
+        if v.origin == "new" and prior in ("pass", "fail"):
+            result = words("pass" if prior == "pass" else "changed")
+            out.append(f"Before this commit it last ran to the end{at} ({result}), so the "
+                       f"error is new {here}.{started}")
+        elif v.origin == "new":
+            out.append(f"This is its first failing run, so the error is new {here}.{started}")
+        elif v.origin == "inherited":
+            out.append(f"It already ended in an execution error{at}, so the error is "
+                       "inherited from an earlier commit.")
+        else:
+            out.append("It has no earlier result, so it is not known whether the error is new "
+                       "at this commit.")
+        since = failing_since(v.chain, d.entries)
+        if since:
+            out += ["", since[0].upper() + since[1:] + "."]
+    else:
+        out = [f"An infrastructure problem stopped this workflow. Worker status: {status}. "
+               "This is not a verdict on the commit."]
+        # A summary from before attempts were counted is a first attempt.
+        attempt = max(run_attempt(d) or 1, 1)
+        spent = attempts_spent(d)
+        if d.retired:
+            out.append("The lane is retired, so nothing runs it again.")
+        elif spent < regression_skip.MAX_ATTEMPTS:
+            out.append(f"This was {attempt_text(attempt)}: the cron tests the commit once more "
+                       "while it is still the newest commit on master.")
+        elif spent > attempt:
+            # The cron counts the start marker of an attempt that died before it published.
+            out.append(f"This was {attempt_text(attempt)}. Attempt {spent} started after it and "
+                       "published no result, so the cron does not retry it. Dispatch "
+                       "**GPU regression** with this commit to test it again.")
+        else:
+            out.append(f"This was {attempt_text(attempt)}: the cron does not retry it. Dispatch "
+                       "**GPU regression** with this commit to test it again.")
+    return [" ".join(out[:2]), *out[2:], "", *failure_detail(d, v, limits)]
+
+
+def no_reference_block(d: LaneData, v: View) -> list[str]:
+    out = ["No reference is approved for this workflow on this lane yet, so the output was not "
+           "compared with anything."]
+    if d.retired or not (v.safe and LANE_RE.fullmatch(d.lane_id)):
+        return out
+    base = (f"gh workflow run golden-baseline.yml --repo {worker_repo()} -f ref=RELEASE_TAG "
+            f"-f workflows={v.wf} -f lane={d.lane_id}")
+    return out + ["To make one, render it from a release tag, look at the output, then approve "
+                  "it with the second command:", "", "```", f"{base} -f bless=false", "```", "",
+                  "```", f"{base} -f bless_only=true", "```"]
+
+
+def attention_block(d: LaneData, limits: Limits) -> list[str]:
+    todo = sorted((v for v in d.views if v.state != "pass"),
+                  key=lambda v: (ATTENTION_ORDER.index(v.state), v.wf))
+    batch = bool(batch_size(d))
+    out: list[str] = []
+    # An accepted change is closed: it is shown, but not as something to act on.
+    for title, group in (("What needs attention", [v for v in todo if v.state != "accepted"]),
+                         ("Accepted after the run", [v for v in todo if v.state == "accepted"])):
+        if group:
+            out += ([""] if out else []) + [f"### {title}"]
+        for v in group:
+            out += ["", f"#### {icon(v.state)} {v.name}: {words(v.state, batch)}", ""]
+            if v.state in DRIFT:
+                out += drift_block(d, v)
+            elif v.state in ("exec", "infra"):
+                out += error_block(d, v, limits)
+            elif v.state == "no_ref":
+                out += no_reference_block(d, v)
+            else:
+                status = code(v.cell.get("worker_status"), 60)
+                out.append("The run recorded no verdict for this workflow."
+                           + (f" Worker status: {status}." if status else ""))
+                out += ["", *failure_detail(d, v, limits)]
+    return out
+
+
+def within_limits_block(d: LaneData) -> list[str]:
+    """Workflows that passed without being bit-identical: each number next to
+    its limit, the noise floor and the figures the run rendered."""
+    out: list[str] = []
+    for v in d.views:
+        if v.state != "pass" or not not_identical(v.cell):
+            continue
+        body = comparison_table(d, v)
+        figures = figure_lines(d, v)
+        name = f"<code>{v.wf}</code>" if v.safe else v.name  # no Markdown inside <summary>
+        out += ["", *details(f"{name}: numbers and limits",
+                             [*body, "", *figures] if figures else body)]
+    if not out:
+        return []
+    return ["### Passed without being bit-identical", "",
+            "These outputs differ from their reference or from the previous tested commit, "
+            "within the limits.", *out]
+
+
+def output_cell(d: LaneData, v: View) -> str:
+    """The thumbnail, linking to the full PNG."""
+    if not (d.files_ok and v.safe) or v.state in ("exec", "infra"):
+        return ""
+    # A PNG past the worker's size limit is listed but was never published.
+    png = first_png({"outputs": [o for o in as_list(v.run.get("outputs"))
+                                 if isinstance(o, dict) and not o.get("truncated")]})
+    thumb = v.cell.get("thumbnail")
+    name = png.get("filename")
+    if not name and isinstance(thumb, str) and thumb.endswith(".webp"):
+        name = thumb[:-len(".webp")] + ".png"
+    png_url = raw_url(d.reader, join_path(d.run_dir, v.wf, "outputs", name)) if name else None
+    thumb_url = (raw_url(d.reader, join_path(d.run_dir, v.wf, "outputs", "thumbs", thumb))
+                 if isinstance(thumb, str) else None)
+    if not png_url:
+        return ""
+    if not thumb_url:
+        # Runs older than the thumbnails: the PNG itself, unless it is very large.
+        size = png.get("bytes")
+        if not is_num(size) or size > INLINE_PNG_MAX_BYTES:
+            return f"[PNG]({png_url})"
+        thumb_url = png_url
+    return (f'<a href="{attr(png_url)}"><img src="{attr(thumb_url)}" width="{THUMB_PX}" '
+            f'alt="{attr(v.wf)} output"></a>')
+
+
+def previous_cell(v: View) -> str:
+    vs = as_dict(v.cell.get("vs_previous"))
+    prev = v.cell.get("previous_commit")
+    link = f" {sha_link(prev)}" if prev else ""
+    if vs.get("error"):
+        return "comparison failed"
+    if not vs:
+        return ""
+    if vs.get("identical"):
+        return f"identical to{link}" if link else "identical"
+    return f"changed from{link}".strip() + (f" (MSE {vs['mean_mse']:.4f})"
+                                            if is_num(vs.get("mean_mse")) else "")
+
+
+def reference_cell(v: View) -> str:
+    vg = as_dict(v.cell.get("vs_golden"))
+    if vg.get("error"):
+        return "comparison failed"
+    if not vg:
+        return ""
+    if vg.get("identical"):
+        return "bit-identical"
+    bits = [fmt(vg.get("mean_mse"), ".4f") and f"MSE {vg['mean_mse']:.4f}",
+            fmt(vg.get("mean_psnr_db"), ".2f") and f"PSNR {vg['mean_psnr_db']:.2f} dB",
+            fmt(vg.get("mean_pct_pixels_changed"), ".3f")
+            and f"{vg['mean_pct_pixels_changed']:.3f} % px"]
+    return " · ".join(b for b in bits if b)
+
+
+def exec_cell(d: LaneData, v: View) -> str:
+    """Exec seconds, with the change against the previous tested run."""
+    secs = as_dict(v.cell.get("timings")).get("prompt_exec_s")
+    if not is_num(secs):
+        return ""
+    prev = v.cell.get("previous_commit") or tested_range(d).get("prev")
+    before = next((as_dict(as_dict(e.get("w")).get(v.wf)).get("exec")
+                   for e in d.entries if e["c"] == prev), None) if prev else None
+    if is_num(before) and before > 0:
+        return f"{secs:.1f} ({(secs - before) / before * 100:+.1f} %)"
+    return f"{secs:.1f}"
+
+
+def start_cell(timings: dict) -> str:
+    """Server start seconds, with the checkout seconds in brackets."""
+    start, checkout = (fmt(timings.get(k), ".1f") for k in ("server_start_s", "checkout_s"))
+    return " ".join(x for x in (start, f"({checkout})" if checkout else "") if x)
+
+
+def workflows_block(d: LaneData, limits: Limits) -> list[str]:
+    rows = []
+    batch = bool(batch_size(d))
+    for v in d.views:
+        cell, timings = v.cell, as_dict(v.cell.get("timings"))
+        tag = cell.get("golden_tag")
+        sha = v.sha[:12] if v.sha and HEX64_RE.fullmatch(v.sha) else None
+        rows.append([v.name, label(v.state, batch), output_cell(d, v), reference_cell(v),
+                     previous_cell(v),
+                     tick(tag) if isinstance(tag, str) and SEGMENT_RE.fullmatch(tag)
+                     else code(tag, 60), exec_cell(d, v), start_cell(timings),
+                     fmt(cell.get("vram_peak_mb") / 1024, ".1f")
+                     if is_num(cell.get("vram_peak_mb")) else "",
+                     fmt(cell.get("rss_peak_mb") / 1024, ".1f")
+                     if is_num(cell.get("rss_peak_mb")) else "",
+                     tick(sha) if sha else ""])
+    # The thumbnail comes early: the table is wider than a narrow page, and the
+    # columns that scroll out of view should be the ones needed least.
+    out = [f"### All workflows ({len(rows)})", "",
+           *table(["Workflow", "Result", "Output", "vs reference", "vs previous", "Reference",
+                   "Exec s (vs previous run)", "Server start s (checkout s)", "Peak VRAM GB",
+                   "Peak RSS GB", "Output sha256"], rows)]
+
+    file_rows, total = [], 0
+    for v in d.views:
+        outputs = [o for o in as_list(v.run.get("outputs")) if isinstance(o, dict)]
+        total += len(outputs)
+        for o in outputs[:limits.files_per_workflow]:
+            name = o.get("filename")
+            path = join_path(d.run_dir, v.wf, "outputs", name) if d.files_ok and v.safe else None
+            url = raw_url(d.reader, path) if path and not o.get("truncated") else None
+            sha = o.get("sha256")
+            file_rows.append([
+                v.name, f"[{md(name, 200)}]({url})" if url else md(name, 200),
+                size_text(o.get("bytes")),
+                tick(sha) if isinstance(sha, str) and HEX64_RE.fullmatch(sha) else code(sha, 80),
+                "not published: over the worker's size limit" if o.get("truncated") else ""])
+        if len(outputs) > limits.files_per_workflow > 0:
+            file_rows.append([v.name, f"+{len(outputs) - limits.files_per_workflow} more files, "
+                              "listed in run.json", "", "", ""])
+    if file_rows:
+        out += ["", *details(f"Output files ({total})",
+                             table(["Workflow", "File", "Size", "sha256", "Note"], file_rows))]
+    records = [f"[{v.name}]({raw_url(d.reader, f'{d.run_dir}/{v.wf}/run.json')})"
+               for v in d.views if d.files_ok and v.safe and v.run]
+    if records and limits.files_per_workflow:  # cut together with the file lists
+        out += ["", "Run records (run.json): " + ", ".join(records) + "."]
+    return out
+
+
+def schema_block(d: LaneData) -> list[str]:
+    names = (("missing_nodes", "node classes this commit does not have"),
+             ("stripped_inputs", "inputs not in this commit's schema, removed"),
+             ("filled_defaults", "missing inputs filled from the schema's defaults"))
+    out = []
+    for v in d.views:
+        validation = as_dict(v.run.get("validation"))
+        for key, what in names:
+            items = as_list(validation.get(key))
+            if items:
+                more = f", +{len(items) - 20} more" if len(items) > 20 else ""
+                out.append(f"- {v.name}: {what}: "
+                           + ", ".join(code(i, 200) for i in items[:20]) + more)
+    if not out:
+        return []
+    return ["### Schema notes", "", "The worker checks each workflow against the node schema of "
+            "the commit under test and records what it had to change:", "", *out]
+
+
+def packs_block(d: LaneData) -> list[str]:
+    registry = as_dict(d.packs.get("packs"))
+    rows = []
+    for v in d.views:
+        for pack, info in as_dict(v.cell.get("custom_nodes") or v.run.get("custom_nodes")).items():
+            info = as_dict(info)
+            known = as_dict(registry.get(pack))
+            sha, repo = info.get("sha"), known.get("repo")
+            if is_sha(sha) and isinstance(repo, str) and PACK_REPO_RE.fullmatch(repo):
+                pin = f"[{tick(sha[:7])}]({repo}/tree/{sha})"
+            else:
+                pin = tick(sha[:7]) if is_sha(sha) else code(sha, 40)
+            status = md(info.get("import"), 30) or "unknown"
+            name = code(pack, 80)
+            if known.get("label") and known.get("sha") == sha:
+                name += f" ({md(known['label'], 60)})"
+            rows.append([v.name, name, status if status == "ok" else f"**{status}**", pin,
+                         md(info.get("source"), 30), fmt(info.get("install_s"), "g"),
+                         fmt(info.get("pip_s"), "g"), fmt(info.get("seconds"), "g")])
+    if not rows:
+        return []
+    return ["### Custom-node packs", "",
+            *table(["Workflow", "Pack", "Import", "Pinned commit", "Source", "Install s",
+                    "Pip s", "Import s"], rows)]
+
+
+def not_run_block(d: LaneData) -> list[str]:
+    ran = {v.wf for v in d.views}
+    elsewhere: dict[str, list[str]] = {}  # the lanes a workflow is restricted to -> workflows
+    left_out = []
+    for wf, entry in as_dict(d.manifest.get("workflows")).items():
+        entry = as_dict(entry)
+        if not entry.get("enabled") or wf in ran:
+            continue
+        only = entry.get("lanes")
+        if isinstance(only, list) and d.lane_id not in only:
+            lanes = ", ".join(tick(x) if isinstance(x, str) and LANE_RE.fullmatch(x)
+                              else code(x, 80) for x in only[:8])
+            elsewhere.setdefault(lanes, []).append(workflow_name(wf))
+        else:
+            left_out.append(workflow_name(wf))
+    out = [f"- {label('not_run')}, the manifest runs them only on {lanes}: {', '.join(names)}"
+           for lanes, names in elsewhere.items()]
+    if left_out and d.manifest_is_snapshot:
+        out.append(f"- {label('not_run')}, on this lane but not part of this run (a dispatch "
+                   f"can name only some workflows): {', '.join(left_out)}")
+    elif left_out:
+        # Today's manifest, not the run's: the run may simply be older than a workflow.
+        out.append(f"- {label('not_run')}, on this lane in today's manifest but without a "
+                   "result in this run (a dispatch can name only some workflows, and a run can "
+                   f"be older than a workflow): {', '.join(left_out)}")
+    return ["### Workflows not run on this lane", "", *out] if out else []
+
+
+def history_block(d: LaneData, limits: Limits) -> list[str]:
+    if not d.head:
+        return []
+    out = ["### Recent commits on this lane", ""]
+    failures = open_failures(d.head, d.entries)
+    out += (["Open failures on this lane:", "", *failures] if failures
+            else ["Open failures on this lane: none."])
+    shown = d.entries[:limits.history_rows]
+    if not shown:
+        return out
+    rows = []
+    for e in shown:
+        m = as_dict(e.get("m"))
+        states = entry_states(e, d.lane_references)
+        n = as_int(as_dict(e.get("range")).get("n"))
+        commit = sha_link(e["c"])
+        if is_batch(n):
+            commit += f" +{n} commits"
+        if e["c"] == d.commit:
+            commit += " **this report**"
+        when = utc(e.get("t")).replace(" UTC", "")
+        url = entry_run_url(e)
+        rows.append([commit, md(m.get("s"), 90), pr_link(m.get("pr")), md(m.get("a"), 40),
+                     f"[{when}]({url})" if url and when else when, rollup(states),
+                     not_passing(states, batch=is_batch(n))])
+    out += ["", *table(["Commit", "Subject", "PR", "Author", "Tested (UTC)", "Result",
+                        "Not passing"], rows)]
+    count = d.head.get("count")
+    note = f"The newest {len(shown)} of {count:g} runs on this lane." if is_num(count) \
+        else f"The newest {len(shown)} runs on this lane."
+    if not any(e["c"] == d.commit for e in shown):
+        note += " The commit of this report is not among them."
+    return out + ["", note]
+
+
+def dashboard_line(d: LaneData | None = None) -> list[str]:
+    """The footer link to the dashboard: its page for this commit on this lane
+    when the report is about one, else its front page."""
+    url = dashboard_url()
+    if not url:
+        return []
+    line = f"Longer history and charts: [{md(url.split('//', 1)[-1], 200)}]({url})"
+    if (d and d.published and is_branch(d.branch) and is_sha(d.commit)
+            and LANE_RE.fullmatch(d.lane_id)):
+        page = f"{url}/regression/{quote(d.branch, safe='')}/{d.commit}?lane={d.lane_id}"
+        line += f" · [this commit on this lane]({page})"
+    return [line]
+
+
+def footer_block(d: LaneData, limits: Limits) -> list[str]:
+    out = ["---", ""]
+    links = []
+    if d.files_ok:
+        links.append(f"[summary.json]({raw_url(d.reader, f'{d.run_dir}/summary.json')})")
+        links.append(f"[every file of this run]({tree_url(d.reader, d.run_dir)})")
+    elif d.run_dir and d.reader.sha and d.marker:
+        links.append(f"[the run's directory]({tree_url(d.reader, d.run_dir)})")
+    if d.artifact_url:
+        links.append(f"[the files attached to this run]({d.artifact_url}) "
+                     "(a zip, kept 90 days, needs a GitHub login)")
+    if links:
+        pinned = (f" The results links are pinned to results commit {tick(d.reader.sha[:8])}."
+                  if d.reader.sha and (d.files_ok or d.marker) else "")
+        out += ["Files: " + ", ".join(links) + "." + pinned, ""]
+    for extra in ([LEGEND] if d.summary else [], shortened_note(limits), dashboard_line(d)):
+        if extra:
+            out += [*extra, ""]
+    return out[:-1]
+
+
+def render_lane(d: LaneData, limits: Limits) -> str:
+    if not d.summary:
+        blocks = [title_block(d), no_summary_block(d), footer_block(d, limits)]
+    else:
+        blocks = [title_block(d), facts_block(d), attention_block(d, limits),
+                  workflows_block(d, limits), within_limits_block(d), schema_block(d),
+                  packs_block(d), not_run_block(d), history_block(d, limits),
+                  footer_block(d, limits)]
+    return "\n\n".join("\n".join(b) for b in blocks if b) + "\n"
+
+
+def lane_report(reader: Reader, lanes: dict, commit: str, branch: str, lane_id: str,
+                **kw) -> str | None:
+    """The Markdown for one commit on one lane, within the size limit."""
+    d = gather_lane(reader, lanes, commit, branch, lane_id, **kw)
+    return fit(lambda limits: render_lane(d, limits))
+
+
+# -- every lane -----------------------------------------------------------------------
+@dataclass
+class LaneColumn:
+    lane_id: str
+    lane: dict
+    summary: dict | None
+    head: dict
+    entries: list[dict]  # the head's entries, newest first
+    references: dict
+
+    @property
+    def active(self) -> bool:
+        """Tested on every commit: per-commit cadence and an endpoint to run on."""
+        return self.lane.get("cadence") == "per-commit" and bool(self.lane.get("endpoint_id"))
+
+    @property
+    def retired(self) -> bool:
+        return lanes_mod.is_retired(self.lane)
+
+    def states(self, commit: str) -> dict[str, str]:
+        """Results of `commit` on this lane, from its summary. What an old
+        summary lacks (the drift class, the output sha) the index entry has."""
+        cells = as_dict(as_dict(self.summary).get("workflows"))
+        indexed = as_dict(next((e for e in self.entries if e["c"] == commit), {}).get("w"))
+        out = {}
+        for wf, cell in cells.items():
+            cell, known = as_dict(cell), as_dict(indexed.get(wf))
+            out[wf] = cell_state(cell.get("verdict"), cell.get("detail") or known.get("d"),
+                                 cell.get("output_sha256") or known.get("sha"),
+                                 cell.get("golden_tag") or known.get("g"),
+                                 self.references.get(wf))
+        return out
+
+    def covers(self, commit: str):
+        """How many commits the run of `commit` tested at once, as far as recorded."""
+        rng = as_dict(as_dict(self.summary).get("tested_range"))
+        if rng:
+            return rng.get("commits_between")
+        entry = next((e for e in self.entries if e["c"] == commit), {})
+        return as_dict(entry.get("range")).get("n")
+
+
+@dataclass
+class OverviewData:
+    commit: str
+    branch: str
+    reader: Reader
+    primary: str | None
+    columns: list[LaneColumn]
+    head_paths: dict
+
+
+def gather_overview(reader: Reader, lanes: dict, commit: str, branch: str) -> OverviewData:
+    entries = {lane_id: as_dict(lane) for lane_id, lane in as_dict(lanes.get("lanes")).items()}
+    if not entries:
+        raise ReportError("manifest/lanes.json lists no lanes")
+    primary = lanes.get("primary")
+    order = sorted(entries, key=lambda i: (i != primary, lanes_mod.is_retired(entries[i])))
+    paths = {}
+    for lane_id in order:
+        prefix = lane_prefix(entries[lane_id])
+        paths[lane_id] = (join_path(prefix, "runs", branch, commit, "summary.json"),
+                          join_path(prefix.split("/")[0], "index", branch, f"{lane_id}.json"))
+    # Every lane shares one results root, and so one index.
+    registry_path = f"{lane_prefix(entries[order[0]]).split('/')[0]}/index/lanes.json"
+    live = [i for i in order if not lanes_mod.is_retired(entries[i])]
+    reader.prefetch([registry_path, *(p[0] for p in paths.values() if p[0]),
+                     *(paths[i][1] for i in live if paths[i][1])])
+    registry = as_dict((reader.read_json(registry_path) or {}).get("lanes"))
+    columns = []
+    for lane_id in order:
+        summary_path, head_path = paths[lane_id]
+        summary = reader.read_json(summary_path) if summary_path else None
+        # A retired lane's history is read only when the lane has this commit: an
+        # old summary is classified from its index entry, which also names the commit.
+        head = (reader.read_json(head_path) if head_path and (lane_id in live or summary)
+                else None)
+        columns.append(LaneColumn(
+            lane_id=lane_id, lane=entries[lane_id], summary=summary,
+            head=head or {}, entries=entries_of(head),
+            references=as_dict(as_dict(registry.get(lane_id)).get("goldens"))))
+    return OverviewData(commit=commit, branch=branch, reader=reader, primary=primary,
+                        columns=columns, head_paths={i: p[1] for i, p in paths.items()})
+
+
+def disagreements(per_lane: dict[str, dict[str, str]], labels: dict[str, str]) -> list[str]:
+    """Workflows green on one lane and red on another, of those two lanes ran."""
+    out = []
+    for wf in sorted({wf for states in per_lane.values() for wf in states}, key=str):
+        ran = {lane: states[wf] for lane, states in per_lane.items() if wf in states}
+        green = [labels[lane] for lane, s in ran.items() if s in GREEN]
+        red = [labels[lane] for lane, s in ran.items() if s in RED]
+        if len(ran) >= 2 and green and red:
+            out.append(f"- {workflow_name(wf)} passes on {', '.join(green)}; fails on "
+                       f"{', '.join(red)}")
+    return out
+
+
+def render_overview(o: OverviewData, limits: Limits) -> str:
+    labels = {c.lane_id: lane_label(c.lane_id, c.lane) for c in o.columns}
+    blocks = [[f"## GPU regression · all lanes · {tick(o.commit[:8])}"]]
+    if not o.reader.sha:
+        blocks.append(["> [!WARNING]", "> The results branch could not be read, so there is "
+                       "nothing to show for this commit."])
+
+    meta = next((as_dict(c.summary.get("commit_meta")) for c in o.columns
+                 if c.summary and c.summary.get("commit_meta")), None)
+    if meta is None:
+        m = next((as_dict(e.get("m")) for c in o.columns for e in c.entries
+                  if e["c"] == o.commit and e.get("m")), {})
+        meta = {"subject": m.get("s"), "author": m.get("a"), "committed_ts": m.get("ct"),
+                "pr": m.get("pr"), "pr_title": m.get("pt"), "pr_author": m.get("pa")}
+    blocks.append(table(["", ""], commit_rows(o.commit, meta)))
+
+    rows, per_lane = [], {}
+    for c in o.columns:
+        if not (c.summary or c.active):
+            continue
+        role = " · ".join(x for x in (
+            md(c.lane.get("role"), 30), "retired" if c.retired else
+            "blocking" if c.lane.get("blocking") else "informational") if x)
+        if not c.summary:
+            rows.append([labels[c.lane_id], role, f"{DASH} no result", "", ""])
+            continue
+        states = c.states(o.commit)
+        per_lane[c.lane_id] = states
+        when = utc(c.summary.get("run_ts"))
+        url = checked_run_url(c.summary.get("run_url")) or run_url(c.summary.get("run_id"))
+        rows.append([labels[c.lane_id], role, rollup(states),
+                     f"[{when}]({url})" if url and when else when,
+                     not_passing(states, 12, is_batch(c.covers(o.commit)))])
+    if rows:
+        blocks.append(["### This commit on every lane", "",
+                       *table(["Lane", "Role", "Result", "Tested", "Not passing"], rows)])
+    differ = disagreements(per_lane, labels)
+    if differ:
+        blocks.append(["### Lanes that disagree at this commit", "", *differ])
+
+    active = [c for c in o.columns if c.active]
+    failures = []
+    for c in active:
+        lines = open_failures(c.head, c.entries)
+        failures += [f"{labels[c.lane_id]}:", "", *lines, ""] if lines else []
+    blocks.append(["### Open failures", "", *failures[:-1]] if failures
+                  else ["### Open failures", "", "None on the active lanes."])
+
+    by_commit: dict[str, dict[str, dict]] = {}
+    for c in active:
+        for e in c.entries:
+            by_commit.setdefault(e["c"], {})[c.lane_id] = e
+    newest = sorted(by_commit, key=lambda sha: max(entry_key(e) for e in by_commit[sha].values()),
+                    reverse=True)[:limits.matrix_rows]
+    if newest:
+        matrix = []
+        for sha in newest:
+            per = by_commit[sha]
+            m = next((as_dict(e.get("m")) for e in per.values() if e.get("m")), {})
+            states = {c.lane_id: entry_states(per[c.lane_id], c.references)
+                      for c in active if c.lane_id in per}
+            cells = []
+            for c in active:
+                if c.lane_id not in per:
+                    cells.append(label("not_run"))
+                    continue
+                text = rollup(states[c.lane_id])
+                url = entry_run_url(per[c.lane_id])
+                names = not_passing(states[c.lane_id], 4, is_batch(
+                    as_dict(per[c.lane_id].get("range")).get("n")))
+                cells.append((f"[{text}]({url})" if url else text)
+                             + (f": {names}" if names else ""))
+            mark = " **this report**" if sha == o.commit else ""
+            matrix.append([sha_link(sha) + mark, md(m.get("s"), 80), pr_link(m.get("pr")),
+                           md(m.get("a"), 40), *cells,
+                           "lanes differ" if disagreements(states, labels) else ""])
+        blocks.append(["### Recent commits", "",
+                       *table(["Commit", "Subject", "PR", "Author",
+                               *(labels[c.lane_id] for c in active), "Note"], matrix)])
+
+    notes = []
+    for c in o.columns:
+        if c.retired:
+            url = raw_url(o.reader, o.head_paths.get(c.lane_id))
+            where = f"[its run index]({url})" if url else "its run index on the results branch"
+            notes.append(f"- {labels[c.lane_id]} is retired: nothing runs on it any more, and "
+                         f"its history is kept in {where}.")
+        elif not c.active:
+            notes.append(f"- {labels[c.lane_id]} is not tested yet: it has no endpoint or is "
+                         "not a per-commit lane.")
+    if notes:
+        blocks.append(["### Other lanes", "", *notes])
+    footer = ["---", "", LEGEND]
+    for extra in (shortened_note(limits), dashboard_line()):
+        if extra:
+            footer += ["", *extra]
+    blocks.append(footer)
+    return "\n\n".join("\n".join(b) for b in blocks if b) + "\n"
+
+
+def overview_report(reader: Reader, lanes: dict, commit: str, branch: str) -> str | None:
+    """The Markdown that puts every lane side by side, within the size limit."""
+    o = gather_overview(reader, lanes, commit, branch)
+    return fit(lambda limits: render_overview(o, limits))
+
+
+# -- command line ---------------------------------------------------------------------
+def fallback_report(args, reason: str) -> str:
+    """What the summary says when the report itself failed: the reason as a
+    fixed word (an exception class, never its message) and the links that need
+    no data."""
+    commit = getattr(args, "commit", None)
+    out = ["## GPU regression · report not available", "",
+           f"The report could not be built ({reason}). The run's results are not affected."]
+    links = []
+    try:
+        lane_id = getattr(args, "lane", None)
+        lane = as_dict(as_dict(lanes_mod.load_lanes().get("lanes")).get(lane_id))
+        branch = getattr(args, "branch", None)
+        if lane and is_sha(commit) and is_branch(branch):
+            path = join_path(lane_prefix(lane), "runs", branch, commit)
+            links.append(f"[this run's files on the results branch](https://github.com/"
+                         f"{results_repo()}/tree/{results_branch()}/{quote(path, safe='/')})")
+    except Exception:  # noqa: BLE001 - the fallback must not fail
+        pass
+    if is_sha(commit):
+        links.append(f"[the commit]({COMFY_URL}/commit/{commit})")
+    if this_run_url():
+        links.append(f"[this Actions run]({this_run_url()})")
+    artifact = getattr(args, "artifact_url", None)
+    if isinstance(artifact, str) and ARTIFACT_URL_RE.fullmatch(artifact):
+        links.append(f"[the files attached to this run]({artifact})")
+    if dashboard_url():
+        links.append(f"[the dashboard]({dashboard_url()})")
+    if links:
+        out += ["", "Where to look instead: " + ", ".join(links) + "."]
+    return "\n".join(out) + "\n"
+
+
+def build(args, reader: Reader | None = None) -> str:
+    if not is_sha(args.commit):
+        raise ReportError("--commit is not a hex sha")
+    if not is_branch(args.branch):
+        raise ReportError("--branch is not a plain branch name")
+    if reader is None:
+        try:
+            reader = GitReader(args.results_dir, fetch=not args.no_fetch)
+        except (ReportError, OSError, subprocess.SubprocessError):
+            reader = Reader()  # report what the runner holds; say the branch is unread
+    lanes = lanes_mod.load_lanes()
+    if args.cmd == "overview":
+        text = overview_report(reader, lanes, args.commit, args.branch)
+    else:
+        text = lane_report(
+            reader, lanes, args.commit, args.branch, args.lane, summary_file=args.summary,
+            workdir=args.workdir, skipped=args.skipped, artifact_url=args.artifact_url,
+            manifest=load_json_or_empty(lanes_mod.MANIFEST_FILE),
+            packs=load_json_or_empty(lanes_mod.PACKS_FILE))
+    if text is None:
+        raise ReportError("it does not fit GitHub's size limit")
+    return text
+
+
+def emit(text: str, out: str | None) -> str:
+    """Write the Markdown; returns a fixed status line. Never to stdout inside
+    Actions: the text quotes logs."""
+    step = os.environ.get("GITHUB_STEP_SUMMARY")
+    wrote = []
+    if step:
+        with open(step, "a", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        wrote.append("the job summary")
+    if out and out != "-":
+        Path(out).write_text(text, encoding="utf-8", newline="\n")
+        wrote.append("the --out file")
+    elif out == "-" and not step:
+        sys.stdout.buffer.write(text.encode("utf-8"))
+        return ""
+    if not wrote:
+        return "run report: nowhere to write (no GITHUB_STEP_SUMMARY, no --out)"
+    return f"run report: wrote {byte_size(text)} bytes to {' and '.join(wrote)}"
+
+
+def parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for name in ("lane", "overview"):
+        p = sub.add_parser(name)
+        p.add_argument("--commit", required=True, help="the ComfyUI commit the report is about")
+        p.add_argument("--branch", required=True)
+        p.add_argument("--results-dir", default=".",
+                       help="git checkout that can fetch the results branch")
+        p.add_argument("--no-fetch", action="store_true",
+                       help="read HEAD of --results-dir (a results checkout that is current)")
+        p.add_argument("--out", default=None,
+                       help="write the Markdown here when GITHUB_STEP_SUMMARY is not set "
+                            "('-' is stdout)")
+        if name == "lane":
+            p.add_argument("--lane", required=True, help="lane id from manifest/lanes.json")
+            p.add_argument("--summary", default=None,
+                           help="the summary run_regression.py wrote on this runner")
+            p.add_argument("--workdir", default=None,
+                           help="run_regression.py's --workdir (<DIR>/<workflow>/run.json)")
+            p.add_argument("--skipped", action="store_true",
+                           help="this run did not test the commit: show what is published")
+            p.add_argument("--artifact-url", default=None,
+                           help="link to the files this run attached")
+    return ap
+
+
+def main(argv: list[str] | None = None, reader: Reader | None = None) -> int:
+    try:
+        args = parser().parse_args(argv)
+    except SystemExit as e:
+        if e.code:  # argparse has printed its usage; the job still must not fail
+            _write(fallback_report(None, "its arguments were not accepted"), None)
+        return 0
+    try:
+        text = build(args, reader)
+    except ReportError as e:
+        text = fallback_report(args, str(e))
+    except Exception as e:  # noqa: BLE001 - a report is a courtesy, never a failure
+        text = fallback_report(args, type(e).__name__)
+    _write(text, args.out)
+    return 0
+
+
+def _write(text: str, out: str | None):
+    try:
+        status = emit(text, out)
+    except Exception as e:  # noqa: BLE001
+        status = f"run report: could not write the summary ({type(e).__name__})"
+    if status:
+        print(status)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

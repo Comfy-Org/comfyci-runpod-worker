@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +31,7 @@ HEAD_LIMIT = 500
 SCHEMA_VERSION = 1
 RED = ("fail", "execution_error")
 LANES_FILE = Path(__file__).resolve().parents[1] / "manifest" / "lanes.json"
+RUN_URL_RE = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/actions/runs/[0-9]+", re.ASCII)
 
 
 def load_lanes(path: Path | None = None) -> dict:
@@ -108,6 +110,13 @@ def compact_meta(meta: dict | None) -> dict | None:
     return m
 
 
+def run_repo(summary: dict) -> str | None:
+    """'owner/repo' of the Actions run a summary names in its run_url."""
+    url = summary.get("run_url")
+    m = RUN_URL_RE.fullmatch(url) if isinstance(url, str) else None
+    return m.group(1) if m else None
+
+
 def entry_from_summary(summary: dict, lane: str, layout: int,
                        meta: dict | None = None, tested_range: dict | None = None,
                        prev_entry: dict | None = None,
@@ -156,11 +165,18 @@ def entry_from_summary(summary: dict, lane: str, layout: int,
                               for name, info in wr["custom_nodes"].items()}
 
     verdicts = [x["v"] for x in w.values()]
+    run_id = summary.get("run_id")
+    run_id = run_id if isinstance(run_id, int) and not isinstance(run_id, bool) else None
     return {
         "c": summary["commit"],
         "t": int(summary.get("run_ts") or 0),
         "o": summary.get("overall"),
         "infra": bool(summary.get("has_infra_error", "infra_error" in verdicts)),
+        # The Actions run that tested the commit, so a history row can link to it
+        # (None for summaries written before the id was recorded), and the
+        # repository it ran in: the action also runs from other repositories.
+        "run": run_id,
+        "run_repo": run_repo(summary) if run_id else None,
         "cv": first.get("comfy_version"),
         "lane": lane,
         "layout": layout,
@@ -180,6 +196,8 @@ def merge_entry(old: dict | None, new: dict) -> dict:
         return new
     merged = dict(old)
     merged.update({k: v for k, v in new.items() if k != "w" and v is not None})
+    if new.get("run") is not None:
+        merged["run_repo"] = new.get("run_repo")  # the id and its repository name one run
     merged["t"] = max(old.get("t", 0), new.get("t", 0))
     merged["w"] = {**(old.get("w") or {}), **(new.get("w") or {})}
     verdicts = [c.get("v") for c in merged["w"].values()]

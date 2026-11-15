@@ -21,7 +21,9 @@ Env:
   PULSE_PR_COMMENTS      off | dry-run (default) | on
   PULSE_GH_TOKEN         token that posts in 'on' mode; its owner authors the comment
   PULSE_ALLOWED_AUTHORS  comma list of PR authors to comment on (overrides CODEOWNERS)
-  PULSE_DASHBOARD_URL    dashboard base (default https://ci.comfy.org)
+  PULSE_DASHBOARD_URL    dashboard base (default https://ci.comfy.org): the comment links
+                         the commit's page there, next to the Actions run when the
+                         summary names one (a run is deleted after 90 days)
   GITHUB_TOKEN / GH_TOKEN  read-only lookups; GITHUB_STEP_SUMMARY for the dry-run report
 """
 from __future__ import annotations
@@ -30,6 +32,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -51,6 +54,8 @@ MAX_PAGES = 30
 TIMEOUT_S = 20
 VERDICT_LABELS = {"pass": "match", "fail": "changed", "execution_error": "error",
                   "infra_error": "infra error", "no_baseline": "no golden"}
+# The only shape of run link a comment carries: the summary is data, not code.
+RUN_URL = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[0-9]+")
 
 
 class ApiError(Exception):
@@ -194,6 +199,23 @@ def dashboard_url(summary: dict, lanes: dict | None) -> str:
     return url
 
 
+def details_url(summary: dict, lanes: dict | None) -> str:
+    """Where "Run details" points: the Actions run that tested the commit (its
+    page holds the full report), or the dashboard for a summary without one."""
+    url = summary.get("run_url")
+    if isinstance(url, str) and RUN_URL.fullmatch(url):
+        return url
+    return dashboard_url(summary, lanes)
+
+
+def details_line(summary: dict, lanes: dict | None) -> str:
+    """The links a comment ends with. The comment stays on the pull request,
+    but GitHub deletes a run after 90 days: next to the run, it links the
+    commit's page on the dashboard, which reads the results branch."""
+    run, page = details_url(summary, lanes), dashboard_url(summary, lanes)
+    return f"[Run details]({run})" + (f" · [results page]({page})" if run != page else "")
+
+
 def render_changed(summary: dict, lanes: dict | None, max_len: int = MAX_BODY) -> str:
     wfs = summary.get("workflows") or {}
     kinds = {wf_id: change_kind(wr) for wf_id, wr in wfs.items()}
@@ -211,12 +233,12 @@ def render_changed(summary: dict, lanes: dict | None, max_len: int = MAX_BODY) -
     n = rng.get("commits_between")
     if isinstance(n, int) and n > 1 and rng.get("compare_url"):
         tail.append(f"Appeared in a batch of {n} commits: [compare]({rng['compare_url']})")
-    tail += [f"[Run details]({dashboard_url(summary, lanes)})", "", FOOTER, MARKER]
+    tail += [details_line(summary, lanes), "", FOOTER, MARKER]
 
     def build(ids, more=0):
         rows = [_row(wf_id, wfs[wf_id]) for wf_id in ids]
         if more:
-            rows.append(f"| +{more} more on the dashboard | | | | | | | |")
+            rows.append(f"| +{more} more in the run details | | | | | | | |")
         return "\n".join(head + table + rows + tail)
 
     notable = [w for w in sorted(wfs) if kinds[w]]
@@ -239,7 +261,7 @@ def render_resolved(summary: dict, lanes: dict | None) -> str:
     lane = lane_line(summary, lanes)
     if lane:
         lines += ["", f"Lane: {lane}"]
-    lines += [f"[Run details]({dashboard_url(summary, lanes)})", "", FOOTER, MARKER]
+    lines += [details_line(summary, lanes), "", FOOTER, MARKER]
     return "\n".join(lines)
 
 

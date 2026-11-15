@@ -13,7 +13,7 @@ SHA = "c" * 40
 API = "https://api.github.com/repos/Comfy-Org/ComfyUI"
 CODEOWNERS = ("# owners\n* @comfyanonymous @guill @alexisrolland @rattus128 @kijai @Comfy-Org/core\n"
               "\n/.github/ @comfyanonymous\n")
-LANE = "py312-torch2.11.0-cu128"
+LANE = "py313-torch2.14.1-cu130"  # the primary lane in manifest/lanes.json
 
 
 def _wf(verdict, detail=None, prior=None, **kw):
@@ -22,8 +22,8 @@ def _wf(verdict, detail=None, prior=None, **kw):
                           "mean_pct_pixels_changed": 69.986} if verdict == "fail" else
             ({"identical": True, "mean_mse": 0.0} if verdict == "pass" else None),
             "timings": {"prompt_exec_s": 41.23}, "vram_peak_mb": 21504.0,
-            "gpu_name": "NVIDIA GeForce RTX 4090", "torch_version": "2.11.0+cu128",
-            "python_version": "3.12.3 (main, Apr 10 2026) [GCC 13.2.0]", **kw}
+            "gpu_name": "NVIDIA GeForce RTX 4090", "torch_version": "2.14.1+cu130",
+            "python_version": "3.13.11 (main, Dec 9 2025) [Clang 21.1.4]", **kw}
 
 
 def _summary(workflows, pr=16488, author="comfyanonymous", rng=None, branch="master", lane=LANE):
@@ -229,7 +229,7 @@ def test_clean_rerun_resolves_an_existing_comment(tmp_path, monkeypatch, env, gh
 def test_other_branches_and_lanes_are_skipped(tmp_path, monkeypatch, env, gh):
     on(monkeypatch)
     assert "not master" in run(tmp_path, _summary(DRIFT, branch="release"))
-    assert "primary lane" in run(tmp_path, _summary(DRIFT, lane="py313-torch2.12-cu130"))
+    assert "primary lane" in run(tmp_path, _summary(DRIFT, lane="py313-torch2.15.0-cu132"))
     assert gh.calls == []
 
 
@@ -328,14 +328,14 @@ def test_body_shape():
     rng = {"prev": "b" * 40, "commits_between": 3,
            "compare_url": "https://github.com/Comfy-Org/ComfyUI/compare/bbb...ccc"}
     s = _summary({**DRIFT, "wan": _wf("execution_error", prior="pass", vs_golden=None)}, rng=rng)
-    lanes = {"primary": LANE, "lanes": {LANE: {"cuda": "12.8", "gpu": "RTX 4090"}}}
+    lanes = {"primary": LANE, "lanes": {LANE: {"cuda": "13.0", "gpu": "RTX 4090"}}}
     body = notify_pr.render_changed(s, lanes)
     lines = body.splitlines()
     assert lines[0] == f"**(PULSE)** GPU output changed vs golden · `{SHA[:7]}`"
     assert "| `flux_dev_t2i` | changed | new | 42.76 | 3.442 | 69.99% | 41.2 | 21.0 GB |" in lines
     assert "| `sdxl_t2i` | match | – | identical | 0 | – | 41.2 | 21.0 GB |" in lines
     assert "| `wan` | error | new | – | – | – | 41.2 | 21.0 GB |" in lines
-    assert ("Lane: python 3.12.3 · torch 2.11.0+cu128 · CUDA 12.8 · NVIDIA GeForce RTX 4090"
+    assert ("Lane: python 3.13.11 · torch 2.14.1+cu130 · CUDA 13.0 · NVIDIA GeForce RTX 4090"
             in lines)
     assert f"Appeared in a batch of 3 commits: [compare]({rng['compare_url']})" in lines
     assert f"[Run details](https://ci.comfy.org/regression/master/{SHA})" in lines
@@ -357,7 +357,7 @@ def test_body_stays_bounded_with_many_workflows():
     wfs["zz_changed"] = _wf("fail", "new_drift")
     body = notify_pr.render_changed(_summary(wfs), None)
     assert len(body) <= notify_pr.MAX_BODY
-    assert "`zz_changed`" in body and "+40 more on the dashboard" in body
+    assert "`zz_changed`" in body and "+40 more in the run details" in body
     assert body.startswith("**(PULSE)**")
 
 
@@ -366,3 +366,46 @@ def test_dashboard_link_names_a_non_primary_lane():
     s = _summary(DRIFT, lane="py313")
     assert notify_pr.dashboard_url(s, lanes).endswith(f"/regression/master/{SHA}?lane=py313")
     assert notify_pr.dashboard_url(_summary(DRIFT), lanes).endswith(f"/regression/master/{SHA}")
+
+
+RUN_URL = "https://github.com/Comfy-Org/comfyci-runpod-worker/actions/runs/43658104127"
+
+
+def test_run_details_link_to_the_actions_run_that_tested_the_commit():
+    """The run's page holds the full report, so the comment points there. The
+    comment outlives the run (GitHub deletes it after 90 days): the commit's
+    page on the dashboard is linked next to it."""
+    lanes = {"primary": LANE, "lanes": {}}
+    s = {**_summary(DRIFT), "run_url": RUN_URL, "run_id": 43658104127}
+    page = f"https://ci.comfy.org/regression/master/{SHA}"
+    for body in (notify_pr.render_changed(s, lanes), notify_pr.render_resolved(s, lanes)):
+        assert f"[Run details]({RUN_URL}) · [results page]({page})" in body.splitlines()
+        assert len(body) < notify_pr.MAX_BODY
+    # A lane that is not the primary keeps its ?lane= on the page link.
+    other = {**s, "lane": "py313"}
+    assert f"· [results page]({page}?lane=py313)" in notify_pr.render_changed(other, lanes)
+
+
+@pytest.mark.parametrize("run_url", [
+    None, "", 42, "https://evil.example/actions/runs/1",
+    # The right shape on another host or scheme: the host is pinned.
+    "https://evil.example/a/b/actions/runs/1", "https://github.com.evil.example/a/b/actions/runs/1",
+    "https://github.com@evil.example/a/b/actions/runs/1", "http://github.com/a/b/actions/runs/1",
+    "https://github.com/a/b/actions/runs/1) [x](https://evil.example",
+    "javascript:alert(1)"])
+def test_run_details_fall_back_to_the_dashboard(run_url):
+    """A summary from before the run link existed, or one whose link is not a
+    plain Actions run URL, has the dashboard link alone."""
+    lanes = {"primary": LANE, "lanes": {}}
+    s = {**_summary(DRIFT), "run_url": run_url}
+    assert notify_pr.details_url(s, lanes) == f"https://ci.comfy.org/regression/master/{SHA}"
+    body = notify_pr.render_changed(s, lanes)
+    assert f"[Run details](https://ci.comfy.org/regression/master/{SHA})" in body.splitlines()
+    assert "evil" not in body and "results page" not in body
+
+
+def test_posted_comment_carries_the_run_link(tmp_path, monkeypatch, env, gh):
+    on(monkeypatch)
+    assert run(tmp_path, {**_summary(DRIFT), "run_url": RUN_URL}) == "created on #16488"
+    (_, _, _, payload, _), = gh.writes()
+    assert f"[Run details]({RUN_URL})" in payload["body"]

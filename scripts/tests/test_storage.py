@@ -128,3 +128,42 @@ def test_upload_json_compact_drops_whitespace_and_round_trips(tmp_path, remote):
     check = tmp_path / "check"
     subprocess.run(["git", "clone", "-q", "-b", "results", str(remote), str(check)], check=True)
     assert (check / "frontend" / "ci" / "main.json").read_text(encoding="utf-8") == compact
+
+
+def test_checkpoint_pushes_the_start_marker_before_the_results(tmp_path, remote, capsys):
+    """The marker lands on the remote on its own (derived writers wait for
+    finalize), even behind a concurrent publisher, and finalize still pushes
+    the rest of the run on top."""
+    a = _store(tmp_path, remote, "a")
+    other = _store(tmp_path, remote, "other")
+    other.publish_summary("master", "ccc", {"commit": "ccc", "overall": "pass"})
+    other.finalize("regression master@ccc: pass")  # a's first checkpoint push is rejected
+
+    a.mark_attempt("master", "bbb", {"commit": "bbb", "attempt": 1})
+    a.register_derived(_index_writer({"c": "bbb", "o": "pass"}))
+    a.PUSH_ATTEMPTS = 3
+    a.checkpoint("regression master@bbb: attempt 1 started")
+    assert "pushed checkpoint" in capsys.readouterr().out
+
+    def remote_file(path):
+        r = subprocess.run(["git", "-C", str(remote), "cat-file", "-p", f"results:{path}"],
+                           capture_output=True)
+        return json.loads(r.stdout) if r.returncode == 0 else None
+
+    assert remote_file("regression/runs/master/bbb/attempt.json") == {"commit": "bbb", "attempt": 1}
+    assert remote_file("regression/runs/master/ccc/summary.json")["commit"] == "ccc"
+    assert remote_file("regression/runs/master/bbb/summary.json") is None
+    assert remote_file("regression/index/master/legacy.json") is None  # derived: not yet
+    assert a.attempt_marker("master", "bbb") == {"commit": "bbb", "attempt": 1}
+
+    a.publish_summary("master", "bbb", {"commit": "bbb", "overall": "pass"})
+    a.finalize("regression master@bbb: pass")
+    assert remote_file("regression/runs/master/bbb/summary.json")["overall"] == "pass"
+    assert remote_file("regression/runs/master/bbb/attempt.json")["attempt"] == 1
+    assert [e["c"] for e in remote_file("regression/index/master/legacy.json")["entries"]] == ["bbb"]
+
+
+def test_a_checkpoint_with_nothing_written_pushes_nothing(tmp_path, remote, capsys):
+    s = _store(tmp_path, remote, "a")
+    s.checkpoint("nothing")
+    assert "pushed" not in capsys.readouterr().out
