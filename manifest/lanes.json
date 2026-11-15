@@ -94,7 +94,7 @@
       "layout": 2,
       "prefix": "regression/lanes/py313-torch2.15.0-cu132",
       "image": "cu132-t2150",
-      "endpoint_id": null,
+      "endpoint_id": "7xy8v4ydghrfhk",
       "min_cuda_driver": "13.2"
     }
   }
