@@ -11,8 +11,11 @@
 # per-push job (see action.yml).
 name: GPU regression
 on:
+  # Every 5 minutes, the shortest interval GitHub schedules (it can start a run
+  # late, or drop one, when it is busy). A tick that finds master HEAD already
+  # tested costs no GPU time: it only shows the published result again.
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch:
     inputs:
       commit:
@@ -120,7 +123,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install -r scripts/requirements.txt
       # A commit is tested once per lane: any published result (pass, fail or
       # execution_error) ends it; a result with infra errors, or a start marker
       # with no result (the run died before publishing), gets one retry; and a
@@ -166,6 +168,11 @@ jobs:
           args=(--commit "$COMMIT" --summary "$SUMMARY" --attempt "$ATTEMPT" --latest "$LATEST")
           if [ -n "$INPUT_COMMIT" ]; then args+=(--explicit); fi
           python scripts/regression_skip.py "${args[@]}" >> "$GITHUB_OUTPUT"
+      # Only a run that tests needs the packages: the skip check above and the
+      # report below use the standard library, and most ticks skip.
+      - name: Install the suite's packages
+        if: steps.target.outputs.skip != 'true'
+        run: pip install -r scripts/requirements.txt
       - name: Run regression suite
         if: steps.target.outputs.skip != 'true'
         env:

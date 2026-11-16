@@ -138,7 +138,11 @@ Thresholds come from the manifest entry if set, otherwise from the manifest
 defaults loosened to 3× the golden's own re-run noise floor
 (`noise_floor.json`), so nondeterministic workflows don't false-alarm.
 
-Each commit is tested once per lane. The cron (every 30 minutes) skips master
+Each commit is tested once per lane. The cron runs every 5 minutes, the shortest
+interval GitHub schedules (GitHub can start a run late, or drop one, when it is
+busy). A test run takes about five minutes, so a result should follow a commit
+by about ten when GitHub keeps to the schedule.
+It skips master
 HEAD on a lane as soon as that lane has published a `summary.json` for it,
 whatever the verdict: a red commit stays red until master moves, it is not
 re-run every tick. Before it submits any GPU job, every run pushes a start
@@ -151,7 +155,9 @@ before any GPU work. To test a commit again on purpose, dispatch **GPU
 regression** with `commit=<sha>` (and `lane=` for one lane), when no GPU
 regression run is in progress, or check afterwards that the dispatch ran:
 all runs share one concurrency group, and GitHub cancels a pending run as
-soon as a newer one (the next cron tick) queues behind the running one. The
+soon as a newer one (the next cron tick) queues behind the running one. With a
+tick every 5 minutes, a dispatch made while a test run is in progress will
+usually be replaced that way, so dispatch between test runs. The
 decision lives in `scripts/regression_skip.py`. The cron used to key on the
 previous-run pointer, which does not advance on execution errors, so a red
 HEAD was re-run on both lanes every half hour (53 runs for 11 commits during
@@ -204,7 +210,11 @@ on the runner.
   output is the lane's reference today, and that reference is another one than
   the run was compared with;
 - a table of every workflow: result, an output thumbnail that links to the
-  full image, metrics, timings, peak memory and the output sha;
+  full image, metrics, timings, peak memory and the output sha. Each run time
+  stands next to the workflow's usual range on the lane (what 8 in 10 of its
+  last 30 passing runs took) and is marked slow above 1.5 times the top of it.
+  Times differ between workers by up to a third and are never part of the
+  result;
 - for a workflow that passed without being bit-identical: its numbers next to
   the limits, the noise floor and the diff figures, folded;
 - every output file, a link to each `run.json`, schema notes, the status of
@@ -547,7 +557,7 @@ in order:
    `cu132-t2150` from scratch, then repoints both lanes) and **Sync models**
    (on the cu130 endpoint), and the cron stops testing cu128 from its next
    tick. Wait for both runs to finish.
-6. Expect the cron to test master HEAD on cu132 within 30 minutes of the
+6. Expect the cron to test master HEAD on cu132 within minutes of the
    merge, before the repoint or before the stale workers are flushed, so on
    the branch's image or a mix of old and new workers. A commit is tested
    once per lane, so the cron does not test it again on the rebuilt image;
