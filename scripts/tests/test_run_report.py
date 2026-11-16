@@ -207,15 +207,15 @@ def test_green_run_reports_every_workflow_with_pinned_images():
             "backends: cuda, triton (disabled), hip (not available) |") in lines
 
     assert "### All workflows (2)" in lines
-    assert ("| Workflow | Result | Output | vs reference | vs previous | Reference | Exec s (vs "
-            "previous run) | Server start s (checkout s) | Peak VRAM GB | Peak RSS GB | Output "
+    assert ("| Workflow | Result | Output | vs reference | vs previous | Reference | Exec s (usual "
+            "range) | Server start s (checkout s) | Peak VRAM GB | Peak RSS GB | Output "
             "sha256 |") in lines
     run_dir = f"{RAW}/{P}/runs/master/{SHA}"
     # The thumbnail sits right after the result, where a narrow page still shows it.
     assert (f'| `flux_dev_t2i` | ✅ pass | <a href="{run_dir}/flux_dev_t2i/outputs/'
             f'flux_dev_t2i_00001_.png"><img src="{run_dir}/flux_dev_t2i/outputs/thumbs/'
             'flux_dev_t2i_00001_.webp" width="96" alt="flux_dev_t2i output"></a> | bit-identical '
-            f"| identical to [`{PREV[:7]}`]({COMFY}/commit/{PREV}) | `v0.42.0` | 98.1 (+5.1 %) "
+            f"| identical to [`{PREV[:7]}`]({COMFY}/commit/{PREV}) | `v0.42.0` | 98.1 "
             "| 12.4 | 21.3 | 33.7 | `111111111111` |") in lines
 
     # Every output file, behind a fold, and each workflow's run record.
@@ -258,11 +258,48 @@ def test_facts_name_the_baked_packs_the_checkout_time_and_only_real_backends():
     assert "pytorch version" not in out and "aimdo" not in out
     assert (f"· parents [`{PREV[:7]}`]({COMFY}/commit/{PREV}), [`{FIRST[:7]}`]({COMFY}/commit/"
             f"{FIRST}) |") in out
-    assert "| 98.1 (+5.1 %) | 12.4 (2.0) | 21.3 | 33.7 |" in out
+    assert "| 98.1 | 12.4 (2.0) | 21.3 | 33.7 |" in out
     # A run from before the checkout was timed, and one that only got that far.
     assert run_report.start_cell({"server_start_s": 12.44}) == "12.4"
     assert run_report.start_cell({"checkout_s": 2}) == "(2.0)"
     assert run_report.start_cell({}) == ""
+
+
+def test_a_time_is_shown_against_the_workflows_usual_range_not_the_previous_run():
+    wf = "flux_dev_t2i"
+
+    def head(times, this=98.07):
+        cell = lambda secs, v="pass": {"v": v, "d": None, "sha": "1" * 64, "exec": secs,
+                                       "g": "v0.42.0"}
+        older = [_entry(f"{i:040x}", 1794700000 - i, {wf: c if isinstance(c, dict) else cell(c)})
+                 for i, c in enumerate(times, 1)]
+        return _head([_entry(SHA, 1794702636, {wf: cell(this)}, run=4242), *older])
+
+    def row(times, secs=98.07):
+        cell = _cell(wf, timings={"prompt_exec_s": secs, "server_start_s": 12.44})
+        out = _report(_tree(_summary([cell]), head=head(times, secs)))
+        return next(line for line in out.splitlines() if line.startswith(f"| `{wf}` |"))
+
+    # Ten passing runs from 90 to 108 s: the range is their 10th and 90th percentile.
+    ten = [90, 92, 94, 96, 98, 100, 102, 104, 106, 108]
+    assert "| 98.1 (usual 92 to 106) |" in row(ten)
+    # Inside or a little over the range says nothing more, well over it is marked.
+    assert "| 120.0 (usual 92 to 106) |" in row(ten, 120.0)
+    assert "| 159.1 (usual 92 to 106) ⚠️ slow |" in row(ten, 159.1)
+    # This commit's own time, failed runs and runs without a time are not part of the range.
+    noisy = [*ten, {"v": "fail", "d": None, "sha": "2" * 64, "exec": 900.0, "g": "v0.42.0"},
+             {"v": "pass", "d": None, "sha": "1" * 64, "exec": None, "g": "v0.42.0"}]
+    assert "| 98.1 (usual 92 to 106) |" in row(noisy)
+    # Too few runs to call anything usual: the time stands alone.
+    assert "| 98.1 | 12.4 |" in row(ten[:7])
+    # Only the newest 30 passing runs count.
+    assert "(usual 50 to 50)" in row([50] * 30 + [500] * 30, 50.0)
+    # A workflow that takes under ten seconds keeps a decimal.
+    assert "| 0.5 (usual 0.5 to 0.6) |" in row([0.5] * 8 + [0.6] * 2, 0.5)
+
+    out = _report(_tree(_summary([_cell(wf)]), head=head(ten)))
+    assert run_report.EXEC_NOTE in out.splitlines()
+    assert "not part of the result" in run_report.EXEC_NOTE
 
 
 def test_layout_1_lane_reads_the_bare_regression_prefix():
