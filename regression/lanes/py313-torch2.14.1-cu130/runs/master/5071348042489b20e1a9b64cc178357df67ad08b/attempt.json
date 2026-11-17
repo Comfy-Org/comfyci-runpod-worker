@@ -1,0 +1,8 @@
+{
+  "commit": "5071348042489b20e1a9b64cc178357df67ad08b",
+  "branch": "master",
+  "lane": "py313-torch2.14.1-cu130",
+  "attempt": 1,
+  "started_ts": 1794942299,
+  "run_url": "https://github.com/Comfy-Org/comfyci-runpod-worker/actions/runs/44154625843"
+}
