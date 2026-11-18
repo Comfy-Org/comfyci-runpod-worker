@@ -1,0 +1,37 @@
+{
+  "5": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_4b_fp8_scaled.safetensors",
+      "type": "ideogram4",
+      "device": "default"
+    }
+  },
+  "8": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "example.png"
+    }
+  },
+  "10": {
+    "class_type": "TextGenerateV2",
+    "inputs": {
+      "prompt": "what's in the images",
+      "max_length": 256,
+      "sampling_mode": "off",
+      "thinking": false,
+      "use_default_template": true,
+      "mtp": "off",
+      "clip": ["5", 0],
+      "images.image1": ["8", 0]
+    }
+  },
+  "7": {
+    "class_type": "SaveText",
+    "inputs": {
+      "filename_prefix": "llm_qwen3vl_4b_it2t",
+      "format": "txt",
+      "text": ["10", 0]
+    }
+  }
+}
