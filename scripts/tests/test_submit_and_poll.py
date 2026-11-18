@@ -121,3 +121,28 @@ def test_bad_request_is_infra_but_not_retried(tmp_path):
     assert rec["status"] in submit_and_poll.INFRA_STATUSES
     assert rec["error"] == {"message": "workflow required"}
     assert rec["delay_s"] is None
+
+
+def test_an_empty_text_is_written_and_only_an_unsent_output_is_marked(tmp_path):
+    """The worker sends an empty file as "" and leaves the data out of one past
+    its size limit. An empty generated text is a result, not a lost file. Any
+    other empty file is listed as not sent, as before text workflows: an empty
+    PNG on disk would turn an image run's `fail` into an error of the harness."""
+    sent = [{"filename": "wf_00001.txt", "bytes": 0, "sha256": "e" * 64, "data_b64": ""},
+            {"filename": "wf_00002.TXT", "bytes": 2, "sha256": "f" * 64, "data_b64": "aGk="},
+            {"filename": "sub/wf_00001_.png", "bytes": 9, "sha256": "a" * 64, "truncated": True},
+            {"filename": "wf_00003.txt", "bytes": 5, "sha256": "b" * 64, "data_b64": None},
+            {"filename": "wf_00002_.png", "bytes": 0, "sha256": "e" * 64, "data_b64": ""},
+            {"filename": "notes.log", "bytes": 0, "sha256": "e" * 64, "data_b64": ""}]
+    inventory = submit_and_poll._write_outputs(sent, tmp_path / "outputs")
+    assert inventory == [
+        {"filename": "wf_00001.txt", "bytes": 0, "sha256": "e" * 64},
+        {"filename": "wf_00002.TXT", "bytes": 2, "sha256": "f" * 64},
+        {"filename": "sub/wf_00001_.png", "bytes": 9, "sha256": "a" * 64, "truncated": True},
+        {"filename": "wf_00003.txt", "bytes": 5, "sha256": "b" * 64, "truncated": True},
+        {"filename": "wf_00002_.png", "bytes": 0, "sha256": "e" * 64, "truncated": True},
+        {"filename": "notes.log", "bytes": 0, "sha256": "e" * 64, "truncated": True}]
+    assert (tmp_path / "outputs" / "wf_00001.txt").read_bytes() == b""
+    assert (tmp_path / "outputs" / "wf_00002.TXT").read_bytes() == b"hi"
+    assert sorted(p.name for p in (tmp_path / "outputs").rglob("*") if p.is_file()) == [
+        "wf_00001.txt", "wf_00002.TXT"]

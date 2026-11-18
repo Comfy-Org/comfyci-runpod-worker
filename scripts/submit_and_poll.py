@@ -14,6 +14,8 @@ from pathlib import Path
 
 import requests
 
+import output_kinds
+
 RUNPOD_API = "https://api.runpod.ai/v2"
 POLL_INTERVAL_S = 10
 QUEUE_DEADLINE_S = 600
@@ -105,10 +107,16 @@ def _write_outputs(output_entries: list[dict], dest: Path) -> list[dict]:
     inventory = []
     for f in output_entries:
         rec = {k: f[k] for k in ("filename", "bytes", "sha256") if k in f}
-        if f.get("data_b64"):
+        data = f.get("data_b64")
+        # "" is an empty file. An empty text is a result, so it is written. Any
+        # other empty file stays listed as not sent, as it always was: an empty
+        # PNG on disk would change what an image run records.
+        empty_text = data == "" and str(f.get("filename", "")).lower().endswith(
+            output_kinds.TEXT_EXTENSIONS)
+        if data or empty_text:
             p = dest / f["filename"]
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_bytes(base64.b64decode(f["data_b64"]))
+            p.write_bytes(base64.b64decode(data))
         else:
             rec["truncated"] = True
         inventory.append(rec)

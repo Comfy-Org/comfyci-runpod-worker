@@ -28,6 +28,7 @@ import commit_meta
 import compare
 import index_builder
 import lanes as lanes_mod
+import output_kinds
 import packs
 import regression_skip
 import storage
@@ -139,10 +140,51 @@ def write_thumbnails(outputs_dir: Path, size: int = 256) -> str | None:
     return first
 
 
+class ImageComparator(output_kinds.Comparator):
+    """PNG outputs, compared as they always were: every method is one of the
+    functions above or in compare.py, called with the arguments it always got."""
+    kind = "image"
+    has_figures = True
+
+    def compare(self, ref_dir: Path, cand_dir: Path) -> dict:
+        return compare.compare_dirs(ref_dir, cand_dir)
+
+    def thresholds(self, entry: dict, defaults: dict, noise_floor: dict | None) -> dict:
+        return derive_thresholds(entry, defaults, noise_floor)
+
+    def passes(self, metrics: dict, thresholds: dict | None) -> bool:
+        return metrics_pass(metrics, thresholds)
+
+    def render(self, ref_dir: Path, cand_dir: Path, figures_dir: Path, label: str,
+               ref_name: str, metrics: dict, figures: bool = True) -> dict:
+        return compare.compare_with_figures(ref_dir, cand_dir, figures_dir, label, ref_name,
+                                            metrics=metrics, figures=figures)
+
+    def thumbnails(self, outputs_dir: Path) -> str | None:
+        return write_thumbnails(outputs_dir)
+
+    def primary_sha(self, run_rec: dict) -> str | None:
+        return first_output_sha(run_rec)
+
+    def zero_floor(self) -> dict:
+        return {"identical": True, "mean_mse": 0.0, "mean_psnr_db": None, "min_psnr_db": None,
+                "max_abs_diff": 0, "mean_pct_pixels_changed": 0.0}
+
+
+COMPARATORS: dict[str, output_kinds.Comparator] = {
+    "image": ImageComparator(), "text": output_kinds.TextComparator()}
+
+
+def comparator_for(entry: dict | None) -> output_kinds.Comparator:
+    """The comparator of a manifest entry's output kind (ValueError: unknown kind)."""
+    return COMPARATORS[output_kinds.kind_of(entry)]
+
+
 def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: Path,
                      store: storage.Storage) -> dict:
     workdir = Path(args.workdir) / wf_id
     workdir.mkdir(parents=True, exist_ok=True)
+    cmp_ = comparator_for(entry)
 
     workflow = json.loads((repo_root / entry["workflow_path"]).read_text(encoding="utf-8"))
     workflow = apply_seed_overrides(workflow, entry.get("seed_overrides"))
@@ -172,6 +214,8 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
                         "vs_previous": None, "thresholds_used": None, "golden_tag": None,
                         "previous_commit": None, "previous_verdict": None,
                         "previous_golden_tag": None, "figures": False}
+    if cmp_.kind != output_kinds.DEFAULT_KIND:  # an image comparison.json keeps its keys
+        comparison["output_kind"] = cmp_.kind
 
     if status in INFRA_STATUSES:
         comparison["verdict"] = "infra_error"
@@ -180,6 +224,13 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
     else:
         outputs_dir = Path(run_rec["outputs_dir"])
         figures_dir = workdir / "figures"
+        # A compared file the worker listed and did not send (never so for images).
+        lost = cmp_.transfer_error(run_rec)
+
+        def against(ref_dir: Path) -> dict:
+            if lost:
+                return {"kind": cmp_.kind, "error": lost}
+            return cmp_.compare(ref_dir, outputs_dir)
 
         # Previous run first (metrics only): it decides whether a failure vs
         # golden is new drift introduced by this commit or drift inherited
@@ -191,7 +242,7 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
             prev = latest["commit"]
             comparison["previous_commit"] = prev
             if store.fetch_run_outputs(args.branch, prev, wf_id, prev_dir):
-                comparison["vs_previous"] = compare.compare_dirs(prev_dir, outputs_dir)
+                comparison["vs_previous"] = against(prev_dir)
                 prev_summary = store.run_summary(args.branch, prev) or {}
                 prev_wf = prev_summary.get("workflows", {}).get(wf_id) or {}
                 comparison["previous_verdict"] = prev_wf.get("verdict")
@@ -205,20 +256,21 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
             n = store.fetch_golden_outputs(wf_id, tag, golden_dir)
             if n:
                 noise_floor = store.noise_floor(wf_id, tag)
-                th = derive_thresholds(entry, defaults, noise_floor)
+                th = cmp_.thresholds(entry, defaults, noise_floor)
                 comparison["thresholds_used"] = th
-                vs_golden = compare.compare_dirs(golden_dir, outputs_dir)
-                comparison["verdict"] = "pass" if metrics_pass(vs_golden, th) else "fail"
+                vs_golden = against(golden_dir)
+                comparison["verdict"] = "pass" if cmp_.passes(vs_golden, th) else "fail"
                 comparison["detail"] = classify_detail(
                     comparison["verdict"], comparison["vs_previous"],
                     comparison["previous_verdict"], tag, comparison["previous_golden_tag"])
                 # Inherited failures are bit-identical to an earlier run whose
                 # figures already exist: don't render (and store) them again.
                 want_figures = comparison["detail"] != "inherited"
-                comparison["vs_golden"] = compare.compare_with_figures(
+                comparison["vs_golden"] = cmp_.render(
                     golden_dir, outputs_dir, figures_dir, "golden", f"golden {tag}",
                     metrics=vs_golden, figures=want_figures)
-                comparison["figures"] = bool(want_figures and not vs_golden.get("identical")
+                comparison["figures"] = bool(cmp_.has_figures and want_figures
+                                             and not vs_golden.get("identical")
                                              and not vs_golden.get("error"))
             else:
                 comparison["verdict"] = "no_baseline"
@@ -226,7 +278,7 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
             comparison["verdict"] = "no_baseline"
 
         if comparison["vs_previous"] is not None:
-            comparison["vs_previous"] = compare.compare_with_figures(
+            comparison["vs_previous"] = cmp_.render(
                 prev_dir, outputs_dir, figures_dir, "prev", "previous",
                 metrics=comparison["vs_previous"])
 
@@ -235,7 +287,7 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
     thumbnail = None
     if run_rec.get("outputs_dir") and comparison["verdict"] not in ("infra_error", "execution_error"):
         try:
-            thumbnail = write_thumbnails(Path(run_rec["outputs_dir"]))
+            thumbnail = cmp_.thumbnails(Path(run_rec["outputs_dir"]))
         except Exception as e:  # previews are a convenience, never a failure
             print(f"[{wf_id}] thumbnail generation failed: {e!r}")
 
@@ -248,7 +300,7 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
             shutil.rmtree(d)
     if not args.skip_publish:
         store.publish_workflow_run(args.branch, args.commit, wf_id, publish_dir)
-    return {"workflow_id": wf_id, "worker_status": status, "verdict": comparison["verdict"],
+    cell = {"workflow_id": wf_id, "worker_status": status, "verdict": comparison["verdict"],
             "detail": comparison["detail"],
             "vs_golden": comparison["vs_golden"], "vs_previous": comparison["vs_previous"],
             "thresholds_used": comparison["thresholds_used"],
@@ -256,7 +308,7 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
             "previous_commit": comparison["previous_commit"],
             "previous_verdict": comparison["previous_verdict"],
             "figures": comparison["figures"],
-            "output_sha256": first_output_sha(run_rec),
+            "output_sha256": cmp_.primary_sha(run_rec),
             "thumbnail": thumbnail,
             "gpu_name": run_rec.get("gpu_name"), "timings": run_rec.get("timings"),
             "vram_peak_mb": run_rec.get("vram_peak_mb"),
@@ -266,6 +318,9 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
             "python_version": run_rec.get("python_version"),
             "env": run_rec.get("env"),
             "custom_nodes": run_rec.get("custom_nodes")}
+    if cmp_.kind != output_kinds.DEFAULT_KIND:  # absent means image: those cells keep their keys
+        cell["output_kind"] = cmp_.kind
+    return cell
 
 
 def write_summary(path: Path, summary: dict):
@@ -374,6 +429,13 @@ def main():
     if not selected:
         print(f"no workflows selected for lane {lane_id}; nothing to do")
         return 0
+    # An output kind nothing can compare is a configuration error, like an
+    # unknown lane: caught here, before any GPU job is submitted.
+    for wf_id, entry in selected.items():
+        try:
+            comparator_for(entry)
+        except ValueError as e:
+            raise SystemExit(f"[{wf_id}] {e}; see manifest/workflows.json")
 
     if not args.skip_publish:
         store.snapshot_manifest(args.commit, manifest)

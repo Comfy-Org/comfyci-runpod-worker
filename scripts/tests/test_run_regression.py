@@ -359,3 +359,216 @@ def test_a_retired_lane_runs_nothing(monkeypatch):
                                           "--skip-publish", *extra])
         with pytest.raises(SystemExit, match="lane 'old' is retired.*the primary is 'new'"):
             run_regression.main()
+
+
+# -- limits -------------------------------------------------------------------------
+DEFAULTS = {"timeout_s": 600, "comfy_flags": [],
+            "thresholds": {"max_mean_mse": 2.0, "min_mean_psnr_db": 45.0,
+                           "max_pct_pixels_changed": 1.0}}
+
+
+def test_derive_thresholds():
+    d = run_regression.derive_thresholds
+    assert d({}, DEFAULTS, None) == DEFAULTS["thresholds"]
+    assert d({}, DEFAULTS, None) is not DEFAULTS["thresholds"]  # a copy: loosening never leaks
+    # An identical or failed re-run of the golden loosens nothing.
+    assert d({}, DEFAULTS, {"identical": True, "mean_mse": 0.0}) == DEFAULTS["thresholds"]
+    assert d({}, DEFAULTS, {"error": "no PNGs", "mean_mse": 9.0}) == DEFAULTS["thresholds"]
+    # A noisy golden: three times its own noise, never tighter than the defaults.
+    noisy = {"identical": False, "mean_mse": 1.5, "mean_psnr_db": 46.37,
+             "mean_pct_pixels_changed": 2.0}
+    assert d({}, DEFAULTS, noisy) == {"max_mean_mse": 4.5, "min_mean_psnr_db": 41.6,
+                                      "max_pct_pixels_changed": 6.0}
+    quiet = {"identical": False, "mean_mse": 0.1, "mean_psnr_db": 58.13,
+             "mean_pct_pixels_changed": 0.1}
+    assert d({}, DEFAULTS, quiet) == DEFAULTS["thresholds"]
+    # The entry's own limits win over both.
+    own = {"max_mean_mse": 9.0, "min_mean_psnr_db": 30.0, "max_pct_pixels_changed": 50.0}
+    assert d({"thresholds": own}, DEFAULTS, noisy) is own
+
+
+# -- an image workflow through a run ------------------------------------------------
+CELL_KEYS = ["workflow_id", "worker_status", "verdict", "detail", "vs_golden", "vs_previous",
+             "thresholds_used", "golden_tag", "previous_commit", "previous_verdict", "figures",
+             "output_sha256", "thumbnail", "gpu_name", "timings", "vram_peak_mb", "rss_peak_mb",
+             "comfy_version", "torch_version", "python_version", "env", "custom_nodes"]
+COMPARISON_KEYS = ["verdict", "detail", "vs_golden", "vs_previous", "thresholds_used",
+                   "golden_tag", "previous_commit", "previous_verdict", "previous_golden_tag",
+                   "figures"]
+METRIC_KEYS = ["frames_compared", "frame_count_ref", "frame_count_cand", "identical", "mean_mse",
+               "mean_psnr_db", "min_psnr_db", "max_abs_diff", "mean_pct_pixels_changed",
+               "worst_frame_index"]
+
+
+def _png(path, shade):
+    import numpy as np
+    from PIL import Image
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(np.full((16, 24, 3), shade, dtype=np.uint8)).save(path)
+
+
+class ImageStore:
+    """A results store for one image workflow: a golden and a previous run,
+    each a PNG of one shade (None: there is none)."""
+
+    def __init__(self, golden=100, previous=100, previous_verdict="pass", floor=None):
+        self.golden, self.previous = golden, previous
+        self.previous_verdict, self.floor = previous_verdict, floor
+        self.published = None
+
+    def _write(self, dest, shade):
+        _png(dest / "wf_00001_.png", shade)
+        return 1
+
+    def latest_pointer(self, branch):
+        return {"commit": "prev"} if self.previous is not None else None
+
+    def fetch_run_outputs(self, branch, commit, wf_id, dest):
+        return self._write(dest, self.previous)
+
+    def run_summary(self, branch, commit):
+        return {"workflows": {"wf": {"verdict": self.previous_verdict, "golden_tag": "v1"}}}
+
+    def golden_current(self, wf_id):
+        return {"tag": "v1"} if self.golden is not None else None
+
+    def fetch_golden_outputs(self, wf_id, tag, dest):
+        return self._write(dest, self.golden)
+
+    def noise_floor(self, wf_id, tag):
+        return self.floor
+
+    def publish_workflow_run(self, branch, commit, wf_id, local_dir):
+        self.published = sorted(p.relative_to(local_dir).as_posix()
+                                for p in local_dir.rglob("*") if p.is_file())
+
+
+def _image_run(tmp_path, monkeypatch, store, shade=100, status="ok", extra=()):
+    """process_workflow for an image workflow whose job wrote one PNG of
+    `shade` (plus the files named in `extra`); returns (cell, comparison.json)."""
+    import json
+    import types
+
+    def job(client, wf_id, workflow, workdir=None, **kw):
+        if status != "ok":
+            return {"status": status, "outputs": [], "error": {"message": "boom"}}
+        out = workdir / "outputs"
+        _png(out / "wf_00001_.png", shade)
+        for name in extra:
+            if name.endswith(".png"):
+                _png(out / name, shade)
+            else:
+                (out / name).write_bytes(b"not a png")
+        return {"status": "ok", "outputs_dir": str(out), "gpu_name": "gpu",
+                "timings": {"prompt_exec_s": 3.0},
+                "outputs": [{"filename": p.name, "bytes": p.stat().st_size, "sha256": p.name}
+                            for p in sorted(out.iterdir())]}
+
+    monkeypatch.setattr(run_regression, "run_workflow_job", job)
+    monkeypatch.setattr(run_regression, "RunPodClient", lambda endpoint_id: None)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "wf_api.json").write_text("{}", encoding="utf-8")
+    args = types.SimpleNamespace(workdir=str(tmp_path / "work"), endpoint_id="ep", lane_id="main",
+                                 commit="new", repo_url=None, branch="master", skip_publish=False)
+    cell = run_regression.process_workflow("wf", {"workflow_path": "wf_api.json", "models": []},
+                                           DEFAULTS, args, tmp_path, store)
+    comparison = json.loads((tmp_path / "work" / "wf" / "comparison.json").read_text())
+    # What is published for an image workflow never names a kind: absent means image.
+    assert list(cell) == CELL_KEYS and list(comparison) == COMPARISON_KEYS
+    for key in COMPARISON_KEYS:
+        if key != "previous_golden_tag":
+            assert cell[key] == comparison[key], key
+    return cell, comparison
+
+
+def test_an_image_workflow_that_matches_passes(tmp_path, monkeypatch):
+    store = ImageStore()
+    cell, comparison = _image_run(tmp_path, monkeypatch, store)
+    assert (cell["verdict"], cell["detail"], cell["worker_status"]) == ("pass", None, "ok")
+    assert list(cell["vs_golden"]) == METRIC_KEYS == list(cell["vs_previous"])
+    assert cell["vs_golden"]["identical"] is True and cell["vs_previous"]["identical"] is True
+    assert cell["thresholds_used"] == DEFAULTS["thresholds"] and cell["golden_tag"] == "v1"
+    assert (cell["previous_commit"], cell["previous_verdict"]) == ("prev", "pass")
+    assert comparison["previous_golden_tag"] == "v1"
+    assert cell["figures"] is False and cell["thumbnail"] == "wf_00001_.webp"
+    assert cell["output_sha256"] == "wf_00001_.png"  # the first PNG's sha (here: its name)
+    assert store.published == ["comparison.json", "outputs/thumbs/wf_00001_.webp",
+                               "outputs/wf_00001_.png", "run.json"]
+
+
+def test_a_changed_image_fails_as_new_then_as_inherited(tmp_path, monkeypatch):
+    store = ImageStore()
+    cell, _ = _image_run(tmp_path / "new", monkeypatch, store, shade=180)
+    assert (cell["verdict"], cell["detail"], cell["figures"]) == ("fail", "new_drift", True)
+    assert cell["vs_golden"]["mean_mse"] == 6400.0 and cell["vs_golden"]["max_abs_diff"] == 80
+    assert cell["vs_previous"]["identical"] is False
+    # Figures against the reference and against the previous run.
+    assert store.published == [
+        "comparison.json", "figures/diff_heatmap_golden.png", "figures/diff_heatmap_prev.png",
+        "figures/side_by_side_golden.png", "figures/side_by_side_prev.png",
+        "outputs/thumbs/wf_00001_.webp", "outputs/wf_00001_.png", "run.json"]
+
+    # The same output again, after a run that already failed: nothing is rendered twice.
+    store = ImageStore(previous=180, previous_verdict="fail")
+    cell, _ = _image_run(tmp_path / "again", monkeypatch, store, shade=180)
+    assert (cell["verdict"], cell["detail"], cell["figures"]) == ("fail", "inherited", False)
+    assert not [name for name in store.published if name.startswith("figures/")]
+    # Identical to a previous run that passed: the reference changed, not the output.
+    store = ImageStore(previous=180, previous_verdict="pass")
+    cell, _ = _image_run(tmp_path / "moved", monkeypatch, store, shade=180)
+    assert (cell["verdict"], cell["detail"], cell["figures"]) == ("fail", None, True)
+
+
+def test_a_small_difference_passes_within_the_limits_and_a_noisy_golden_widens_them(
+        tmp_path, monkeypatch):
+    cell, _ = _image_run(tmp_path / "near", monkeypatch, ImageStore(), shade=101)
+    assert cell["verdict"] == "fail"  # every pixel moved: past the 1 % default
+    floor = {"identical": False, "mean_mse": 1.0, "mean_psnr_db": 48.13,
+             "mean_pct_pixels_changed": 100.0}
+    cell, _ = _image_run(tmp_path / "noisy", monkeypatch, ImageStore(floor=floor), shade=101)
+    assert cell["verdict"] == "pass" and cell["vs_golden"]["identical"] is False
+    assert cell["thresholds_used"] == {"max_mean_mse": 3.0, "min_mean_psnr_db": 43.36,
+                                       "max_pct_pixels_changed": 300.0}
+    assert cell["figures"] is True  # a pass that is not bit-identical still shows its figures
+
+
+def test_an_image_workflow_without_a_reference_or_a_previous_run(tmp_path, monkeypatch):
+    store = ImageStore(golden=None)
+    cell, _ = _image_run(tmp_path / "no-golden", monkeypatch, store)
+    assert (cell["verdict"], cell["vs_golden"], cell["thresholds_used"]) == ("no_baseline", None,
+                                                                            None)
+    assert cell["golden_tag"] is None and cell["vs_previous"]["identical"] is True
+    assert cell["thumbnail"] == "wf_00001_.webp" and cell["output_sha256"] == "wf_00001_.png"
+
+    cell, comparison = _image_run(tmp_path / "first", monkeypatch, ImageStore(previous=None),
+                                  shade=180)
+    assert (cell["verdict"], cell["detail"]) == ("fail", None)  # nothing says whether it is new
+    assert cell["vs_previous"] is None and cell["previous_commit"] is None
+    assert comparison["previous_golden_tag"] is None and cell["figures"] is True
+
+
+def test_another_frame_fails_and_a_file_that_is_no_png_is_not_compared(tmp_path, monkeypatch):
+    store = ImageStore()
+    cell, _ = _image_run(tmp_path, monkeypatch, store, extra=("wf_00002_.png", "wf_clip.gif"))
+    assert cell["verdict"] == "fail"
+    assert (cell["vs_golden"]["frame_count_ref"], cell["vs_golden"]["frame_count_cand"]) == (1, 2)
+    assert cell["vs_golden"]["mean_mse"] == 0.0 and cell["vs_golden"]["identical"] is False
+    assert cell["output_sha256"] == "wf_00001_.png"
+    assert "outputs/wf_clip.gif" in store.published  # published, never compared
+
+
+@pytest.mark.parametrize("status, verdict", [("worker_error", "infra_error"),
+                                             ("no_outputs", "infra_error"),
+                                             ("timeout", "execution_error"),
+                                             ("validation_error", "execution_error")])
+def test_a_run_that_produced_nothing_is_not_compared(tmp_path, monkeypatch, status, verdict):
+    assert status in (run_regression.INFRA_STATUSES | run_regression.EXEC_FAIL_STATUSES)
+    store = ImageStore()
+    cell, comparison = _image_run(tmp_path, monkeypatch, store, status=status)
+    assert (cell["verdict"], cell["worker_status"]) == (verdict, status)
+    assert comparison == {"verdict": verdict, "detail": None, "vs_golden": None,
+                          "vs_previous": None, "thresholds_used": None, "golden_tag": None,
+                          "previous_commit": None, "previous_verdict": None,
+                          "previous_golden_tag": None, "figures": False}
+    assert cell["output_sha256"] is None and cell["thumbnail"] is None
+    assert store.published == ["comparison.json", "run.json"]

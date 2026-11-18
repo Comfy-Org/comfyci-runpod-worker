@@ -409,3 +409,107 @@ def test_posted_comment_carries_the_run_link(tmp_path, monkeypatch, env, gh):
     assert run(tmp_path, {**_summary(DRIFT), "run_url": RUN_URL}) == "created on #16488"
     (_, _, _, payload, _), = gh.writes()
     assert f"[Run details]({RUN_URL})" in payload["body"]
+
+
+# -- text workflows -------------------------------------------------------------------
+# What a model could write: a mention, a link, markup. None of it may reach a comment.
+NONE = notify_pr._fmt(None, ".1f")  # how the table shows a number a workflow does not have
+HOSTILE = "@comfyanonymous see [this](https://evil.example) <b>now</b>"
+
+
+def _text(verdict="fail", detail="new_drift", **vs_golden):
+    vg = {"kind": "text", "files_compared": 1, "file_count_ref": 1, "file_count_cand": 1,
+          "identical": False, "similarity": 0.864865, "similarity_basis": "words",
+          "chars_ref": 208, "chars_cand": 209, "lines_ref": 3, "lines_cand": 3,
+          "first_diff": {"file": "llm_00001.txt", "line": 2, "col": 22, "offset": 108,
+                         "ref": "the reference line", "cand": HOSTILE}, **vs_golden}
+    return _wf(verdict, detail, vs_golden=vg, output_kind="text", thresholds_used=None)
+
+
+def test_a_new_text_change_adds_one_line_of_numbers_under_the_table():
+    s = _summary({**DRIFT, "llm_qwen_t2t": _text()})
+    lines = notify_pr.render_changed(s, None).splitlines()
+    assert notify_pr.decide(s) == "changed"
+    # The row is the one every workflow gets: a text has no PSNR, MSE or pixels.
+    assert (f"| `llm_qwen_t2t` | changed | new | {NONE} | {NONE} | {NONE} | 41.2 | 21.0 GB |"
+            in lines)
+    note = ("- Text `llm_qwen_t2t`: 86.5% similar to the golden, first difference at line 2, "
+            "column 22")
+    at = lines.index(note)
+    assert lines[at - 1] == "" and lines[at - 2].startswith("| `sdxl_t2i` |")
+    assert lines[at + 1] == "" and lines[at + 2].startswith("Lane: ")
+    # A text that matches reads like any match.
+    same = _wf("pass", vs_golden={"kind": "text", "identical": True, "similarity": 1.0},
+               output_kind="text")
+    body = notify_pr.render_changed(_summary({**DRIFT, "llm_qwen_t2t": same}), None)
+    assert (f"| `llm_qwen_t2t` | match | {NONE} | identical | {NONE} | {NONE} | 41.2 | 21.0 GB |"
+            in body)
+    assert "- Text" not in body
+
+
+def test_generated_text_never_enters_a_comment(tmp_path, monkeypatch, env, gh):
+    """The comment is posted on ComfyUI from a person's account, and model
+    output could carry mentions or links: only numbers are taken from it."""
+    hostile = _text(similarity=HOSTILE, error=None)
+    hostile["vs_golden"]["first_diff"].update(line=HOSTILE, col={"x": HOSTILE}, file=HOSTILE)
+    s = _summary({"llm_a": _text(), "llm_b": hostile})
+    for body in (notify_pr.render_changed(s, None), notify_pr.render_resolved(s, None)):
+        assert "evil" not in body and "comfyanonymous" not in body and "<b>" not in body
+        assert "the reference line" not in body
+    # Values that are not plain numbers are dropped, and a line with nothing left is too.
+    lines = notify_pr.render_changed(s, None).splitlines()
+    assert [line for line in lines if line.startswith("- Text")] == [
+        "- Text `llm_a`: 86.5% similar to the golden, first difference at line 2, column 22"]
+    for sim in (True, float("nan"), float("inf"), -1, 2, "0.5", None):
+        odd = _text(similarity=sim)
+        odd["vs_golden"]["first_diff"].update(line=0, col=True)
+        assert notify_pr.text_notes({"x": odd}, {"x": "new_drift"}) == []
+    on(monkeypatch)
+    assert run(tmp_path, s) == "created on #16488"
+    (_, _, _, payload, _), = gh.writes()
+    assert "evil" not in payload["body"] and "comfyanonymous" not in payload["body"]
+
+
+def test_which_text_changes_get_a_line():
+    kinds = {"a": "new_drift", "b": "new_drift", "c": "new_drift", "d": "new_drift"}
+    wfs = {wf: _text() for wf in kinds}
+    # At most three lines: the table and the run report hold the rest.
+    assert len(notify_pr.text_notes(wfs, kinds)) == 3
+    assert notify_pr.text_notes(wfs, kinds)[0].startswith("- Text `a`: ")
+    # Not for an inherited change, an execution error, a comparison that failed or an image.
+    assert notify_pr.text_notes({"a": _text(detail="inherited")}, {"a": None}) == []
+    assert notify_pr.text_notes({"a": _text()}, {"a": "new_error"}) == []
+    assert notify_pr.text_notes({"a": _text(error="no text files to compare")},
+                                {"a": "new_drift"}) == []
+    assert notify_pr.text_notes(DRIFT, {"flux_dev_t2i": "new_drift", "sdxl_t2i": None}) == []
+    assert notify_pr.text_notes({"a": {"vs_golden": "nope"}}, {"a": "new_drift"}) == []
+    # A blank-only change never reads as fully alike; a missing position is left out.
+    near = _text(similarity=0.999999)
+    del near["vs_golden"]["first_diff"]
+    assert notify_pr.text_notes({"a": near}, {"a": "new_drift"}) == [
+        "- Text `a`: over 99.9% similar to the golden"]
+    # An inherited text failure next to a new image change: the table says so, no line.
+    body = notify_pr.render_changed(_summary({**DRIFT, "llm": _text(detail="inherited")}), None)
+    assert f"| `llm` | changed | inherited | {NONE} | {NONE} | {NONE} | 41.2 | 21.0 GB |" in body
+    assert "- Text" not in body
+
+
+def test_a_summary_without_text_renders_the_body_it_always_did():
+    """The tail of a comment starts with one empty line, as before text notes."""
+    rng = {"prev": "b" * 40, "commits_between": 1, "compare_url": "u"}
+    lanes = {"primary": LANE, "lanes": {LANE: {"cuda": "13.0", "gpu": "RTX 4090"}}}
+    body = notify_pr.render_changed(_summary(DRIFT, rng=rng), lanes)
+    assert body == "\n".join([
+        f"**(PULSE)** GPU output changed vs golden · `{SHA[:7]}`",
+        "",
+        "| Workflow | Verdict | New / inherited | PSNR dB | Mean MSE | Pixels changed "
+        "| Exec s | Peak VRAM |",
+        "|---|---|---|---|---|---|---|---|",
+        "| `flux_dev_t2i` | changed | new | 42.76 | 3.442 | 69.99% | 41.2 | 21.0 GB |",
+        f"| `sdxl_t2i` | match | {NONE} | identical | 0 | {NONE} | 41.2 | 21.0 GB |",
+        "",
+        "Lane: python 3.13.11 · torch 2.14.1+cu130 · CUDA 13.0 · NVIDIA GeForce RTX 4090",
+        f"[Run details](https://ci.comfy.org/regression/master/{SHA})",
+        "",
+        notify_pr.FOOTER,
+        notify_pr.MARKER])
