@@ -35,6 +35,10 @@ TIMED_OUT = "timed_out"
 # answered, when a stopped run cancels its jobs: GitHub kills the step 10
 # seconds after its first signal.
 STOP_CANCEL_TIMEOUT_S = 3
+# How long the status of a job may be out of reach before the runner gives the
+# job up: failed looks in a row, times the pause between two looks. At the
+# usual pause of 10 s that is the 30 looks it always was.
+STATUS_PATIENCE_S = 300
 
 # custom_node_install_error: a pack could not be fetched or its requirements
 # could not be pip-installed on the worker (network, not the commit under test).
@@ -88,21 +92,30 @@ class RunPodClient:
             self.live.discard(job_id)
         return body
 
-    def cancel(self, job_id: str, timeout: float = 60):
-        self.live.discard(job_id)
+    def cancel(self, job_id: str, timeout: float = 60) -> bool:
+        """Ask RunPod to cancel a job, and say whether it took the call. Only
+        then is the job no longer live: one whose cancel did not arrive (no
+        network, an error answer) may run on, so a run that is stopped later
+        asks again. It never raises."""
         try:
-            requests.post(f"{self.base}/cancel/{job_id}", headers=self.headers, timeout=timeout)
+            r = requests.post(f"{self.base}/cancel/{job_id}", headers=self.headers,
+                              timeout=timeout)
         except requests.RequestException:
-            pass
+            return False
+        if not 200 <= r.status_code < 300:
+            return False
+        self.live.discard(job_id)
+        return True
 
-    def cancel_live(self, timeout: float = STOP_CANCEL_TIMEOUT_S) -> list[str]:
+    def cancel_live(self, timeout: float = STOP_CANCEL_TIMEOUT_S) -> tuple[list[str], list[str]]:
         """Cancel every job of this client that RunPod has not ended, one call
-        each, and return their ids. For a run that is being stopped: nobody
-        would read those jobs, and they would be billed to their end."""
-        job_ids = sorted(self.live)
-        for job_id in job_ids:
-            self.cancel(job_id, timeout)
-        return job_ids
+        each: (the ids whose cancel RunPod took, the ids whose cancel failed).
+        For a run that is being stopped: nobody would read those jobs, and
+        they would be billed to their end."""
+        cancelled, failed = [], []
+        for job_id in sorted(self.live):
+            (cancelled if self.cancel(job_id, timeout) else failed).append(job_id)
+        return cancelled, failed
 
 
 class JobTimeout(TimeoutError):
@@ -123,8 +136,10 @@ def _poll(client: RunPodClient, job_id: str, exec_timeout_s: float,
     """Poll until COMPLETED/FAILED. Returns RunPod's status body; raises TimeoutError
     (JobTimeout when the job was past its poll deadline, not waiting in the queue).
 
-    Transient network failures (runner DNS blips etc.) are tolerated for up to
-    ~5 minutes before giving up — the job keeps running server-side either way.
+    Transient network failures (runner DNS blips etc.) are tolerated for about
+    5 minutes of looks in a row (STATUS_PATIENCE_S), whatever the pause between
+    two looks. Then the error is raised. The job keeps running on RunPod: the
+    caller decides whether to cancel it.
     """
     t0 = time.monotonic()
     allowed_s = poll_deadline_s(exec_timeout_s, queue_deadline_s)
@@ -136,7 +151,7 @@ def _poll(client: RunPodClient, job_id: str, exec_timeout_s: float,
             net_errors = 0
         except requests.RequestException:
             net_errors += 1
-            if net_errors > 30:
+            if net_errors * poll_interval_s > STATUS_PATIENCE_S:
                 raise
             time.sleep(poll_interval_s)
             continue
@@ -153,6 +168,7 @@ def _poll(client: RunPodClient, job_id: str, exec_timeout_s: float,
 
 def _write_outputs(output_entries: list[dict], dest: Path) -> list[dict]:
     dest.mkdir(parents=True, exist_ok=True)
+    root = dest.resolve()
     inventory = []
     for f in output_entries:
         rec = {k: f[k] for k in ("filename", "bytes", "sha256") if k in f}
@@ -162,8 +178,11 @@ def _write_outputs(output_entries: list[dict], dest: Path) -> list[dict]:
         # PNG on disk would change what an image run records.
         empty_text = data == "" and str(f.get("filename", "")).lower().endswith(
             output_kinds.TEXT_EXTENSIONS)
-        if data or empty_text:
-            p = dest / f["filename"]
+        # The name is the worker's word. One that leaves the outputs folder
+        # ("../x", an absolute path) is written nowhere: the folder above is
+        # published, and the runner holds the token that pushes it.
+        p = (dest / str(f.get("filename", ""))).resolve()
+        if (data or empty_text) and root in p.parents:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(base64.b64decode(data))
         else:
@@ -212,10 +231,16 @@ def run_workflow_job(client: RunPodClient, workflow_id: str, workflow_json: dict
     last_err = None
     spent = False  # the last attempt used up its whole time
     for attempt in range(1, attempts + 1):
+        job_id = None
         try:
             job_id = client.run(job_input)
             st = _poll(client, job_id, timeout_s, queue_deadline_s, poll_interval_s)
         except (requests.RequestException, TimeoutError) as e:
+            if job_id is not None and isinstance(e, requests.RequestException):
+                # Its status stayed out of reach, so nobody reads this job any
+                # more, and the workflow may be submitted again: without the
+                # cancel it would run on beside its successor, billed.
+                client.cancel(job_id)
             last_err = str(e)[:1000]
             spent = isinstance(e, JobTimeout)
             continue

@@ -66,6 +66,44 @@ def test_write_thumbnails(tmp_path):
     assert run_regression.write_thumbnails(tmp_path / "empty") is None
 
 
+def test_one_png_that_cannot_be_read_does_not_cost_the_others_their_thumbnail(tmp_path,
+                                                                             monkeypatch, capsys):
+    """A smoke run with a good picture and a cut one fails, which is right.
+    Its row, the one a person opens, had no picture: the first error ended
+    the loop, and the cell's thumbnail was null beside a published preview."""
+    import io
+    import numpy as np
+    from PIL import Image
+    data = io.BytesIO()
+    Image.fromarray(np.zeros((640, 480, 3), dtype=np.uint8)).save(data, "PNG")
+    good = data.getvalue()
+    for label, files in (("cut-last", {"a_00001_.png": good, "b_00002_.png": good[:200]}),
+                         ("cut-first", {"a_00001_.png": good[:200], "b_00002_.png": good}),
+                         ("no-image", {"a_00001_.png": b"not a picture", "b_00002_.png": good})):
+        out = tmp_path / label
+        out.mkdir()
+        for name, content in files.items():
+            (out / name).write_bytes(content)
+        kept = next(name for name, content in files.items() if content == good)
+        assert run_regression.write_thumbnails(out) == kept[:-4] + ".webp", label
+        assert [p.name for p in (out / "thumbs").iterdir()] == [kept[:-4] + ".webp"], label
+    assert capsys.readouterr().out.count("no thumbnail for ") == 3
+    # None of them readable: no thumbnail, and no error.
+    out = tmp_path / "none"
+    out.mkdir()
+    (out / "a_00001_.png").write_bytes(good[:200])
+    assert run_regression.write_thumbnails(out) is None
+    # Through a run: the failing cell has the picture of the file that is one.
+    workflow = {"3": {"class_type": "SaveImage", "inputs": {"filename_prefix": "wf"}},
+                "4": {"class_type": "SaveImage", "inputs": {"filename_prefix": "wf"}}}
+    cell, _, store = _smoke_run(tmp_path / "run", monkeypatch, {
+        "wf_00001_.png": good[:200], "wf_00002_.png": _picture()}, workflow=workflow)
+    assert cell["verdict"] == "fail" and cell["thumbnail"] == "wf_00002_.webp"
+    assert [(p["file"], p["check"]) for p in cell["smoke"]["problems"]] == [
+        ("wf_00001_.png", "decode")]
+    assert "outputs/thumbs/wf_00002_.webp" in store.published
+
+
 def test_first_output_sha_uses_first_png_by_name():
     rec = {"outputs": [{"filename": "b_00002_.png", "sha256": "two"},
                        {"filename": "a_00001_.png", "sha256": "one"},
@@ -186,25 +224,41 @@ def test_a_rerun_records_its_attempt(tmp_path, monkeypatch, capsys):
     import sys
     import commit_meta
     import storage
-    store = FakeStore({"regression/runs/master/new/summary.json": {
-        "commit": "new", "overall": "pass", "has_infra_error": True,
-        "workflows": {"sdxl_t2i": {"verdict": "infra_error"}}}})
+    published = {"commit": "new", "overall": "pass", "has_infra_error": True,
+                 "workflows": {"sdxl_t2i": {"verdict": "infra_error"}}}
+    store = RecordingStore({"regression/runs/master/new/summary.json": published})
     monkeypatch.setattr(storage, "from_args", lambda args: store)
     monkeypatch.setattr(commit_meta, "fetch_commit_meta", lambda sha: None)
     monkeypatch.setattr(run_regression, "process_workflow",
                         lambda wf_id, *a: {"workflow_id": wf_id, "worker_status": "ok",
                                            "verdict": "pass", "detail": None})
     out = tmp_path / "summary.json"
-    monkeypatch.setattr(sys, "argv", ["run_regression.py", "--commit", "new", "--branch", "master",
-                                      "--workflows", "sdxl_t2i", "--skip-publish",
-                                      "--summary-out", str(out)])
-    assert run_regression.main() == 0
-    assert json.loads(out.read_text(encoding="utf-8"))["attempt"] == 2
-    assert "this is attempt 2" in capsys.readouterr().out
+    argv = ["run_regression.py", "--commit", "new", "--branch", "master",
+            "--manifest", _manifest(tmp_path, "sdxl_t2i"), "--summary-out", str(out)]
+
+    def attempt(*more):
+        monkeypatch.setattr(sys, "argv", [*argv, *more])
+        assert run_regression.main() == 0
+        return json.loads(out.read_text(encoding="utf-8"))["attempt"], capsys.readouterr().out
+
+    # A run that names its workflows, or that publishes nothing, is no attempt:
+    # it pushes no start marker and the cron does not count it. Its summary
+    # records the attempts counted so far, and it does not say it is the next.
+    for more in (["--skip-publish"], ["--workflows", "sdxl_t2i", "--skip-publish"]):
+        number, said = attempt(*more)
+        assert number == 1 and "attempt" not in said, more
+    assert store.events == [] and store.published_summary("master", "new") == published
+    # The lane's run of the commit is one.
+    number, said = attempt()
+    assert number == 2 and "new was already tried on lane main; this is attempt 2\n" in said
+    assert store.attempt_marker("master", "new")["attempt"] == 2
     # A later marker (a retry that died before publishing) raises the count.
-    store.files["regression/runs/master/new/attempt.json"] = {"attempt": 2}
-    assert run_regression.main() == 0
-    assert json.loads(out.read_text(encoding="utf-8"))["attempt"] == 3
+    store.files["regression/runs/master/new/attempt.json"] = {"attempt": 3}
+    assert attempt("--skip-publish")[0] == 3
+    assert attempt()[0] == 4
+    # A commit that nothing was published for: a run that is no attempt records 1.
+    store.files.clear()
+    assert attempt("--workflows", "sdxl_t2i", "--skip-publish")[0] == 1
 
 
 def test_the_start_marker_is_pushed_before_any_gpu_job(tmp_path, monkeypatch):
@@ -1779,6 +1833,54 @@ def test_a_smoke_workflow_on_a_per_commit_lane_from_its_first_failure_to_its_fix
         "wf_img": {"tag": "v1", "sha": None}}
 
 
+def test_a_workflow_that_changes_its_level_while_it_is_red_starts_a_new_failure(tmp_path,
+                                                                               monkeypatch):
+    """Its output differs from its reference, then it moves to smoke level and
+    fails its first smoke check. That is another failure: the cell was marked
+    inherited, and the open chain still read as an output that changed against
+    a reference the workflow no longer has."""
+    import json
+    lane = LevelLane(tmp_path, monkeypatch, {"wf": {}}, {"wf": {"3": {
+        "class_type": "SaveImage", "inputs": {"filename_prefix": "wf"}}}})
+    lane.reference("main", "wf", _shade(100))
+    index = "regression/index/master/main.json"
+
+    def level(value):
+        manifest = json.loads(lane.manifest.read_text(encoding="utf-8"))
+        manifest["workflows"]["wf"]["level"] = value
+        lane.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+
+    def chain():
+        head = lane.json(index)
+        found = head["first_bad"]["wf"]
+        return (found["commit"], found["prev_good"], found["golden"], found.get("level"),
+                found["runs"]), head["entries"][0]["w"]["wf"]["d"]
+
+    lane.files["wf"] = {"wf_00001_.png": _shade(100)}
+    assert lane.run("c1", "main")[0] == 0
+    # A flat picture of another shade: it differs from the reference.
+    lane.files["wf"] = {"wf_00001_.png": _shade(200)}
+    assert lane.run("c2", "main", now=LEVEL_NOW + 600)[0] == 1
+    assert chain()[0] == ("c2", "c1", "v1", None, 1)
+    # At smoke level the same picture fails as blank. The last result that says
+    # something about a smoke check is the pass of c1, not the changed output of c2.
+    level("smoke")
+    code, summary = lane.run("c3", "main", now=LEVEL_NOW + 1200)
+    cell = summary["workflows"]["wf"]
+    assert code == 1 and "blank" in [p["check"] for p in cell["smoke"]["problems"]]
+    assert (cell["prior_verdict"], cell["prior_commit"]) == ("pass", "c1")
+    assert chain() == (("c3", "c1", None, "smoke", 1), None)
+    # The same failure again is a standing one, of that chain.
+    code, summary = lane.run("c4", "main", now=LEVEL_NOW + 1800)
+    assert summary["workflows"]["wf"]["prior_commit"] == "c3"
+    assert chain() == (("c3", "c1", None, "smoke", 2), "inherited")
+    # Back at reference level, still with the other shade: a reference failure again.
+    level("reference")
+    code, summary = lane.run("c5", "main", now=LEVEL_NOW + 2400)
+    assert code == 1 and summary["workflows"]["wf"]["prior_commit"] == "c4"
+    assert chain()[0] == ("c5", "c1", "v1", None, 1)
+
+
 def test_the_index_lists_a_chain_only_for_a_workflow_the_lane_still_runs(tmp_path, monkeypatch):
     import json
     lane = LevelLane(tmp_path, monkeypatch, {"wf_a": {"level": "smoke"},
@@ -2471,6 +2573,192 @@ def test_a_pass_at_the_end_is_checkpointed_before_it_starts(tmp_path, monkeypatc
         "regression master@new: 10 of 10 workflows"]
 
 
+def test_a_checkpoint_counts_the_workflows_that_have_a_result(tmp_path, monkeypatch):
+    """A workflow the deadline did not reach has a cell and no result. Four of
+    those ahead of ten that ran read as "14 of 14 workflows have a result"."""
+    clock = Clock()
+    monkeypatch.setattr(run_regression, "time", clock)
+    late = {f"big_{i}": {"timeout_s": 7200} for i in range(4)}  # 155 minutes: never fits in 95
+    ids = [f"wf_{i:02d}" for i in range(10)]
+    store = CheckpointStore()
+    gpu = Gpu({**dict.fromkeys(late, "pass"), **dict.fromkeys(ids, "pass")}, clock)
+    code, summary = _long_run(tmp_path, monkeypatch, store, gpu, "--max-in-flight", "1",
+                              entries=late)
+    assert code == 1 and gpu.calls == ids and len(summary["workflows"]) == 14
+    assert [e for e in store.events if "workflows" in e] == [
+        "regression master@new: 10 of 14 workflows"]
+    first, final = store.summaries
+    assert first["partial"] == {"done": 10, "of": 14} and len(first["workflows"]) == 14
+    assert "partial" not in final
+
+
+def test_a_second_full_run_of_a_commit_pushes_nothing_over_its_full_result(tmp_path, monkeypatch):
+    """The cron runs a commit once more when a workflow stayed untested, and a
+    dispatch can name the commit. A checkpoint of that run replaced the lane's
+    full result with a part of one. If the run then died, the commit was left
+    with fewer cells than it had, and the cron took it for tested."""
+    import regression_skip
+    ids = [f"wf_{i:02d}" for i in range(14)]
+    untested = {"verdict": "infra_error", "worker_status": "worker_error"}
+    store = CheckpointStore()
+    code, first = _long_run(tmp_path, monkeypatch, store,
+                            Gpu({**dict.fromkeys(ids, "pass"), "wf_13": untested}),
+                            "--max-in-flight", "1")
+    assert code == 1 and len(first["workflows"]) == 14 and first["attempt"] == 1
+    assert [s.get("partial") for s in store.summaries] == [
+        {"done": 10, "of": 14}, {"done": 14, "of": 14}, None]
+    marker, latest = store.attempt_marker("master", "new"), store.latest_pointer("master")
+    run, why = regression_skip.decide("new", first, latest, marker=marker)
+    assert run and why == "new attempt 1 had infra errors; retrying (attempt 2 of 2)"
+
+    # The second run. While its jobs run, the branch holds the first run's result.
+    seen = []
+
+    class Watching(Gpu):
+        def __call__(self, *args):
+            seen.append(store.published_summary("master", "new"))
+            return super().__call__(*args)
+
+    store.summaries.clear()
+    store.events.clear()
+    code, second = _long_run(tmp_path, monkeypatch, store, Watching(dict.fromkeys(ids, "pass")),
+                             "--max-in-flight", "1")
+    assert code == 0 and second["attempt"] == 2 and len(seen) == 14
+    assert all(s == first for s in seen)
+    assert [s.get("partial") for s in store.summaries] == [None]
+    assert store.events == ["snapshot", "marker", "checkpoint", "summary", "latest", "index",
+                            "regression master@new: pass"]
+    # What a run that did not finish left, or a result of named workflows only,
+    # is no full result: a run over it pushes on its way as any first run does.
+    for left in ({**first, "partial": {"done": 10, "of": 14}}, {**first, "scope": ids[:3]}):
+        store = CheckpointStore({"regression/runs/master/new/summary.json": left})
+        _long_run(tmp_path, monkeypatch, store, Gpu(dict.fromkeys(ids, "pass")),
+                  "--max-in-flight", "1")
+        assert [s.get("partial") for s in store.summaries] == [{"done": 10, "of": 14}, None]
+
+
+def test_a_retest_at_a_commit_whose_run_died_does_not_merge_into_what_it_left(tmp_path,
+                                                                               monkeypatch):
+    """What a run pushed on its way is no result of the lane: it is in no
+    history table, and the cron gives the commit another run. A re-test of
+    two workflows there used to merge into it. The summary kept `partial`
+    with its old count, and the publish put the dead run into the index. It
+    now writes a summary of its own, as at a commit without one."""
+    import regression_skip
+    ids = [f"wf_{i:02d}" for i in range(12)]
+    store = CheckpointStore()
+    _long_run(tmp_path, monkeypatch, store, Gpu(dict.fromkeys(ids, "pass")), "--max-in-flight",
+              "1", lane="week")
+    died = store.summaries[0]
+    assert died["partial"] == {"done": 10, "of": 12} and len(died["workflows"]) == 10
+    path = "regression/runs/master/new"
+    store = CheckpointStore({f"{path}/summary.json": died, f"{path}/attempt.json": {"attempt": 1}})
+    code, summary = _long_run(tmp_path, monkeypatch, store, Gpu(dict.fromkeys(ids, "pass")),
+                              "--workflows", "wf_10,wf_11", lane="week")
+    assert code == 0 and list(summary["workflows"]) == ["wf_10", "wf_11"]
+    assert summary["scope"] == ["wf_10", "wf_11"]
+    assert "partial" not in summary and "retests" not in summary
+    assert store.published_summary("master", "new") == summary
+    assert store.events == ["snapshot", "summary", "index", "regression master@new: pass"]
+    # It is no attempt, and it does not end the count: the cron still gives the
+    # commit the second attempt a run that died is owed.
+    assert summary["attempt"] == 1
+    run, why = regression_skip.decide("new", summary, marker=store.attempt_marker("master", "new"))
+    assert run and why == ("new attempt 1 started but published no result; retrying (attempt 2 "
+                           "of 2)")
+    # A full result is still merged into, as on every lane.
+    full = {k: v for k, v in died.items() if k != "partial"}
+    store = CheckpointStore({f"{path}/summary.json": full})
+    code, merged = _long_run(tmp_path, monkeypatch, store, Gpu(dict.fromkeys(ids, "pass")),
+                             "--workflows", "wf_10,wf_11", lane="week")
+    assert len(merged["workflows"]) == 12 and "scope" not in merged
+    assert [r["workflows"] for r in merged["retests"]] == [["wf_10", "wf_11"]]
+
+
+def test_the_result_of_a_second_job_says_that_it_is_one(tmp_path, monkeypatch):
+    """The pass at the end gives an untested workflow a second job. Its folder
+    replaces the first job's, and its run.json is a first attempt's, so only
+    the cell can say that the workflow was tried twice."""
+    clock = Clock()
+    monkeypatch.setattr(run_regression, "time", clock)
+    untested = {"verdict": "infra_error", "worker_status": "worker_error"}
+    gpu = Gpu({"again_bad": untested, "again_good": [untested, "pass"], "good": "pass",
+               "gated": {"verdict": "infra_error", "worker_status": "missing_model"}})
+    code, summary = _long_run(tmp_path, monkeypatch, RecordingStore(), gpu)
+    assert code == 1 and sorted(gpu.calls) == ["again_bad", "again_bad", "again_good",
+                                               "again_good", "gated", "good"]
+    assert {wf: cell.get("tries") for wf, cell in summary["workflows"].items()} == {
+        "again_bad": 2, "again_good": 2, "gated": None, "good": None}
+    assert "tries" not in summary["workflows"]["good"]
+    # A second job that the deadline did not allow was not started: no mark.
+    clock.now = NOW
+    gpu = Gpu({"a": untested, "b": "pass"}, clock, job_minutes=30)
+    code, summary = _long_run(tmp_path, monkeypatch, RecordingStore(), gpu,
+                              "--max-in-flight", "1")
+    assert gpu.calls == ["a", "b"] and "tries" not in summary["workflows"]["a"]
+    # A harness error in the second job is a second try all the same.
+    clock.now = NOW
+
+    class Breaking(Gpu):
+        def __call__(self, wf_id, *args):
+            if self.calls.count(wf_id) == 1:
+                self.calls.append(wf_id)
+                raise RuntimeError("the runner lost the job")
+            return super().__call__(wf_id, *args)
+
+    code, summary = _long_run(tmp_path, monkeypatch, RecordingStore(), Breaking({"a": untested}))
+    assert (summary["workflows"]["a"]["worker_status"], summary["workflows"]["a"]["tries"]) == (
+        "harness_error", 2)
+    # The per-commit lane has no such pass, and its cells have no such key.
+    code, summary = _long_run(tmp_path, monkeypatch, RecordingStore(),
+                              Gpu({"a": untested, "b": "pass"}), lane="main")
+    assert all("tries" not in cell for cell in summary["workflows"].values())
+
+
+def test_the_two_numbers_of_a_job_that_was_not_started_never_read_as_if_it_fitted(
+        tmp_path, monkeypatch, capsys):
+    """A job that can take 95 minutes, a deadline 95 minutes after the start,
+    and a second gone by: "can take 95 min, and 95 min are left" read as a
+    contradiction. What the job needs is rounded up, what is left down."""
+    class Ticking(Clock):
+        def time(self):
+            self.now += 1  # a second goes by between any two looks at the clock
+            return self.now
+
+    monkeypatch.setattr(run_regression, "time", Ticking())
+    gpu = Gpu({"slow": "pass"})
+    code, summary = _long_run(tmp_path, monkeypatch, RecordingStore(), gpu,
+                              entries={"slow": {"timeout_s": 3600}})
+    assert code == 1 and gpu.calls == []
+    assert summary["workflows"]["slow"]["error"] == (
+        "not started: its job can take 95 min, and 94 min were left before the run's deadline")
+    assert "[slow] not started: its job can take 95 min, and 94 min are left before the run's " \
+           "deadline\n" in capsys.readouterr().out
+    assert run_regression.not_started(59.9, 60.1) == (
+        "not started: its job can take 2 min, and 0 min are left before the run's deadline")
+    assert run_regression.not_started(-5, 2700, were=True) == (
+        "not started: its job can take 45 min, and 0 min were left before the run's deadline")
+    # The numbers are those validate holds a lane and its workflows to.
+    import lanes
+    import submit_and_poll
+    assert run_regression.DEADLINE_MARGIN_MIN == lanes.DEADLINE_MARGIN_MIN
+    assert lanes.LONG_JOB_ALLOWANCE_S == submit_and_poll.poll_deadline_s(
+        0, run_regression.LONG_QUEUE_DEADLINE_S)
+    lane = LONG_LANES["lanes"]["night"]
+    monkeypatch.setattr(run_regression, "time", Clock())
+    assert run_regression.run_deadline(None, lane, True) == NOW + lanes.deadline_window_s(lane)
+    assert run_regression.job_worst_case_s(
+        {"timeout_s": 3600}, {}, run_regression.LONG_QUEUE_DEADLINE_S, 1) == (
+        3600 + lanes.LONG_JOB_ALLOWANCE_S)
+    # And validate names this very pair before any run finds it.
+    said = lanes.validate(LONG_LANES, {"defaults": {"timeout_s": 600}, "workflows": {
+        "slow": {"enabled": True, "cadence": "nightly", "timeout_s": 3600}}})
+    assert [p for p in said if p.startswith("workflow ")] == [
+        "workflow slow: it can never start on lane night: its job can take 95 min (timeout_s "
+        "3600 and 2100 s for the queue and a cold start), and a run's deadline is 95 min after "
+        "its start. Raise the lane's timeout_minutes or lower timeout_s"]
+
+
 # -- who broke it: each workflow's own range ------------------------------------------------
 def _published(lane):
     """Every JSON file of the lane's store, as run_report reads a results tree."""
@@ -2557,9 +2845,10 @@ def test_a_weekly_failure_is_placed_by_the_workflows_own_last_result(tmp_path, m
     # The index carries the ranges, and each chain the one it started with.
     head = lane.json("regression/index/master/weekly.json")
     assert head["entries"][0]["wr"] == {
-        "wf_exec": {"n": 44, "url": f"{compare}/{second}...{third}"},
-        "wf_music": {"n": 88, "url": f"{compare}/{first}...{third}"}}
-    assert head["first_bad"]["wf_music"]["range"]["n"] == 88
+        "wf_exec": {"n": 44, "url": f"{compare}/{second}...{third}", "prev": second},
+        "wf_music": {"n": 88, "url": f"{compare}/{first}...{third}", "prev": first}}
+    assert head["first_bad"]["wf_music"]["range"] == {
+        "n": 88, "url": f"{compare}/{first}...{third}"}
     assert "range" not in head["first_bad"]["wf_new"]
 
     def report(commit):
@@ -2606,6 +2895,36 @@ def test_a_weekly_failure_is_placed_by_the_workflows_own_last_result(tmp_path, m
     # The chain now starts at the step: 5 commits to look at, not 88.
     chain = lane.json("regression/index/master/weekly.json")["first_bad"]["wf_music"]
     assert (chain["commit"], chain["prev_good"], chain["range"]["n"]) == (step, first, 5)
+
+    # The next step passes, 2 commits before the failing one. The chain keeps
+    # its start and has a nearer last pass. The 5 commits the failing step
+    # counted lie between it and the pass before, so they are not the chain's
+    # any more, and the index cannot count commits: the range is given from
+    # the new last pass, with its compare link and without a number.
+    passing = "c0000103"
+    lane.files["wf_music"] = {"wf_music_00001_.png": _picture()}
+    code, summary = lane.run(passing, "weekly", "--workflows", "wf_music",
+                             now=LEVEL_NOW + 16 * day)
+    lane.files["wf_music"] = {"wf_music_00001_.png": black.getvalue()}
+    assert code == 0 and summary["scope"] == ["wf_music"] and "ranges" not in summary
+    chain = lane.json("regression/index/master/weekly.json")["first_bad"]["wf_music"]
+    assert (chain["commit"], chain["prev_good"]) == (step, passing)
+    assert chain["range"] == {"n": None, "url": f"{compare}/{passing}...{step}"}
+    lines = report(passing)
+    commits = "https://github.com/Comfy-Org/ComfyUI/commit"
+    (open_line,) = [line for line in lines if line.startswith("- `wf_music`: ")]
+    assert open_line.startswith(
+        f"- `wf_music`: smoke check failed, failing since [`c000010`]({commits}/{step}) (one of "
+        f"the commits since its last pass, [compare]({compare}/{passing}...{step})), first seen ")
+    assert open_line.endswith(f"last passed at [`c000010`]({commits}/{passing})")
+    assert "covered" not in open_line and "5 commits" not in open_line
+    # In the lane's history a run of one workflow says so: its green row is no
+    # week in which the lane was green. A full run's row has no such note.
+    rows = {line.split(" | ")[0]: line for line in lines if line.startswith("| [`c0000")}
+    assert "✅ smoke pass · 1 of 4 workflows |" in rows[f"| [`c000010`]({commits}/{passing}) "
+                                                        "**this report**"]
+    assert "❌ 1 of 1 failed · 1 of 4 workflows |" in rows[f"| [`c000010`]({commits}/{step})"]
+    assert "workflows |" not in rows[f"| [`c000018`]({commits}/{third}) +44 commits"]
 
     # A range of one commit is the tested commit itself.
     lane.status["wf_ok"] = "timeout"
@@ -2699,23 +3018,71 @@ def test_a_retest_on_a_weekly_lane_keeps_the_other_cells_and_their_ranges(tmp_pa
 
 # -- the stop --------------------------------------------------------------------------
 class LiveClient:
-    """A RunPod client with jobs in flight, as the stop handler sees it."""
+    """A RunPod client with jobs in flight, as the stop handler sees it.
+    `refuse` are the jobs whose cancel RunPod does not take."""
 
-    def __init__(self, *job_ids, log=None):
+    def __init__(self, *job_ids, log=None, refuse=()):
         self.live, self.log = set(job_ids), log if log is not None else []
+        self.refuse = set(refuse)
 
     def cancel_live(self, timeout=None):
         job_ids = sorted(self.live)
         self.log.extend(job_ids)
-        self.live.clear()
-        return job_ids
+        cancelled = [job_id for job_id in job_ids if job_id not in self.refuse]
+        self.live -= set(cancelled)
+        return cancelled, [job_id for job_id in job_ids if job_id in self.refuse]
 
 
-def test_a_stop_signal_cancels_the_jobs_in_flight_and_ends_the_process(capsys):
+def test_a_stopped_run_cancels_once_more_a_second_later(monkeypatch, capsys):
+    """A job whose submission RunPod had not answered when the signal came is
+    in no client's list yet: it was created, ran on to its end and was billed,
+    and the log said that every job was cancelled. A cancel that RunPod did
+    not take was reported as done too."""
+    import signal
+    import threading
+    import submit_and_poll
+    # The submission that was on its way is answered between the two passes.
+    log, pauses = [], []
+    late = LiveClient(log=log)
+
+    def answered(seconds):
+        pauses.append(seconds)
+        late.live.add("job-2")
+
+    clients = [LiveClient("job-1", log=log), late]
+    assert run_regression.cancel_in_flight(clients, pause=answered) == (["job-1", "job-2"], [])
+    assert pauses == [run_regression.STOP_SECOND_PASS_S] and log == ["job-1", "job-2"]
+    # The first pass and the pause are over before GitHub's terminate, 7.5 s after the signal.
+    assert (2 * submit_and_poll.STOP_CANCEL_TIMEOUT_S + run_regression.STOP_SECOND_PASS_S) < 7.5
+
+    # A cancel that failed gets the second call. A job that is still not
+    # cancelled then is named as such, and not among the cancelled ones.
+    log.clear()
+    clients = [LiveClient("job-1", "job-2", log=log, refuse=["job-2"]),
+               LiveClient("job-3", log=log, refuse=["job-3"])]
+    assert run_regression.cancel_in_flight(
+        clients, pause=lambda seconds: clients[1].refuse.clear()) == (
+        ["job-1", "job-3"], ["job-2"])
+    assert sorted(log) == ["job-1", "job-2", "job-2", "job-3", "job-3"]
+    assert [sorted(client.live) for client in clients] == [["job-2"], []]
+    monkeypatch.setattr(run_regression, "STOP_SECOND_PASS_S", 0)
+    left = []
+    clients = [LiveClient("job-1", "job-2", refuse=["job-2"]),
+               LiveClient("job-3", refuse=["job-3"])]
+    run_regression.stop_handler(clients, threading.Event(), leave=left.append)(signal.SIGINT, None)
+    assert capsys.readouterr().out == (
+        f"::error::stopped by signal {int(signal.SIGINT)}: cancelled 1 RunPod job(s) in flight "
+        "(job-1). Not cancelled, RunPod did not take the call: job-2, job-3. They may run on to "
+        "their end: cancel them by hand\n")
+    assert left == [128 + signal.SIGINT]
+
+
+def test_a_stop_signal_cancels_the_jobs_in_flight_and_ends_the_process(monkeypatch, capsys):
     """GitHub sends an interrupt, 7.5 s later a terminate, then it kills.
     Without a handler the RunPod jobs would run on, billed, to their end."""
     import signal
     import threading
+    monkeypatch.setattr(run_regression, "STOP_SECOND_PASS_S", 0)
     log, left = [], []
     stopping = threading.Event()
     # A client per workflow: two have a job, one has ended its job, one is no client.
@@ -2736,7 +3103,7 @@ def test_a_stop_signal_cancels_the_jobs_in_flight_and_ends_the_process(capsys):
     run_regression.stop_handler([], threading.Event(), leave=left.append)(signal.SIGTERM, None)
     assert left[-1] == 143 and "cancelled 0 RunPod job(s) in flight (none)" in (
         capsys.readouterr().out)
-    assert run_regression.cancel_in_flight([None, LiveClient()]) == []
+    assert run_regression.cancel_in_flight([None, LiveClient()]) == ([], [])
     assert run_regression.STOP_SIGNALS == (signal.SIGINT, signal.SIGTERM)
 
 

@@ -207,6 +207,24 @@ def test_the_repeat_rule_needs_twenty_words_and_more_than_half(tmp_path):
     assert _ids(_one(tmp_path, "a.txt", over.encode())[1]) == ["repeat"]
 
 
+def test_the_bars_of_a_table_are_no_words(tmp_path):
+    """A model that is asked for a table answers with one. Its bars and its
+    rule line outnumber what narrow cells say: 52 of these 92 tokens are "|"."""
+    table = "| Year | Wins | Losses |\n|---|---|---|\n" + "".join(
+        f"| {2000 + i} | {i} | {12 - i} |\n" for i in range(12))
+    assert table.split().count("|") == 52 and len(table.split()) == 92
+    entry, problems = _one(tmp_path, "a.txt", table.encode())
+    assert problems == [] and entry["words"] == 92
+    # What stands between the bars is still held to the rule.
+    stuck = "| Answer | Again | More |\n" + "| none | none | none |\n" * 12
+    _, problems = _one(tmp_path, "a.txt", stuck.encode())
+    assert problems == [{"file": "a.txt", "check": "repeat",
+                         "text": "one word is 36 of the 39 words"}]
+    # A word with a letter or a digit counts whatever is attached to it.
+    marked = " ".join(["**no**"] * 11 + [f"`word{i}`" for i in range(9)])
+    assert _ids(_one(tmp_path, "a.txt", marked.encode())[1]) == ["repeat"]
+
+
 def test_a_text_is_held_to_the_expected_length(tmp_path):
     assert _one(tmp_path, "a.txt", TEXT.encode(), {"min_chars": 40})[1] == []
     _, problems = _one(tmp_path, "a.txt", b"A short answer.", {"min_chars": 40})
@@ -612,14 +630,59 @@ def test_a_moving_clip_passes(tmp_path):
     assert entry == {"name": "wf_video_00001_.mp4", "type": "video", "bytes": 9079,
                      "sha256": hashlib.sha256((FIX / "video_5f.mp4").read_bytes()).hexdigest(),
                      "width": 640, "height": 352, "frames": 5, "seconds": 0.208,
-                     "bytes_per_frame_mp": 7198}
+                     "bytes_per_frame_mp": 5034}
 
 
 def test_a_black_clip_fails(tmp_path):
     entry, problems = _one(tmp_path, "wf_video_00001_.mp4", FIX / "video_black_5f.mp4")
-    assert (entry["frames"], entry["bytes_per_frame_mp"]) == (5, 1183)
+    assert (entry["frames"], entry["bytes_per_frame_mp"]) == (5, 352)
     assert problems == [{"file": "wf_video_00001_.mp4", "check": "blank", "text": (
-        "blank or still: 1183 bytes a frame for each megapixel, under 1500")}]
+        "blank or still: 352 bytes a frame for each megapixel after the first frame, "
+        "under 1500")}]
+
+
+def _frame_sizes(data: bytes, sizes=None, fixed: int = 0) -> bytes:
+    """An MP4 file whose video track lists other frame sizes: one for each
+    frame, or `fixed`, the one size of them all."""
+    at = data.index(b"stsz")
+    count = struct.unpack_from(">II", data, at + 8)[1]
+    table = struct.pack(f">I I {count}I", fixed, count, *(sizes or [0] * count))
+    return data[:at + 8] + table + data[at + 8 + len(table):]
+
+
+def _picture_size(data: bytes, width: int, height: int) -> bytes:
+    """An MP4 file whose video track says another picture size."""
+    at = data.index(b"tkhd")
+    end = at - 4 + struct.unpack_from(">I", data, at - 4)[0]
+    return data[:end - 8] + struct.pack(">II", width << 16, height << 16) + data[end:]
+
+
+def test_the_first_frame_does_not_carry_a_blank_or_a_still_clip(tmp_path):
+    """The first frame is stored whole and has the encoder's headers. At the
+    small sizes a run is cut down to, its bytes alone lifted a black clip over
+    the limit, and a clip of one picture repeated passed too. The frames after
+    the first say whether anything is there and moves."""
+    black, clip = ((FIX / name).read_bytes() for name in ("video_black_5f.mp4", "video_5f.mp4"))
+    assert struct.unpack_from(">5I", black, black.index(b"stsz") + 16) == (1015, 90, 77, 75, 75)
+    # The black clip at 256x256: 4,065 bytes a frame for each megapixel with
+    # its first frame, which is over the limit, and 1,209 without it.
+    assert round(1332 / 5 / (256 * 256 / 1e6)) == 4065
+    entry, problems = _one(tmp_path, "a.mp4", _picture_size(black, 256, 256))
+    assert (entry["width"], entry["height"], entry["bytes_per_frame_mp"]) == (256, 256, 1209)
+    assert _ids(problems) == ["blank"]
+    # One picture repeated: a first frame as large as the moving clip's, then nothing.
+    still = _frame_sizes(clip, (3572, 60, 60, 60, 60))
+    entry, problems = _one(tmp_path, "a.mp4", still)
+    assert entry["bytes_per_frame_mp"] == 266 and _ids(problems) == ["blank"]
+    # Two frames: the second decides.
+    two = _frame_sizes(clip, (3572, 1711, 0, 0, 0))
+    two = two[:two.index(b"stsz") + 12] + struct.pack(">I", 2) + two[two.index(b"stsz") + 16:]
+    entry, problems = _one(tmp_path, "a.mp4", two)
+    assert (entry["frames"], entry["bytes_per_frame_mp"]) == (2, 7595) and problems == []
+    # Frames of one size, which the table then says once.
+    for size, checks in ((500, []), (100, ["blank"])):
+        entry, problems = _one(tmp_path, "a.mp4", _frame_sizes(clip, fixed=size))
+        assert entry["bytes_per_frame_mp"] == round(size / 0.22528) and _ids(problems) == checks
 
 
 def test_a_sound_track_cannot_hide_a_blank_picture(tmp_path):
@@ -628,7 +691,7 @@ def test_a_sound_track_cannot_hide_a_blank_picture(tmp_path):
     loud = _with_sound_track(black, 100000)
     entry, problems = _one(tmp_path, "a.mp4", loud)
     assert _ids(problems) == ["blank"]
-    assert (entry["frames"], entry["width"], entry["bytes_per_frame_mp"]) == (5, 640, 1183)
+    assert (entry["frames"], entry["width"], entry["bytes_per_frame_mp"]) == (5, 640, 352)
     # A file with sound alone has no picture at all.
     at = loud.index(b"vide")
     _, problems = _one(tmp_path, "a.mp4", loud[:at] + b"soun" + loud[at + 4:])
@@ -832,6 +895,37 @@ def test_a_missing_file_is_a_problem(tmp_path):
         assert _ids(res["problems"]) == ["missing"], other
 
 
+def test_a_file_of_another_node_is_not_the_save_nodes_file(tmp_path):
+    """A second sink is prefixed `<workflow id>_...`, so its files start like
+    those of the main one. VHS_VideoCombine writes its first frame as a PNG
+    next to its clip: that picture is not the file SaveImage owes."""
+    roundtrip = {"1": _node("SaveImage", filename_prefix="wf", images=["0", 0]),
+                 "2": _node("VHS_VideoCombine", filename_prefix="wf_gif", images=["0", 0])}
+    png = _png(_picture())
+    combined = {"wf_gif_00001.gif": b"GIF89a", "wf_gif_00001.png": png}
+    assert _checked(tmp_path / "a", {**combined, "wf_00001_.png": png},
+                    roundtrip)["problems"] == []
+    res = _checked(tmp_path / "b", combined, roundtrip)
+    assert res["problems"] == [{"file": None, "check": "missing",
+                                "text": "SaveImage wrote no .png file with the prefix wf"}]
+    assert [f["name"] for f in res["files"]] == ["wf_gif_00001.gif", "wf_gif_00001.png"]
+    # Between the prefix and the extension stands the counter ComfyUI writes: five
+    # digits or more, with or without an underscore after them.
+    one = {"1": _node("SaveImage", filename_prefix="wf")}
+    for name, counts in (("wf_00001_.png", True), ("wf_00001.png", True), ("wf_123456_.png", True),
+                         ("wf_00001_.PNG", True), ("wf_0001_.png", False),
+                         ("wf_00001_x.png", False), ("wf_00001__.png", False),
+                         ("wf_00001_.tar.png", False), ("wf_a_00001_.png", False),
+                         ("wf_00001_/x.png", False), ("wf__00001_.png", False)):
+        res = _checked(tmp_path / name.replace("/", "-"), {name: png}, one)
+        assert (res["problems"] == []) is counts, name
+    # The same in a folder, and for the nodes that leave the underscore out.
+    assert smoke._fits("3d/wf_mesh_00001_.glb", "3d/wf_mesh", (".glb",))
+    assert smoke._fits("wf_00012.flac", "wf", (".flac",))
+    assert smoke._fits("x.flac", None, (".flac",))
+    assert not smoke._fits("3d/wf_mesh_00001_.glb", "wf_mesh", (".glb",))
+
+
 def test_a_3d_file_in_another_format_counts_and_is_not_opened(tmp_path):
     """SaveGLB fed by a 3D file keeps that file's own extension."""
     for ext in ("obj", "OBJ", "gltf", "ply", "usdz"):
@@ -873,6 +967,20 @@ def test_a_file_that_was_not_sent_passes_on_its_size_with_a_note(tmp_path):
     assert res["problems"] == [] and res["notes"] == []
     assert res["files"][0] == {"name": "extra.gif", "type": None, "bytes": 5000,
                                "sha256": hashlib.sha256(bytes(5000)).hexdigest(), "sent": False}
+    # A text is held to its size limit unseen: a model that ran away writes megabytes,
+    # the worker does not send them, and the size alone must not pass them.
+    texts = {"1": _node("SaveText", filename_prefix="wf", format="txt")}
+    for size, passes in ((MIB, True), (MIB + 1, False), (20 * MIB, False)):
+        out, rec = _run(tmp_path / f"text{size}", {"wf_00001.txt": b""}, ("wf_00001.txt",))
+        rec["outputs"][0]["bytes"] = size
+        res = smoke.check_outputs(out, rec, texts, None, "ok")
+        assert res["files"][0]["sent"] is False and "chars" not in res["files"][0]
+        if passes:
+            assert res["problems"] == [] and len(res["notes"]) == 1
+        else:
+            assert res["notes"] == [] and res["problems"] == [{
+                "file": "wf_00001.txt", "check": "size",
+                "text": f"{size} bytes: a text output may have at most {MIB}"}]
 
 
 def test_save_nodes_that_share_a_prefix_must_write_a_file_each(tmp_path):

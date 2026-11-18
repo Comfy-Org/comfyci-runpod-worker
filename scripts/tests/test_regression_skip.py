@@ -426,12 +426,16 @@ def test_the_nightly_and_the_weekly_cron_are_told_apart_by_their_strings():
     plan = dict(workflow_steps(LONG_FILE))["plan"]
     assert block(plan, "env").split("\n") == [
         "CADENCE: ${{ inputs.cadence }}", "LANE: ${{ inputs.lane }}",
+        "WORKFLOWS: ${{ inputs.workflows }}",
         "EVENT_SCHEDULE: ${{ github.event.schedule }}",
         f"NIGHTLY_CRON: '{crons[0]}'", f"WEEKLY_CRON: '{crons[1]}'"]
     script = block(plan, "run")
     nightly = 'if [ "$EVENT_SCHEDULE" = "$NIGHTLY_CRON" ]; then CADENCE=nightly; fi\n'
     weekly = 'if [ "$EVENT_SCHEDULE" = "$WEEKLY_CRON" ]; then CADENCE=weekly; fi\n'
-    matrix = 'matrix=$(python lanes.py cadence "${CADENCE:-nightly}" "${only[@]}")\n'
+    # The plan knows the workflows a dispatch names: a lane whose only workflow
+    # is still switched off is tested when the dispatch names that workflow.
+    matrix = ('matrix=$(python lanes.py cadence "${CADENCE:-nightly}" "${only[@]}" \\\n'
+              '  --workflows "${WORKFLOWS:-all}")\n')
     assert script.index(nightly) < script.index(weekly) < script.index(matrix)
     # A cron string the plan does not know must not run as a nightly run by default.
     unknown = re.search(r'\nif \[ -n "\$EVENT_SCHEDULE" \] && \[ -z "\$CADENCE" \]; then\n'

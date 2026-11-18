@@ -76,11 +76,14 @@ jobs:
       # (`lanes.py cadence`). A cron has no inputs: which of the two crons
       # started the run says the cadence. With no such lane the matrix is [] and
       # the run ends here, so the lanes can be declared before their endpoint
-      # exists. The plan says why a lane is left out.
+      # exists. The plan says why a lane is left out. A dispatch that names a
+      # workflow keeps the lane it runs on, enabled or not: that is the first
+      # look at a workflow that is still switched off.
       - id: plan
         env:
           CADENCE: ${{ inputs.cadence }}
           LANE: ${{ inputs.lane }}
+          WORKFLOWS: ${{ inputs.workflows }}
           EVENT_SCHEDULE: ${{ github.event.schedule }}
           NIGHTLY_CRON: '17 1 * * *'
           WEEKLY_CRON: '17 3 * * 0'
@@ -94,7 +97,8 @@ jobs:
           fi
           only=()
           if [ -n "$LANE" ]; then only=(--only "$LANE"); fi
-          matrix=$(python lanes.py cadence "${CADENCE:-nightly}" "${only[@]}")
+          matrix=$(python lanes.py cadence "${CADENCE:-nightly}" "${only[@]}" \
+            --workflows "${WORKFLOWS:-all}")
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "$matrix" | python -m json.tool
       # Resolved once, here, so every lane of a run tests the same commit. The

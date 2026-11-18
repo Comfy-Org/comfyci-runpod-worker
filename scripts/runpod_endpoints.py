@@ -42,8 +42,9 @@ from index_builder import LANES_FILE, lane_config, load_lanes
 REST_BASE = os.environ.get("RUNPOD_REST_BASE", "https://api.runpod.io/v2")
 IMAGE_REPO = "ghcr.io/comfy-org/comfyci-runpod-worker"
 # What a lane's endpoint is called on RunPod: the image it runs, so the console
-# reads like the registry.
-ENDPOINT_NAME = "comfyci-{image}"
+# reads like the registry. `lanes.py validate` fills in the same name and the
+# same default workers and disk, so they are written once, there.
+ENDPOINT_NAME = lanes_mod.ENDPOINT_NAME
 
 
 def image_ref(tag: str) -> str:
@@ -91,12 +92,13 @@ def endpoint_settings(lanes: dict, cfg: dict) -> tuple[dict, int]:
     (`idle_timeout_s`) and disk (`disk_gb`) where it names them. What `create`
     asks for, and what `status` holds the live endpoint to."""
     d = lanes.get("endpoint_defaults") or {}
-    workers = dict(d.get("workers") or {"min": 0, "max": 3, "idleTimeout": 20})
+    workers = dict(d.get("workers") or lanes_mod.DEFAULT_WORKERS)
     if cfg.get("workers_max") is not None:
         workers["max"] = cfg["workers_max"]
     if cfg.get("idle_timeout_s") is not None:
         workers["idleTimeout"] = cfg["idle_timeout_s"]
-    disk = cfg["disk_gb"] if cfg.get("disk_gb") is not None else d.get("disk_gb", 40)
+    disk = (cfg["disk_gb"] if cfg.get("disk_gb") is not None
+            else d.get("disk_gb", lanes_mod.DEFAULT_DISK_GB))
     return workers, int(disk)
 
 
@@ -291,6 +293,9 @@ def restore_workers(lanes: dict, client: Client, lane_id: str, ep: dict) -> dict
 
 def status(lanes: dict, client: Client, lane_id: str | None, strict: bool = False,
            restore: bool = False) -> int:
+    # A mistyped id must not read as "nothing differs" or "workers restored".
+    if lane_id and lane_id not in (lanes.get("lanes") or {}):
+        raise SystemExit(f"unknown lane {lane_id!r}")
     found = 0
     for target, cfg in (lanes.get("lanes") or {}).items():
         if lane_id and target != lane_id:

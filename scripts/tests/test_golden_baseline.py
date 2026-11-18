@@ -778,26 +778,44 @@ def test_from_run_refuses_a_smoke_run_that_held_a_file_back(tmp_path, capsys):
             "bytes_per_frame_mp": 14280}
     mesh = {"name": "llm_mesh_00001_.glb", "type": "mesh", "bytes": 9000000, "sha256": "m" * 64,
             "sent": False, "published": False}
-    assert golden_baseline.unpublished_files(_smoke_comparison(said, clip, mesh)) == [
-        "llm_video_00001_.mp4", "llm_mesh_00001_.glb"]
+    both = _smoke_comparison(said, clip, mesh)
+    assert golden_baseline.unpublished_files(both) == ["llm_video_00001_.mp4",
+                                                       "llm_mesh_00001_.glb"]
+    # The two reasons apart: a file the run held back, and one the worker never sent.
+    assert golden_baseline.unpublished_files(both, sent=True) == ["llm_video_00001_.mp4"]
+    assert golden_baseline.unpublished_files(both, sent=False) == ["llm_mesh_00001_.glb"]
     assert golden_baseline.unpublished_files(_smoke_comparison(said)) == []
     for none in (None, {}, {"verdict": "pass", "vs_golden": {"identical": True}},
                  {"smoke": None}, {"smoke": {"files": "x"}}):
         assert golden_baseline.unpublished_files(none) == []
+        assert golden_baseline.unpublished_files(none, sent=False) == []
 
     root = _text_manifest(tmp_path)  # the entry is at reference level now
     flags = ("--from-run", f"master/{COMMIT}", "--workflows", "llm", "--bless")
     files = _published_text_run(TEXT_FLOOR)
-    files[f"regression/runs/master/{COMMIT}/llm/comparison.json"] = _smoke_comparison(
-        said, clip, mesh)
+    files[f"regression/runs/master/{COMMIT}/llm/comparison.json"] = _smoke_comparison(said, clip)
     remote = make_remote(tmp_path, files)
     assert _run_main(tmp_path, remote, root, *flags) == 1
     assert (f"::error::[llm] master/{COMMIT} cannot be a reference: it was a smoke run that did "
-            "not publish llm_video_00001_.mp4, llm_mesh_00001_.glb. Use a later run that shows "
-            "the same output: that one publishes every file") in capsys.readouterr().out
+            "not publish llm_video_00001_.mp4. Use a later run that shows the same output: that "
+            "one publishes every file") in capsys.readouterr().out
     base = _clone(tmp_path, remote) / "regression/golden/llm"
     assert not (base / COMMIT[:12]).exists()
     assert json.loads((base / "current.json").read_text()) == {"tag": "v1"}
+
+    # A file the worker did not send is held back by every run. "Use a later
+    # run" would send people in a circle: the message says what can be done.
+    unsent = tmp_path / "unsent"
+    unsent.mkdir()
+    files[f"regression/runs/master/{COMMIT}/llm/comparison.json"] = both
+    remote = make_remote(unsent, files)
+    assert _run_main(unsent, remote, root, *flags) == 1
+    out = capsys.readouterr().out
+    assert (f"::error::[llm] master/{COMMIT} cannot be a reference: the worker did not send "
+            "llm_mesh_00001_.glb (over its size limit), so no run can publish it. Make the "
+            "output smaller, or generate the reference with a golden run") in out
+    assert "Use a later run" not in out
+    assert not (_clone(unsent, remote) / "regression/golden/llm" / COMMIT[:12]).exists()
 
     # A smoke run that published every file is approved like any other run.
     other = tmp_path / "whole"

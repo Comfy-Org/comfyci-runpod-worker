@@ -15,7 +15,8 @@ and what is wrong with it, with the limits in LIMITS:
                 99.5 % of the pixels share one grey level).
   text   .txt   UTF-8, at most 1 MiB. At least 8 characters that are not
                 blank and 4 different ones. With 20 words or more, the most
-                frequent word is at most half of them.
+                frequent word is at most half of them (a word here has a
+                letter or a digit: the bars of a table are not words).
   audio  .flac  A FLAC file that ends with a whole frame at the sample its
                 header names. 8,000 to 192,000 Hz, 1 to 8 channels, at least
                 1.0 s long, and not silent: at least 4,000 bytes of audio
@@ -25,8 +26,11 @@ and what is wrong with it, with the limits in LIMITS:
                 finite, and a bounding box larger than 0.0001 in at least two
                 directions.
   video  .mp4   An MP4 with a video track. At least 2 frames, each side at
-                least 64 px, and not blank: the track holds at least 1,500
-                bytes a frame for each megapixel.
+                least 64 px, and not blank or still: the frames after the
+                first hold at least 1,500 bytes a frame for each megapixel.
+                The first frame is left out: it is stored whole, with the
+                encoder's headers, and alone it carries a small black clip
+                over the limit.
 
 A manifest entry's `expect` can pin what its author knows: `width` and
 `height` (PNG files), `frames` (video), `seconds` (audio, within 5 % and never
@@ -54,6 +58,7 @@ import collections
 import io
 import json
 import posixpath
+import re
 import struct
 from pathlib import Path
 
@@ -153,14 +158,19 @@ def check_image(path: Path, expect: dict | None = None) -> tuple[dict, list[dict
 
 
 # -- text ----------------------------------------------------------------------------
+def _too_long(size: int) -> dict:
+    """The problem of a text file that is larger than a text output may be."""
+    return _problem("size", f"{size} bytes: a text output may have at most "
+                            f"{LIMITS['text']['max_bytes']}")
+
+
 def check_text(path: Path, expect: dict | None = None) -> tuple[dict, list[dict]]:
     """(facts, problems) of a text file. Facts: `chars` (characters that are
     not blank, the number the limit is held against) and `words`."""
     lim = LIMITS["text"]
     size = Path(path).stat().st_size
     if size > lim["max_bytes"]:
-        return {}, [_problem("size", f"{size} bytes: a text output may have at most "
-                                     f"{lim['max_bytes']}")]
+        return {}, [_too_long(size)]
     words = Path(path).read_bytes().decode("utf-8-sig").split()
     body = "".join(words)
     facts = {"chars": len(body), "words": len(words)}
@@ -176,10 +186,13 @@ def check_text(path: Path, expect: dict | None = None) -> tuple[dict, list[dict]
     elif len(set(body)) < lim["min_distinct_chars"]:
         problems.append(_problem("repeat", "only "
                                            f"{_count(len(set(body)), 'different character')}"))
-    if len(words) >= lim["repeat_words"]:
-        top = collections.Counter(w.casefold() for w in words).most_common(1)[0][1]
-        if top / len(words) > lim["max_top_word_share"]:
-            problems.append(_problem("repeat", f"one word is {top} of the {len(words)} words"))
+    # A token without a letter or a digit is no word here: the bars and rules
+    # of a Markdown table would else outnumber what its cells say.
+    said = [w.casefold() for w in words if any(c.isalnum() for c in w)]
+    if len(said) >= lim["repeat_words"]:
+        top = collections.Counter(said).most_common(1)[0][1]
+        if top / len(said) > lim["max_top_word_share"]:
+            problems.append(_problem("repeat", f"one word is {top} of the {len(said)} words"))
     return facts, problems
 
 
@@ -452,9 +465,11 @@ def _fields(data: bytes, form: str, at: int, end: int) -> tuple:
 
 
 def _video_track(data: bytes) -> tuple[int, int, int, float, int]:
-    """(width, height, frames, seconds, bytes of the frames) of the first
-    video track of an MP4 file. Only that track's bytes count, so an audio
-    track cannot hide a blank picture."""
+    """(width, height, frames, seconds, bytes of the frames after the first)
+    of the first video track of an MP4 file. Only that track's bytes count, so
+    an audio track cannot hide a blank picture. The first frame is stored
+    whole and carries the encoder's headers: at a small size its bytes alone
+    would make a black clip look like a picture."""
     # Every top-level box is walked: a cut file ends inside one of them.
     top = {kind: (a, b) for kind, a, b in _boxes(data, 0, len(data))}
     for kind in (b"ftyp", b"moov"):
@@ -475,20 +490,20 @@ def _video_track(data: bytes) -> tuple[int, int, int, float, int]:
                                   mdhd[0] + (20 if long_form else 12), mdhd[1])
         stsz = _box(data, *_box(data, *_box(data, *mdia, b"minf"), b"stbl"), b"stsz")
         fixed, frames = _fields(data, ">II", stsz[0] + 4, stsz[1])
-        size = fixed * frames if fixed else sum(_fields(data, f">{frames}I", stsz[0] + 12,
-                                                        stsz[1]))
-        return width >> 16, height >> 16, frames, duration / scale if scale else 0.0, size
+        later = fixed * max(frames - 1, 0) if fixed else sum(
+            _fields(data, f">{frames}I", stsz[0] + 12, stsz[1])[1:])
+        return width >> 16, height >> 16, frames, duration / scale if scale else 0.0, later
     raise Unreadable("no video track")
 
 
 def check_video(path: Path, expect: dict | None = None) -> tuple[dict, list[dict]]:
     """(facts, problems) of an MP4 file. Facts: `width`, `height`, `frames`,
-    `seconds` and `bytes_per_frame_mp`, the bytes of the video track for each
-    frame and megapixel."""
+    `seconds` and `bytes_per_frame_mp`, the bytes of the frames after the
+    first for each of those frames and megapixel (0 for a clip of one frame)."""
     lim = LIMITS["video"]
-    width, height, frames, seconds, size = _video_track(Path(path).read_bytes())
+    width, height, frames, seconds, later = _video_track(Path(path).read_bytes())
     megapixels = width * height / 1e6
-    density = round(size / frames / megapixels) if frames and megapixels else 0
+    density = round(later / (frames - 1) / megapixels) if frames > 1 and megapixels else 0
     facts = {"width": width, "height": height, "frames": frames, "seconds": round(seconds, 3),
              "bytes_per_frame_mp": density}
     problems = []
@@ -501,9 +516,10 @@ def check_video(path: Path, expect: dict | None = None) -> tuple[dict, list[dict
     want = _expected(expect, "frames")
     if want is not None and frames != want:
         problems.append(_problem("expect", f"{_count(frames, 'frame')}, {want:g} expected"))
-    if frames and megapixels and density < lim["min_bytes_per_frame_mp"]:
+    if frames > 1 and megapixels and density < lim["min_bytes_per_frame_mp"]:
         problems.append(_problem("blank", f"blank or still: {density} bytes a frame for each "
-                                          f"megapixel, under {lim['min_bytes_per_frame_mp']}"))
+                                          "megapixel after the first frame, under "
+                                          f"{lim['min_bytes_per_frame_mp']}"))
     return facts, problems
 
 
@@ -540,16 +556,27 @@ def expected_outputs(workflow: dict) -> list[dict]:
     return found
 
 
+# What ComfyUI's save nodes write after the prefix and its underscore: a
+# counter of five digits or more, an underscore after it from most of them,
+# and the extension (`wf_00001_.png`, `wf_00001.txt`).
+_AFTER_PREFIX = re.compile(r"\d{5,}_?\.[^./]+")
+
+
 def _fits(name: str, prefix: str | None, extensions: tuple[str, ...]) -> bool:
-    return (name.lower().endswith(extensions)
-            and (prefix is None or name.startswith(prefix + "_")))
+    """Whether a file can be one that a save node with this prefix wrote. Only
+    the counter may stand between the prefix and the extension: another node
+    writes under a longer prefix (the lint asks a second sink for
+    `<workflow id>_...`), and its `wf_gif_00001.png` is no file of `wf`."""
+    if not name.lower().endswith(extensions):
+        return False
+    return prefix is None or (name.startswith(prefix + "_")
+                              and _AFTER_PREFIX.fullmatch(name[len(prefix) + 1:]) is not None)
 
 
 def _missing(expected: list[dict], names: list[str]) -> list[dict]:
     """A `missing` problem for each kind of file the save nodes wrote too few
     of. Nodes that share a prefix and extensions must have written a file
-    each. A file counts for the longest prefix it starts with, so
-    `wf_mesh_00001_.png` is never taken for a file of prefix `wf`."""
+    each. A file counts for the longest prefix it fits."""
     nodes: dict[tuple, list[str]] = {}
     for sink in expected:
         nodes.setdefault((sink["prefix"], tuple(sink["extensions"])), []).append(sink["class"])
@@ -610,6 +637,9 @@ def _check_file(root: Path | None, rec: dict, expect: dict | None,
     if not sent:
         size = rec.get("bytes")
         size = size if isinstance(size, int) and not isinstance(size, bool) else 0
+        # The one limit that needs no look at the file holds for it all the same.
+        if kind == "text" and size > LIMITS["text"]["max_bytes"]:
+            return entry, [_too_long(size)]
         if size >= UNSENT_MIN_BYTES:
             notes.append(f"{name} was not sent (over the worker's size limit): checked by "
                          "size only")

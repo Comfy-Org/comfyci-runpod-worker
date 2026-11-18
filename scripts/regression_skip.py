@@ -17,10 +17,10 @@ pack install: not a verdict on the commit), and a marker with no summary. A
 dispatch that names a commit always runs.
 
 A run that names its workflows tests only those. When the commit had no result
-yet, its summary lists them under `scope`. Such a summary is not the lane's
-result of the commit, so it counts as no summary here: the cron still tests
-the commit, and that run replaces the summary. Such a run pushes no start
-marker either, so it is not counted as an attempt.
+of a full run yet, its summary lists them under `scope`. Such a summary is not
+the lane's result of the commit, so it counts as no summary here: the cron
+still tests the commit, and that run replaces the summary. Such a run pushes
+no start marker either, so it is not counted as an attempt.
 
 A nightly or weekly run pushes what it has every few workflows, with `partial`
 in the summary. A summary that still says so belongs to a run that did not
@@ -125,8 +125,10 @@ def decide(commit: str, summary: dict | None = None, latest: dict | None = None,
         return False, f"{short} has an attempt marker that could not be read; {again}"
     scoped = is_scoped(summary)
     # A run that did not finish left what it had: counted as an attempt, like
-    # a start marker, and no more a result than one.
-    partial = not scoped and is_partial(summary)
+    # a start marker, and no more a result than one. No summary is both: only
+    # a full run pushes on its way, and a run of named workflows at such a
+    # commit replaces what it finds.
+    partial = is_partial(summary)
     n = attempts(summary, marker)
     if scoped or partial:
         summary = None

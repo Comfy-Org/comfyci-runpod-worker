@@ -284,8 +284,57 @@ def test_a_push_that_changes_what_images_are_built_from_builds_them_all(tmp_path
         "manifest/lanes.json"]
     # A file moved out of src/ is a change to src/.
     git(repo.root, "mv", "src/handler.py", "handler.py")
-    repo.commit()
+    moved = repo.commit()
     assert repo.built(last) == EVERY_IMAGE
+    # A name that git prints in quotes unless it is asked not to: a letter
+    # outside ASCII, and a blank.
+    for name in ("src/café_nodes.py", "docker/two words.yaml"):
+        before = git(repo.root, "rev-parse", "HEAD").strip()
+        repo.commit(**{name: "x = 1\n"})
+        assert repo.built(before) == EVERY_IMAGE, name
+        assert repo.why(before) == f"every image is built: {name} changed since {before[:8]}"
+    assert repo.built(moved) == EVERY_IMAGE
+
+
+def test_a_push_that_puts_an_endpoint_under_an_image_builds_that_image(tmp_path):
+    """The build is what points an endpoint at an image. A lane that has its
+    endpoint and moves to another image, leaves the legacy role or is no
+    longer retired is repointed only when that image is built, so the edit
+    builds it. Each such edit used to build and repoint nothing."""
+    registry = copy.deepcopy(REGISTRY)
+    registry["lanes"][NEW]["endpoint_id"] = "ep-new"
+    registry["lanes"][NIGHTLY].update({"endpoint_id": "ep-night", "role": "legacy"})
+    registry["lanes"][WEEKLY].update({"endpoint_id": "ep-week", "cadence": "retired"})
+    repo = PushRepo(tmp_path / "one", registry)
+    assert lanes_mod.lanes_on_image(repo.registry, "cu130-t2141") == [PRIMARY]
+    # A lane moves to another image: that image is built, the one it left is not.
+    repo.registry["lanes"][NEW]["image"] = "cu130-t2141"
+    moved = repo.commit()
+    assert repo.built(repo.first) == ["cu130-t2141"]
+    assert repo.why(repo.first) == f"images changed since {repo.first[:8]}: cu130-t2141"
+    assert lanes_mod.lanes_on_image(repo.registry, "cu130-t2141") == [PRIMARY, NEW]
+    # A legacy lane becomes one that builds repoint.
+    repo.registry["lanes"][NIGHTLY]["role"] = "lane"
+    legacy = repo.commit()
+    assert repo.built(moved) == ["cu130-t2141"] and repo.built(legacy) == []
+    # A retired lane runs again.
+    repo.registry["lanes"][WEEKLY]["cadence"] = "weekly"
+    back = repo.commit()
+    assert repo.built(legacy) == ["cu130-t2141"] and repo.built(back) == []
+    # Not a lane that gets its first endpoint, a new lane, another endpoint id,
+    # or a lane that leaves the lanes a build repoints: its endpoint is created
+    # from a tag by hand, or is no longer moved at all.
+    repo.registry["lanes"]["fresh"] = {**REGISTRY["lanes"][PRIMARY], "endpoint_id": "ep-fresh",
+                                       "prefix": "regression/lanes/fresh"}
+    repo.registry["lanes"][PRIMARY]["endpoint_id"] = "ep-other"
+    repo.registry["lanes"][NEW]["role"] = "legacy"
+    repo.commit()
+    assert repo.built(back) == []
+    # A registry of before that lists no lanes at all is read as one without endpoints.
+    bare = PushRepo(tmp_path / "two", {"images": REGISTRY["images"]})
+    bare.registry = copy.deepcopy(REGISTRY)
+    bare.commit()
+    assert bare.built(bare.first) == []
 
 
 def test_a_push_without_a_known_commit_before_it_builds_every_image(tmp_path, monkeypatch, capsys):
@@ -319,16 +368,31 @@ def test_a_push_without_a_known_commit_before_it_builds_every_image(tmp_path, mo
     assert [row["image"] for row in json.loads(out.out)] == EVERY_IMAGE and out.err == ""
 
 
-def test_the_build_plans_a_push_against_the_commit_before_it():
-    """Not against HEAD~1: a push can hold several commits. The checkout holds
-    only HEAD, so the commit before the push is fetched, and when that fails
-    lanes.py builds every image."""
+def test_the_build_plans_a_push_against_the_commit_the_images_were_built_from():
+    """The head of the last push run of the workflow that succeeded: compared
+    with the commit before the push alone, the push after a failed build
+    would build nothing and the images would stay behind. That commit stands
+    in when no such run is known (not HEAD~1: a push can hold several
+    commits). The checkout holds only HEAD, so the commit is fetched, and
+    when that fails lanes.py builds every image."""
     plan = dict(workflow_steps(".github/workflows/build-image.yml"))["plan"]
     assert "EVENT: ${{ github.event_name }}" in plan
     assert "BEFORE: ${{ github.event.before }}" in plan
+    assert "GH_TOKEN: ${{ github.token }}" in plan
     assert re.search(r'\n( +)elif \[ "\$EVENT" = "push" \]; then\n'
-                     r'\1  git fetch --quiet --no-tags --depth=1 origin "\$BEFORE" \|\| true\n'
-                     r'\1  matrix=\$\(python lanes\.py images --since "\$BEFORE"\)\n', plan)
+                     r'\1  built=\$\(gh run list --repo "\$GITHUB_REPOSITORY" '
+                     r'--workflow build-image\.yml \\\n'
+                     r'\1    --branch main --event push --status success --limit 1 \\\n'
+                     r"\1    --json headSha --jq '\.\[0\]\.headSha // empty' \|\| true\)\n"
+                     r'\1  since="\$\{built:-\$BEFORE\}"\n'
+                     r'\1  git fetch --quiet --no-tags --depth=1 origin "\$since" \|\| true\n'
+                     r'\1  matrix=\$\(python lanes\.py images --since "\$since"\)\n', plan)
+    # The plan job may read the workflow's runs, and the branch it asks about
+    # is the one whose pushes start the workflow.
+    whole = (ROOT / ".github" / "workflows" / "build-image.yml").read_text(encoding="utf-8")
+    assert ("  plan:\n    runs-on: ubuntu-latest\n" in whole
+            and "    permissions:\n      contents: read\n      actions: read\n" in whole)
+    assert "\n  push:\n    branches: [main]\n" in whole
     # A dispatch names its images, or builds every one.
     assert re.search(r'if \[ -n "\$IMAGES" \]; then\n +matrix=\$\(python lanes\.py images '
                      r'--only "\$IMAGES"\)\n', plan)
@@ -531,6 +595,27 @@ def test_status_prints_every_difference_between_runpod_and_the_manifest(capsys):
     assert runpod_endpoints.status(reg, client, "main", strict=True) == 1
     out = capsys.readouterr().out
     assert out.count("differs") == 1 and "1 of the settings above differ" in out
+
+
+def test_status_of_a_lane_that_is_no_lane_ends_with_an_error(monkeypatch, capsys):
+    """The README has people restore the workers of an idle lane by hand, with
+    `--lane`. A mistyped id printed nothing and ended well, as if nothing
+    differed and the workers were back."""
+    reg = _status_registry()
+    client = FakeEndpoints({"ep-main": _live(workers_max=0), "ep-old": _live()})
+    for flags in ({}, {"strict": True}, {"restore": True}, {"strict": True, "restore": True}):
+        with pytest.raises(SystemExit) as stop:
+            runpod_endpoints.status(reg, client, "mian", **flags)
+        assert str(stop.value) == "unknown lane 'mian'", flags
+    assert client.read == [] and client.patched == [] and capsys.readouterr().out == ""
+    # The command, as `create` and `set-image` answer the same mistake.
+    monkeypatch.setattr(runpod_endpoints, "load_lanes", lambda: reg)
+    monkeypatch.setattr(runpod_endpoints, "Client", lambda: client)
+    with pytest.raises(SystemExit, match="^unknown lane 'mian'$"):
+        runpod_endpoints.main(["status", "--lane", "mian", "--restore-workers", "--strict"])
+    with pytest.raises(SystemExit, match="^unknown lane 'mian'$"):
+        runpod_endpoints.main(["set-image", "--lane", "mian", "--tag", "img-abc", "--dry-run"])
+    assert client.read == [] and client.patched == []
 
 
 def test_status_is_quiet_when_runpod_and_the_manifest_agree(capsys):
@@ -894,6 +979,29 @@ def test_the_matrix_of_a_nightly_or_weekly_run():
     assert lanes_mod.cadence_matrix(reg, "nightly", manifest=manifest) == []
     assert lanes_mod.cadence_left_out(reg, "nightly", None, manifest) == [
         "night: no enabled workflow with the nightly cadence"]
+    # Unless the dispatch names a workflow that runs on the lane: the first look
+    # at one that is still switched off. The runner runs a workflow that is named.
+    for named in ("mesh", "off", "ghost,off"):
+        assert lanes_mod.cadence_matrix(reg, "nightly", manifest=manifest, named=named) == [
+            {**night, "workflows": ""}], named
+        assert lanes_mod.cadence_left_out(reg, "nightly", None, manifest, named) == []
+    assert lanes_mod.named_on_lane(manifest, "music,off,mesh", "night",
+                                   reg["lanes"]["night"]) == ["mesh", "off"]
+    # Only the entries that are named are read: another one's mistake is not this run's.
+    odd = {"workflows": {**manifest["workflows"], "odd": {"enabled": False, "cadence": "daily"}}}
+    assert lanes_mod.named_on_lane(odd, "off", "night", reg["lanes"]["night"]) == ["off"]
+    with pytest.raises(ValueError, match=r"^\[odd\] unknown cadence 'daily'"):
+        lanes_mod.named_on_lane(odd, "odd", "night", reg["lanes"]["night"])
+    # A workflow of another cadence or lane does not, nor does a run that names none.
+    for named in ("music", "image", "ghost"):
+        assert lanes_mod.cadence_matrix(reg, "nightly", manifest=manifest, named=named) == []
+        assert lanes_mod.cadence_left_out(reg, "nightly", None, manifest, named) == [
+            "night: no enabled workflow with the nightly cadence, and the run names none that "
+            "runs on the lane"]
+    for named in ("all", "", None):
+        assert lanes_mod.cadence_matrix(reg, "nightly", manifest=manifest, named=named) == []
+        assert lanes_mod.cadence_left_out(reg, "nightly", None, manifest, named) == [
+            "night: no enabled workflow with the nightly cadence"]
     # Without the manifest the lanes are listed as they are.
     assert lanes_mod.cadence_matrix(reg, "nightly") == [
         {k: v for k, v in night.items() if k != "workflows"}]
@@ -941,6 +1049,20 @@ def test_the_cadence_command_prints_the_matrix_and_why_a_lane_is_left_out(monkey
     with pytest.raises(SystemExit):
         lanes_mod.main(["cadence", "per-commit"])
     capsys.readouterr()
+    # The `workflows` input of a dispatch: "all" changes nothing, and a workflow
+    # that is switched off keeps its lane in the plan when it is named.
+    assert lanes_mod.main(["cadence", "nightly", "--workflows", "all"]) == 0
+    assert [row["workflows"] for row in json.loads(capsys.readouterr().out)] == ["mesh"]
+    off = copy.deepcopy(CADENCE_MANIFEST)
+    off["workflows"]["mesh"]["enabled"] = False
+    manifest.write_text(json.dumps(off), encoding="utf-8")
+    assert lanes_mod.main(["cadence", "nightly", "--workflows", "all"]) == 0
+    out = capsys.readouterr()
+    assert out.out == "[]\n"
+    assert out.err == "::notice::not tested: night: no enabled workflow with the nightly cadence\n"
+    assert lanes_mod.main(["cadence", "nightly", "--workflows", "mesh"]) == 0
+    out = capsys.readouterr()
+    assert [row["lane"] for row in json.loads(out.out)] == ["night"] and out.err == ""
     # The committed files: every row has what nightly-weekly.yml reads from it.
     monkeypatch.undo()
     for cadence in lanes_mod.LONG_CADENCES:
@@ -1018,11 +1140,25 @@ def test_validate_holds_lanes_that_share_an_endpoint_to_the_same_settings():
         assert lanes_mod.validate(bad) == [
             f"lane week: {key} is {value!r}, but night, which shares its endpoint, says "
             f"{ok['lanes']['night'][key]!r}"], key
-    # A key that only one of them names is a difference too.
+    # What a lane leaves out is the default, so a default that only one of them
+    # writes out is no difference. Any other value that only one names is one.
+    same = copy.deepcopy(ok)
+    del same["lanes"]["week"]["workers_max"]  # 3, the default
+    assert lanes_mod.validate(same) == []
     bad = copy.deepcopy(ok)
-    del bad["lanes"]["week"]["workers_max"]
+    del bad["lanes"]["week"]["disk_gb"]
     assert lanes_mod.validate(bad) == [
-        "lane week: workers_max is None, but night, which shares its endpoint, says 3"]
+        "lane week: disk_gb is 40, but night, which shares its endpoint, says 120"]
+    # The defaults of the registry come first, as they do for `create`.
+    own = copy.deepcopy(ok)
+    own["endpoint_defaults"] = {"workers": {"min": 0, "max": 5, "idleTimeout": 60},
+                                "disk_gb": 120, "env": dict(SHARED["env"])}
+    for key in ("disk_gb", "idle_timeout_s", "env"):
+        del own["lanes"]["week"][key]
+    assert lanes_mod.validate(own) == []
+    del own["lanes"]["week"]["workers_max"]
+    assert lanes_mod.validate(own) == [
+        "lane week: workers_max is 5, but night, which shares its endpoint, says 3"]
     # One name cannot stand for two endpoints.
     bad = copy.deepcopy(ok)
     bad["lanes"]["week"]["endpoint_id"] = "ep-other"
@@ -1033,7 +1169,9 @@ def test_validate_holds_lanes_that_share_an_endpoint_to_the_same_settings():
     by_id = _registry(old=RETIRED_LANE, main={"role": "primary"},
                       night={"cadence": "nightly", "endpoint_id": "ep-main", "workers_max": 2})
     assert lanes_mod.validate(by_id) == [
-        "lane night: workers_max is 2, but main, which shares its endpoint, says None"]
+        "lane night: workers_max is 2, but main, which shares its endpoint, says 3"]
+    by_id["lanes"]["night"].update({"workers_max": 3, "endpoint_name": "comfyci-img"})
+    assert lanes_mod.validate(by_id) == []  # the name its image gives it anyway
     # A retired lane runs nothing: its settings are held to nothing.
     retired = copy.deepcopy(ok)
     retired["lanes"]["old"].update({**SHARED, "workers_max": 1, "endpoint_id": "ep-nw"})
@@ -1076,6 +1214,109 @@ def test_validate_checks_the_optional_keys_of_a_lane():
             f"lane main: endpoint_name must be a name, not {value!r}"]
 
 
+def test_validate_fills_in_the_defaults_that_create_sends():
+    """What `validate` compares for a lane is what `create` asks RunPod for,
+    default by default: the two read the same numbers and the same name."""
+    assert runpod_endpoints.ENDPOINT_NAME is lanes_mod.ENDPOINT_NAME
+    for reg in (REGISTRY, _shared_registry()):
+        for lane_id, lane in reg["lanes"].items():
+            asked = lanes_mod.endpoint_settings_of(reg, lane)
+            assert list(asked) == list(lanes_mod.ENDPOINT_KEYS)
+            workers, disk = runpod_endpoints.endpoint_settings(reg, lane)
+            assert (asked["workers_max"], asked["idle_timeout_s"], asked["disk_gb"]) == (
+                workers["max"], workers["idleTimeout"], disk), lane_id
+            assert asked["endpoint_name"] == runpod_endpoints.endpoint_name(lane), lane_id
+    blank = copy.deepcopy(REGISTRY)
+    for lane in blank["lanes"].values():
+        lane["endpoint_id"] = None
+    for lane_id in (PRIMARY, NIGHTLY):
+        lane = blank["lanes"][lane_id]
+        asked = lanes_mod.endpoint_settings_of(blank, lane)
+        body = runpod_endpoints.endpoint_body(blank, lane_id, f"{lane['image']}-abc")
+        assert (body["name"], body["env"], body["gpu"]["pools"], body["dataCenterIds"],
+                body["networkVolumes"]) == (
+            asked["endpoint_name"], asked["env"], asked["gpu_pools"], asked["data_center_ids"],
+            asked["network_volumes"]), lane_id
+    # An environment that is no object is validate's finding, not a crash here.
+    odd = lanes_mod.endpoint_settings_of({"endpoint_defaults": {"env": {"A": "b"}}},
+                                         {"env": "A=c"})
+    assert odd["env"] == {"A": "b"}
+
+
+def test_validate_refuses_a_lane_and_a_workflow_that_leave_no_time_for_a_job():
+    """A nightly or weekly run stops submitting 25 minutes before the lane's
+    time limit, and starts no job whose worst case passes that deadline. A
+    lane with no time left, and a workflow whose job never fits, would be a
+    red run every night that nothing explains before it happens."""
+    assert (lanes_mod.DEADLINE_MARGIN_MIN, lanes_mod.LONG_JOB_ALLOWANCE_S) == (25, 2100)
+    reg = _cadence_registry()
+    assert lanes_mod.deadline_window_s(reg["lanes"]["night"]) == 95 * 60
+    assert lanes_mod.deadline_window_s({}) == (lanes_mod.DEFAULT_TIMEOUT_MINUTES - 25) * 60
+
+    def lane_problems(lane_id, minutes):
+        bad = copy.deepcopy(reg)
+        bad["lanes"][lane_id]["timeout_minutes"] = minutes
+        return lanes_mod.validate(bad)
+
+    for minutes in (1, 24, 25):
+        assert lane_problems("night", minutes) == [
+            f"lane night: timeout_minutes {minutes} leaves no time for a job: a run's deadline "
+            "is 25 minutes before it"]
+        assert lane_problems("week", minutes) == [
+            f"lane week: timeout_minutes {minutes} leaves no time for a job: a run's deadline "
+            "is 25 minutes before it"]
+    assert lane_problems("night", 26) == [] and lane_problems("night", None) == []
+    # A per-commit lane has no deadline, and a retired lane runs nothing.
+    assert lane_problems("main", 1) == [] and lane_problems("old", 1) == []
+
+    def problems(defaults=600, registry=reg, **entry):
+        manifest = {"defaults": {"timeout_s": defaults},
+                    "workflows": {"wf": {"enabled": True, "cadence": "nightly", **entry}}}
+        return lanes_mod.validate(registry, manifest)
+
+    never = ("workflow wf: it can never start on lane {}: its job can take {} min (timeout_s {} "
+             "and 2100 s for the queue and a cold start), and a run's deadline is {} min after "
+             "its start. Raise the lane's timeout_minutes or lower timeout_s")
+    # The nightly lane: 120 minutes, so the deadline is 95 minutes after the start.
+    assert problems() == [] and problems(timeout_s=3599) == []
+    assert problems(timeout_s=3600) == [never.format("night", 95, 3600, 95)]
+    assert problems(timeout_s=3601) == [never.format("night", 96, 3601, 95)]
+    assert problems(defaults=7200) == [never.format("night", 155, 7200, 95)]
+    assert problems(defaults=7200, timeout_s=900) == []
+    # The weekly lane, which has no endpoint yet: 350 minutes.
+    assert problems(cadence="weekly", timeout_s=17399) == []
+    assert problems(cadence="weekly", timeout_s=17400) == [never.format("week", 325, 17400, 325)]
+    # A workflow that is switched off, one of the per-commit lane, and a manifest
+    # that names no time are held to nothing.
+    assert problems(timeout_s=3600, enabled=False) == []
+    assert problems(timeout_s=99999, cadence="per-commit") == []
+    assert lanes_mod.validate(reg, {"workflows": {"wf": {"enabled": True,
+                                                         "cadence": "nightly"}}}) == []
+    # A lane that names no limit has GitHub's 360 minutes.
+    free = copy.deepcopy(reg)
+    del free["lanes"]["night"]["timeout_minutes"]
+    assert problems(registry=free, timeout_s=17999) == []
+    assert problems(registry=free, timeout_s=18000) == [never.format("night", 335, 18000, 335)]
+    # A lane without any time is said once, for the lane, not for each workflow.
+    short = copy.deepcopy(reg)
+    short["lanes"]["night"]["timeout_minutes"] = 20
+    assert problems(registry=short) == [
+        "lane night: timeout_minutes 20 leaves no time for a job: a run's deadline is 25 "
+        "minutes before it"]
+    short["lanes"]["night"]["timeout_minutes"] = 60  # 35 minutes: under the default job's 45
+    assert problems(registry=short) == [never.format("night", 45, 600, 35)]
+    # The committed files: every workflow fits its lanes, and one that would not is named.
+    manifest = copy.deepcopy(MANIFEST)
+    assert manifest["defaults"]["timeout_s"] + 2100 < lanes_mod.deadline_window_s(
+        REGISTRY["lanes"][NIGHTLY])
+    wf_id = next(iter(manifest["workflows"]))
+    manifest["workflows"][wf_id].update({"enabled": True, "cadence": "nightly", "lanes": None,
+                                         "timeout_s": 3600})
+    manifest["workflows"][wf_id].pop("custom_nodes", None)
+    assert lanes_mod.validate(REGISTRY, manifest, PACKS) == [
+        never.format(NIGHTLY, 95, 3600, 95).replace("workflow wf", f"workflow {wf_id}")]
+
+
 def test_the_endpoint_of_a_lane_is_created_from_the_lanes_own_settings():
     """The nightly and weekly endpoint: its own name, a larger disk, a longer
     idle time and one more variable. `status` holds the live endpoint to the
@@ -1110,6 +1351,11 @@ def test_the_endpoint_of_a_lane_is_created_from_the_lanes_own_settings():
     with pytest.raises(SystemExit, match="shares the endpoint 'comfyci-cu130-nightly-weekly' "
                                          f"with '{NIGHTLY}', which already has ep-nw"):
         runpod_endpoints.endpoint_body(reg, WEEKLY, "cu130-t2141-abc")
+    # A retired lane that keeps the name and an id stands in nobody's way: it
+    # runs nothing, and its endpoint is not one to write into another lane.
+    reg["lanes"][NIGHTLY].update({"cadence": "retired", "endpoint_id": "ep-old"})
+    assert runpod_endpoints.endpoint_body(reg, WEEKLY, "cu130-t2141-abc")["name"] == (
+        "comfyci-cu130-nightly-weekly")
 
 
 def test_set_image_sends_one_patch_to_an_endpoint_that_lanes_share(capsys):

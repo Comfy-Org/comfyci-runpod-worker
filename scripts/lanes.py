@@ -24,7 +24,8 @@ A workflow entry also says how it is checked. `level_of`, `cadence_of` and
 smoke), its `cadence` and its `expect`.
 
 Lanes can share one RunPod endpoint (the nightly and the weekly lane do).
-`validate` holds such lanes to the same image and endpoint settings.
+`validate` holds such lanes to the same image and endpoint settings, with
+what a lane leaves out filled in from `endpoint_defaults`.
 
 A lane may name its own GPU pools, data centers and network volumes
 (`gpu_pools`, `data_center_ids`, `network_volumes`). Each replaces the list of
@@ -35,9 +36,10 @@ volume (`without_volume`).
                           [--since REV]            only the images changed after commit REV
   python scripts/lanes.py per-commit [--only a,b]  JSON list of provisioned per-commit lanes
                                                    (each with the workflow ids enabled on it)
-  python scripts/lanes.py cadence <nightly|weekly> [--only a,b]
+  python scripts/lanes.py cadence <nightly|weekly> [--only a,b] [--workflows x,y]
                                                    JSON list of the provisioned lanes of that
-                                                   cadence that have an enabled workflow
+                                                   cadence that have an enabled workflow, or
+                                                   that run a workflow the dispatch names
   python scripts/lanes.py report [--only a,b]      JSON list of the lanes a report-only run shows:
                                                    every lane, retired and unprovisioned ones too
   python scripts/lanes.py lanes-on-image <image>   JSON list of lanes an image repoint applies to
@@ -47,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import subprocess
 import sys
@@ -100,11 +103,34 @@ ENDPOINT_KEYS = ("image", "endpoint_name", "workers_max", "disk_gb", "idle_timeo
 # The time limit of a nightly or weekly job whose lane names none: GitHub's own
 # limit for a job on a hosted runner.
 DEFAULT_TIMEOUT_MINUTES = 360
+# The last minutes of such a lane's job belong to the publish and the report:
+# the run's own deadline is the lane's `timeout_minutes` minus this.
+DEADLINE_MARGIN_MIN = 25
+# Seconds a job of such a run can take beyond its workflow's `timeout_s`: what
+# the runner allows for a cold start and for the queue. It is
+# submit_and_poll.poll_deadline_s(0, run_regression.LONG_QUEUE_DEADLINE_S),
+# written as a number because this module imports nothing. A test holds the
+# two alike.
+LONG_JOB_ALLOWANCE_S = 2100
+# What an endpoint gets when neither its lane nor `endpoint_defaults` says:
+# its workers, the disk of a worker in GB, and its name.
+DEFAULT_WORKERS = {"min": 0, "max": 3, "idleTimeout": 20}
+DEFAULT_DISK_GB = 40
+ENDPOINT_NAME = "comfyci-{image}"
 
 
 def is_long_cadence(lane: dict | None) -> bool:
     """A lane that runs once a night or once a week, not on every commit."""
     return (lane or {}).get("cadence") in LONG_CADENCES
+
+
+def deadline_window_s(lane: dict) -> int:
+    """Seconds between the start of a nightly or weekly run and its deadline:
+    the lane's `timeout_minutes` (DEFAULT_TIMEOUT_MINUTES when it names none)
+    minus DEADLINE_MARGIN_MIN. A job whose worst case does not fit before the
+    deadline is not started, so nothing starts on a lane where this is 0 or
+    less."""
+    return ((lane.get("timeout_minutes") or DEFAULT_TIMEOUT_MINUTES) - DEADLINE_MARGIN_MIN) * 60
 
 
 def placement_of(lanes: dict, lane: dict | None, key: str) -> list | None:
@@ -119,6 +145,36 @@ def without_volume(lanes: dict, lane: dict | None) -> bool:
     """Whether a lane's workers mount no network volume: its list of volumes
     (`placement_of`) is empty. Such a lane cannot read models from a volume."""
     return placement_of(lanes, lane, "network_volumes") == []
+
+
+def on_volume(lanes: dict, lane: dict | None) -> bool:
+    """Whether a lane reads its models from the network volume that the model
+    sync fills: it is not retired, its workers mount a volume, and it does not
+    say `"model_storage": "job"`."""
+    return not (is_retired(lane) or (lane or {}).get("model_storage") == "job"
+                or without_volume(lanes, lane))
+
+
+def endpoint_settings_of(lanes: dict, lane: dict) -> dict:
+    """What a lane asks of its endpoint, key by key of ENDPOINT_KEYS, with
+    what the lane leaves out filled in from `endpoint_defaults`: what
+    `runpod_endpoints.py create` sends for it. Lanes on one endpoint must
+    agree on these, whichever of them writes a value out."""
+    d = lanes.get("endpoint_defaults") or {}
+    workers = d.get("workers") or DEFAULT_WORKERS
+
+    def own(key: str, default):
+        return lane[key] if lane.get(key) is not None else default
+
+    env = [e if isinstance(e, dict) else {} for e in (d.get("env"), lane.get("env"))]
+    return {"image": lane.get("image"),
+            "endpoint_name": (lane.get("endpoint_name")
+                              or ENDPOINT_NAME.format(image=lane.get("image") or "")),
+            "workers_max": own("workers_max", workers.get("max")),
+            "disk_gb": own("disk_gb", d.get("disk_gb", DEFAULT_DISK_GB)),
+            "idle_timeout_s": own("idle_timeout_s", workers.get("idleTimeout")),
+            "env": {**env[0], **env[1]},
+            **{key: placement_of(lanes, lane, key) for key in PLACEMENT_KEYS}}
 
 
 def _choice(entry: dict | None, key: str, known: tuple[str, ...]) -> str:
@@ -180,7 +236,7 @@ def _git(repo: Path, *args: str) -> str | None:
     """What a git command prints in `repo`; None when it fails or there is no git."""
     try:
         r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
-                           encoding="utf-8")
+                           encoding="utf-8", errors="replace")
     except OSError:
         return None
     return r.stdout if r.returncode == 0 else None
@@ -194,26 +250,40 @@ def images_since(lanes: dict, rev: str | None, repo: Path | None = None
     Every image is built from IMAGE_SOURCES, so a change to one of those
     changes them all. A change to the registry alone changes only the images
     whose row of the build matrix differs from the one `rev` had, which is
-    none when a lane was added or an endpoint id was written. It compares with
-    `rev`, the commit before a push, and not with the parent of HEAD: a push
-    can hold several commits. When `rev` is not known here (all zeros for a
-    new branch, gone after a forced push) every image is built."""
+    none when a lane was added or an endpoint id was written. An image also
+    counts as changed when a build of it now repoints a lane that had its
+    endpoint at `rev` and was not repointed with the image then (the lane
+    moved to the image, left the legacy role or is no longer retired): the
+    build is what moves that endpoint to the image. It compares with `rev`,
+    the commit before a push, and not with the parent of HEAD: a push can
+    hold several commits. When `rev` is not known here (all zeros for a new
+    branch, gone after a forced push) every image is built."""
     repo = repo or REPO_ROOT
     if not re.fullmatch(r"[0-9a-f]{7,40}", rev or "") or not rev.strip("0"):
         return None, f"every image is built: no commit to compare with ({rev or 'none'})"
-    names = _git(repo, "diff", "--name-only", "--no-renames", rev, "HEAD")
+    # -z: git quotes a name with a byte above 127 or a quote in it otherwise,
+    # and such a name would start with the quote, never with a source path.
+    names = _git(repo, "diff", "--name-only", "--no-renames", "-z", rev, "HEAD")
     old_text = _git(repo, "show", f"{rev}:{REGISTRY_PATH}")
     if names is None or old_text is None:
         return None, (f"every image is built: {rev[:8]} or its {REGISTRY_PATH} is not in "
                       "this checkout")
-    sources = [n for n in names.splitlines() if n.startswith(IMAGE_SOURCES)]
+    sources = [n for n in names.split("\0") if n.startswith(IMAGE_SOURCES)]
     if sources:
         return None, f"every image is built: {sources[0]} changed since {rev[:8]}"
     try:
-        before = {row["image"]: row for row in image_matrix(json.loads(old_text))}
+        old = json.loads(old_text)
+        before = {row["image"]: row for row in image_matrix(old)}
+        had_endpoint = {lane_id for lane_id, lane in (old.get("lanes") or {}).items()
+                        if lane.get("endpoint_id")}
+        # Per image of today: the lanes with an endpoint that a build did not repoint then.
+        waiting = {image_id: had_endpoint - set(lanes_on_image(old, image_id))
+                   for image_id in (lanes.get("images") or {})}
     except (ValueError, AttributeError, TypeError):
         return None, f"every image is built: {REGISTRY_PATH} of {rev[:8]} could not be read"
-    changed = {row["image"] for row in image_matrix(lanes) if before.get(row["image"]) != row}
+    changed = {row["image"] for row in image_matrix(lanes)
+               if before.get(row["image"]) != row
+               or waiting[row["image"]] & set(lanes_on_image(lanes, row["image"]))}
     return changed, (f"images changed since {rev[:8]}: {', '.join(sorted(changed))}" if changed
                      else f"no image changed since {rev[:8]}: nothing is built")
 
@@ -289,6 +359,33 @@ def lanes_for_workflow(entry: dict, lanes: dict) -> list[str]:
             if not is_retired(lane) and workflow_runs_on_lane(entry, lane_id, lane)]
 
 
+def volume_workflows(manifest: dict, lanes: dict) -> list[str]:
+    """Ids of the workflows whose models the network volume has to hold, in
+    manifest order: every workflow, switched on or not, that runs on a lane
+    whose models are on the volume (`on_volume`). The model sync downloads the
+    models of these and of no other, and the manifest lint adds up their
+    sizes, so the two cannot disagree about what the volume holds. ValueError
+    for an entry with an unknown cadence."""
+    found = set()
+    for lane_id, lane in (lanes.get("lanes") or {}).items():
+        if on_volume(lanes, lane):
+            found.update(workflows_for_lane(manifest, lane_id, enabled_only=False, lane=lane))
+    return [wf_id for wf_id in (manifest.get("workflows") or {}) if wf_id in found]
+
+
+def named_on_lane(manifest: dict, named: str | None, lane_id: str, lane: dict) -> list[str]:
+    """The workflows a dispatch names (`named`, a csv of ids) that run on a
+    lane, switched on or not: run_regression.py runs a workflow that is named,
+    also one that is switched off. Empty when the dispatch names none ("all",
+    or nothing)."""
+    wanted = _csv(named) if named != "all" else None
+    if not wanted:
+        return []
+    entries = {wf_id: entry for wf_id, entry in (manifest.get("workflows") or {}).items()
+               if wf_id in wanted}
+    return workflows_for_lane({"workflows": entries}, lane_id, enabled_only=False, lane=lane)
+
+
 def per_commit_matrix(lanes: dict, only: str | None = None,
                       manifest: dict | None = None) -> list[dict]:
     """Lanes regression.yml tests on every new commit: per-commit cadence and an
@@ -313,12 +410,14 @@ def per_commit_matrix(lanes: dict, only: str | None = None,
 
 
 def cadence_matrix(lanes: dict, cadence: str, only: str | None = None,
-                   manifest: dict | None = None) -> list[dict]:
+                   manifest: dict | None = None, named: str | None = None) -> list[dict]:
     """Lanes nightly-weekly.yml tests in a run of `cadence` (nightly or
     weekly): that cadence and an endpoint. Each row carries the time limit of
     the lane's job. With the workflows manifest it also names the enabled
     workflows the lane runs, as a csv, and a lane that has none is left out:
-    the run starts nothing for it."""
+    the run starts nothing for it. Unless the dispatch names a workflow that
+    runs on the lane (`named`, its `workflows` input): a first look at a
+    workflow that is still switched off."""
     if cadence not in LONG_CADENCES:
         raise ValueError(f"unknown cadence {cadence!r} (known: {', '.join(LONG_CADENCES)})")
     wanted = _csv(only)
@@ -333,14 +432,14 @@ def cadence_matrix(lanes: dict, cadence: str, only: str | None = None,
                "timeout_minutes": lane.get("timeout_minutes") or DEFAULT_TIMEOUT_MINUTES}
         if manifest is not None:
             row["workflows"] = ",".join(workflows_for_lane(manifest, lane_id, lane=lane))
-            if not row["workflows"]:
+            if not (row["workflows"] or named_on_lane(manifest, named, lane_id, lane)):
                 continue
         out.append(row)
     return out
 
 
 def cadence_left_out(lanes: dict, cadence: str, only: str | None = None,
-                     manifest: dict | None = None) -> list[str]:
+                     manifest: dict | None = None, named: str | None = None) -> list[str]:
     """Why a lane is not in the matrix of a nightly or weekly run: each lane
     named in `only`, or without it each lane of the cadence."""
     entries = lanes.get("lanes") or {}
@@ -356,8 +455,11 @@ def cadence_left_out(lanes: dict, cadence: str, only: str | None = None,
             notes.append(f"{lane_id}: cadence {lane.get('cadence')!r}, not {cadence}")
         elif not lane.get("endpoint_id"):
             notes.append(f"{lane_id}: no endpoint_id yet")
-        elif manifest is not None and not workflows_for_lane(manifest, lane_id, lane=lane):
-            notes.append(f"{lane_id}: no enabled workflow with the {cadence} cadence")
+        elif manifest is not None and not (workflows_for_lane(manifest, lane_id, lane=lane)
+                                           or named_on_lane(manifest, named, lane_id, lane)):
+            notes.append(f"{lane_id}: no enabled workflow with the {cadence} cadence" + (
+                ", and the run names none that runs on the lane" if _csv(named) and named != "all"
+                else ""))
     return notes
 
 
@@ -403,6 +505,11 @@ def lanes_on_image(lanes: dict, image_id: str) -> list[str]:
             and lane.get("role") != "legacy" and not is_retired(lane)]
 
 
+def _is_count(value) -> bool:
+    """A whole number above 0: what a lane key that counts something holds."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
 def _lane_key_problems(lane_id: str, lane: dict) -> list[str]:
     """Problems with the optional keys of one lane: its counts, where its
     models are, the name and environment of its endpoint, and its own GPU
@@ -410,8 +517,7 @@ def _lane_key_problems(lane_id: str, lane: dict) -> list[str]:
     problems = []
     for key in LANE_COUNTS:
         value = lane.get(key)
-        if value is not None and (isinstance(value, bool) or not isinstance(value, int)
-                                  or value < 1):
+        if value is not None and not _is_count(value):
             problems.append(f"lane {lane_id}: {key} must be a whole number above 0, "
                             f"not {value!r}")
     for key in PLACEMENT_KEYS:
@@ -437,12 +543,15 @@ def _lane_key_problems(lane_id: str, lane: dict) -> list[str]:
     return problems
 
 
-def _shared_endpoint_problems(entries: dict) -> list[str]:
+def _shared_endpoint_problems(lanes: dict) -> list[str]:
     """Problems with lanes that share an endpoint: the same `endpoint_name` or
     the same `endpoint_id`. An endpoint runs one image with one set of
-    settings, so every lane on it must say the same, and one name cannot stand
-    for two endpoints. A lane whose id is still null shares by its name. A
-    retired lane runs nothing and is left out."""
+    settings, so every lane on it must ask for the same, and one name cannot
+    stand for two endpoints. What a lane asks for is compared with the
+    defaults filled in (`endpoint_settings_of`): a lane that writes a default
+    out agrees with one that leaves it out. A lane whose id is still null
+    shares by its name. A retired lane runs nothing and is left out."""
+    entries = lanes.get("lanes") or {}
     problems = []
     first: dict[tuple[str, str], str] = {}
     for lane_id, lane in entries.items():
@@ -457,10 +566,11 @@ def _shared_endpoint_problems(entries: dict) -> list[str]:
                     others.append(other)
         for other in others:
             there = entries[other]
+            asked, asked_there = (endpoint_settings_of(lanes, x) for x in (lane, there))
             for key in ENDPOINT_KEYS:
-                if lane.get(key) != there.get(key):
-                    problems.append(f"lane {lane_id}: {key} is {lane.get(key)!r}, but {other}, "
-                                    f"which shares its endpoint, says {there.get(key)!r}")
+                if asked[key] != asked_there[key]:
+                    problems.append(f"lane {lane_id}: {key} is {asked[key]!r}, but {other}, "
+                                    f"which shares its endpoint, says {asked_there[key]!r}")
             mine, theirs = lane.get("endpoint_id"), there.get("endpoint_id")
             if mine and theirs and mine != theirs:
                 problems.append(f"lane {lane_id}: endpoint_id is {mine!r}, but {other}, which "
@@ -468,16 +578,43 @@ def _shared_endpoint_problems(entries: dict) -> list[str]:
     return problems
 
 
+def _never_started(wf_id: str, timeout_s, entries: dict, on: list[str]) -> list[str]:
+    """Problems with an enabled workflow on the nightly and weekly lanes that
+    run it (`on`): a job that at its worst takes as long as a run has before
+    its deadline is never submitted, so the workflow would be `not_reached`
+    in every run. `timeout_s` is the workflow's own or the manifest's default.
+    A lane whose time limit leaves no time at all is said once, for the lane."""
+    if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)):
+        return []
+    need = timeout_s + LONG_JOB_ALLOWANCE_S
+    problems = []
+    for lane_id in on:
+        lane = entries[lane_id]
+        minutes = lane.get("timeout_minutes")
+        if not is_long_cadence(lane) or not (minutes is None or _is_count(minutes)):
+            continue
+        window = deadline_window_s(lane)
+        if 0 < window <= need:
+            problems.append(
+                f"workflow {wf_id}: it can never start on lane {lane_id}: its job can take "
+                f"{math.ceil(need / 60)} min (timeout_s {timeout_s:g} and {LONG_JOB_ALLOWANCE_S} s "
+                f"for the queue and a cold start), and a run's deadline is {window // 60} min "
+                "after its start. Raise the lane's timeout_minutes or lower timeout_s")
+    return problems
+
+
 def validate(lanes: dict, manifest: dict | None = None, packs: dict | None = None) -> list[str]:
     """Problems with a registry, as messages; an empty list means it is consistent.
 
     A lane without a network volume, retired lanes aside, must say
-    `"model_storage": "job"`: there is no volume to read its models from.
+    `"model_storage": "job"`: there is no volume to read its models from. A
+    nightly or weekly lane must have more than DEADLINE_MARGIN_MIN minutes.
 
     With the workflows manifest, every `lanes` filter must name declared lanes,
     a workflow with `custom_nodes` must be restricted to lanes whose image
     CI builds (the legacy image is never rebuilt, so it bakes no packs), and an
-    enabled workflow must run on at least one lane that is not retired. With
+    enabled workflow must run on at least one lane that is not retired, with a
+    job that fits before the deadline of a nightly or weekly lane's run. With
     the pack registry, every pack a workflow names must be declared."""
     problems: list[str] = []
     images = lanes.get("images") or {}
@@ -535,7 +672,14 @@ def validate(lanes: dict, manifest: dict | None = None, packs: dict | None = Non
                 and lane.get("model_storage") != "job"):
             problems.append(f"lane {lane_id}: it has no network volume, so model_storage must "
                             f"be 'job', not {lane.get('model_storage')!r}")
-    problems += _shared_endpoint_problems(entries)
+        # A nightly or weekly run stops submitting jobs DEADLINE_MARGIN_MIN
+        # minutes before the lane's time limit. A limit that is no longer than
+        # that leaves every workflow of every run without a job.
+        minutes = lane.get("timeout_minutes")
+        if is_long_cadence(lane) and _is_count(minutes) and minutes <= DEADLINE_MARGIN_MIN:
+            problems.append(f"lane {lane_id}: timeout_minutes {minutes} leaves no time for a "
+                            f"job: a run's deadline is {DEADLINE_MARGIN_MIN} minutes before it")
+    problems += _shared_endpoint_problems(lanes)
     layout1 = [lane_id for lane_id, lane in entries.items() if lane.get("layout") == 1]
     if len(layout1) > 1:
         problems.append(f"only one lane may use the legacy layout 1: {', '.join(layout1)}")
@@ -555,12 +699,17 @@ def validate(lanes: dict, manifest: dict | None = None, packs: dict | None = Non
         if entry.get("enabled") and (entry.get("lanes") is None or filt):
             try:
                 cadence = cadence_of(entry)
-                if not lanes_for_workflow(entry, lanes):
+                on = lanes_for_workflow(entry, lanes)
+                if not on:
                     problems.append(
                         f"workflow {wf_id}: cadence {cadence!r} and lanes "
                         f"{json.dumps(entry.get('lanes'))} leave it on no lane: "
                         + (f"add a {cadence} lane to its lanes list" if filt else
                            f"manifest/lanes.json has no {cadence} lane that is not retired"))
+                timeout_s = entry.get("timeout_s")
+                if timeout_s is None:
+                    timeout_s = (manifest.get("defaults") or {}).get("timeout_s")
+                problems += _never_started(wf_id, timeout_s, entries, on)
             except ValueError as e:
                 problems.append(f"workflow {wf_id}: {e}")
         names = entry.get("custom_nodes") or []
@@ -594,6 +743,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("cadence")
     p.add_argument("cadence", choices=list(LONG_CADENCES))
     p.add_argument("--only", default=None)
+    p.add_argument("--workflows", default=None,
+                   help="the `workflows` input of a dispatch: a lane with no enabled workflow "
+                        "is planned when one of these runs on it")
     p = sub.add_parser("report")
     p.add_argument("--only", default=None)
     p = sub.add_parser("lanes-on-image")
@@ -613,9 +765,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(per_commit_matrix(lanes, args.only, manifest)))
     elif args.cmd == "cadence":
         manifest = load_json(MANIFEST_FILE) if MANIFEST_FILE.exists() else None
-        for note in cadence_left_out(lanes, args.cadence, args.only, manifest):
+        for note in cadence_left_out(lanes, args.cadence, args.only, manifest, args.workflows):
             print(f"::notice::not tested: {note}", file=sys.stderr)
-        print(json.dumps(cadence_matrix(lanes, args.cadence, args.only, manifest)))
+        print(json.dumps(cadence_matrix(lanes, args.cadence, args.only, manifest,
+                                        args.workflows)))
     elif args.cmd == "report":
         for lane_id in sorted((_csv(args.only) or set()) - set(lanes.get("lanes") or {})):
             print(f"::notice::not shown: {lane_id}: not a lane in manifest/lanes.json",

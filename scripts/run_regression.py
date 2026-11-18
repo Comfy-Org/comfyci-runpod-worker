@@ -20,7 +20,8 @@ again the next minute. So such a run behaves in its own way:
   workflow whose job could still be running then is not started. Its cell
   says `not_reached`.
 - After every 10 workflows it pushes what it has, with `partial` in the
-  summary, so a run that dies leaves its results behind.
+  summary, so a run that dies leaves its results behind. Not when the commit
+  already has the lane's full result: that one stays until the run is done.
 - At its end it tries once more what was not tested for a reason that can
   pass. Not a job that used up its whole time, and not one that another
   attempt could not change.
@@ -76,8 +77,9 @@ QUEUE_DEADLINE_STEP_S = 60
 LONG_QUEUE_DEADLINE_S = 1800
 LONG_POLL_INTERVAL_S = 3
 # The last minutes of such a lane's job belong to the publish and the report:
-# the run's own deadline is the lane's `timeout_minutes` minus this.
-DEADLINE_MARGIN_MIN = 25
+# the run's own deadline is the lane's `timeout_minutes` minus this. The number
+# is in lanes.py, where `validate` holds a lane and its workflows to it.
+DEADLINE_MARGIN_MIN = lanes_mod.DEADLINE_MARGIN_MIN
 # Such a run pushes what it has after this many workflows.
 CHECKPOINT_EVERY = 10
 # The worker status of a workflow that the run's deadline did not reach.
@@ -88,6 +90,9 @@ NO_SECOND_TRY = regression_skip.NO_RETRY | {"bad_request"}
 # What GitHub sends a step's process when the run is cancelled or out of time:
 # an interrupt, 7.5 s later a terminate, and 2.5 s after that it kills.
 STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+# A stopped run cancels its jobs twice, this many seconds apart: a job whose
+# submission RunPod had not answered at the signal is known only afterwards.
+STOP_SECOND_PASS_S = 1.0
 # custom_node_error: a custom-node pack the workflow requested did not import on
 # the commit under test (whether or not the workflow uses any of its nodes).
 EXEC_FAIL_STATUSES = {"execution_error", "validation_error", "timeout", "prompt_rejected",
@@ -186,9 +191,14 @@ def write_thumbnails(outputs_dir: Path, size: int = 256) -> str | None:
             continue
         thumbs_dir.mkdir(exist_ok=True)
         name = png.stem + ".webp"
-        with Image.open(png) as im:
-            im.thumbnail((size, size))
-            im.convert("RGB").save(thumbs_dir / name, "WEBP", quality=80, method=4)
+        try:
+            with Image.open(png) as im:
+                im.thumbnail((size, size))
+                im.convert("RGB").save(thumbs_dir / name, "WEBP", quality=80, method=4)
+        except Exception as e:  # one PNG that cannot be read must not cost the others theirs
+            (thumbs_dir / name).unlink(missing_ok=True)
+            print(f"no thumbnail for {png.name}: {e!r}")
+            continue
         first = first or name
     return first
 
@@ -607,12 +617,20 @@ def job_worst_case_s(entry: dict, defaults: dict, queue_deadline: float, attempt
     return attempts * poll_deadline_s(entry_value(entry, defaults, "timeout_s"), queue_deadline)
 
 
+def not_started(left_s: float, need_s: float, were: bool = False) -> str:
+    """Why a workflow got no job: what its job can take, rounded up, and what
+    was left before the run's deadline, rounded down. So the two numbers never
+    read as if the job had fitted."""
+    return (f"not started: its job can take {math.ceil(need_s / 60)} min, and "
+            f"{math.floor(max(left_s, 0) / 60)} min {'were' if were else 'are'} left before "
+            "the run's deadline")
+
+
 def not_reached_cell(wf_id: str, entry: dict, left_s: float, need_s: float) -> dict:
     """The cell of a workflow that was not started, because its job could
     still have been running at the run's deadline. No job was submitted."""
     cell = {"workflow_id": wf_id, "worker_status": NOT_REACHED, "verdict": "infra_error",
-            "error": (f"not started: its job can take {need_s / 60:.0f} min, and "
-                      f"{max(left_s, 0) / 60:.0f} min were left before the run's deadline")}
+            "error": not_started(left_s, need_s, were=True)}
     if lanes_mod.level_of(entry) == "smoke":  # every cell of a smoke workflow names its level
         cell["level"] = "smoke"
     return cell
@@ -654,35 +672,52 @@ def own_ranges(cells: list[dict], commit: str, commits_since) -> dict:
     return ranges
 
 
-def cancel_in_flight(clients: list) -> list[str]:
-    """Cancel every RunPod job the run's clients still have in flight, all at
-    once, and return their ids. Each call has a few seconds: GitHub kills the
-    step 10 seconds after its first signal."""
-    cancelled: list[str] = []
-    threads = [threading.Thread(target=lambda c=client: cancelled.extend(c.cancel_live()),
-                                daemon=True)
-               for client in list(clients) if getattr(client, "live", None)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(2 * STOP_CANCEL_TIMEOUT_S)
-    return sorted(cancelled)
+def cancel_in_flight(clients: list, pause=None) -> tuple[list[str], list[str]]:
+    """Cancel every RunPod job the run's clients still have in flight: (the
+    ids RunPod cancelled, the ids whose cancel it did not take). All at once,
+    and once more STOP_SECOND_PASS_S later: a job whose submission RunPod had
+    not answered at the first pass is in no client's list until it has, and a
+    cancel that failed gets a second call. Each call has a few seconds: GitHub
+    sends its terminate 7.5 seconds after the first signal. `pause` waits
+    (default: the real wait)."""
+    cancelled: set[str] = set()
+    failed: set[str] = set()
+    for second in (False, True):
+        if second:
+            (pause or threading.Event().wait)(STOP_SECOND_PASS_S)
+        answers: list[tuple[list[str], list[str]]] = []
+        threads = [threading.Thread(target=lambda c=client: answers.append(c.cancel_live()),
+                                    daemon=True)
+                   for client in list(clients) if getattr(client, "live", None)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(2 * STOP_CANCEL_TIMEOUT_S)
+        for done, not_done in list(answers):
+            cancelled.update(done)
+            failed.update(not_done)
+    return sorted(cancelled), sorted(failed - cancelled)
 
 
 def stop_handler(clients: list, stopping: threading.Event, leave=os._exit):
     """The handler for GitHub's stop signals. Without one the RunPod jobs in
     flight would run on, billed, with nobody to read them. It cancels them and
     ends the process: there is no time to push anything, which is what the
-    checkpoints are for. `stopping` keeps the run from starting another job
-    in between. `leave` ends the process (the code is 128 plus the signal)."""
+    checkpoints are for. A job whose cancel RunPod did not take is named as
+    not cancelled. `stopping` keeps the run from starting another job in
+    between. `leave` ends the process (the code is 128 plus the signal)."""
     def handle(signum, frame):
         again = stopping.is_set()
         stopping.set()
         try:
             if not again:  # the second signal finds the cancels sent
-                cancelled = cancel_in_flight(clients)
-                print(f"::error::stopped by signal {signum}: cancelled {len(cancelled)} RunPod "
-                      f"job(s) in flight ({', '.join(cancelled) or 'none'})", flush=True)
+                cancelled, failed = cancel_in_flight(clients)
+                line = (f"::error::stopped by signal {signum}: cancelled {len(cancelled)} RunPod "
+                        f"job(s) in flight ({', '.join(cancelled) or 'none'})")
+                if failed:
+                    line += (f". Not cancelled, RunPod did not take the call: {', '.join(failed)}"
+                             ". They may run on to their end: cancel them by hand")
+                print(line, flush=True)
         except Exception:  # noqa: BLE001 - whatever goes wrong here, the process ends
             pass
         finally:
@@ -780,10 +815,18 @@ def main():
     # counts its attempts, so the cron knows when to stop. A run that died
     # before publishing left only its start marker, which counts too.
     published = store.published_summary(args.branch, args.commit)
-    attempt = regression_skip.next_attempt(published,
-                                           store.attempt_marker(args.branch, args.commit))
-    if attempt > 1:
-        print(f"{args.commit[:8]} was already tried on lane {lane_id}; this is attempt {attempt}")
+    marker = store.attempt_marker(args.branch, args.commit)
+    # A run that names its workflows is a re-test or a first look, not the
+    # lane's run of the commit, and one that publishes nothing leaves no trace:
+    # neither is an attempt. Its summary records the attempts counted so far.
+    named = args.workflows != "all"
+    if named or args.skip_publish:
+        attempt = regression_skip.attempts(published, marker) or 1
+    else:
+        attempt = regression_skip.next_attempt(published, marker)
+        if attempt > 1:
+            print(f"{args.commit[:8]} was already tried on lane {lane_id}; this is attempt "
+                  f"{attempt}")
 
     selected = {
         wf_id: entry for wf_id, entry in manifest["workflows"].items()
@@ -832,10 +875,8 @@ def main():
               f"attempt each, and {(deadline - time.time()) / 60:.0f} min until the run's "
               "deadline")
 
-    # A run that names its workflows is a re-test or a first look, not the
-    # lane's run of the commit: it pushes no start marker, so the cron does not
-    # count it as an attempt, and it never moves the previous-run pointer.
-    named = args.workflows != "all"
+    # A run that names its workflows pushes no start marker, so the cron does
+    # not count it as an attempt, and it never moves the previous-run pointer.
     if not args.skip_publish:
         store.snapshot_manifest(args.commit, manifest)
     if not args.skip_publish and not named:
@@ -881,8 +922,7 @@ def main():
             left = deadline - time.time()
             need = job_worst_case_s(entry, defaults, queue_wait(wf_id), tries)
             if need > left:
-                print(f"[{wf_id}] not started: its job can take {need / 60:.0f} min, and "
-                      f"{max(left, 0) / 60:.0f} min are left before the run's deadline")
+                print(f"[{wf_id}] {not_started(left, need)}")
                 return None if again else not_reached_cell(wf_id, entry, left, need)
         if again:
             # The folder is the second attempt's: what the first left in it goes.
@@ -907,6 +947,11 @@ def main():
                     if wf_id in at_smoke:  # every cell of a smoke workflow names its level
                         cell["level"] = "smoke"
                 if cell is not None:
+                    if again:
+                        # Nothing else says that this is the result of a second
+                        # job: its run.json is a first attempt's, and the
+                        # folder of the first job is gone.
+                        cell["tries"] = 2
                     results[wf_id] = cell
                     yield cell
 
@@ -933,7 +978,7 @@ def main():
                    else "pass")
         meta = commit_info()
         priors = index_builder.prior_verdicts(prior_entries, args.commit,
-                                              (meta or {}).get("committed_ts"))
+                                              (meta or {}).get("committed_ts"), smoke=at_smoke)
         for r in cells:
             prior = priors.get(r["workflow_id"]) or {}
             r["prior_verdict"] = prior.get("verdict")
@@ -962,7 +1007,9 @@ def main():
             if ranges:
                 summary["ranges"] = ranges
         if long_cadence and not args.skip_publish:
-            # How much the run added to the results branch.
+            # How much the output files of its smoke-level workflows added to
+            # the results branch. What a reference-level workflow published
+            # is not counted.
             summary["published_new_bytes"] = published_new_bytes(cells, args.previous_smoke)
         if partial:
             summary["partial"] = partial
@@ -973,11 +1020,17 @@ def main():
     # its results behind. The index is written by the final publish alone, so
     # such a run is not in the history tables. A run that names its workflows
     # pushes nothing early: its summary is merged into the lane's at the end,
-    # and a partial one would take that one's place.
-    checkpoints = long_cadence and not named and not args.skip_publish
+    # and a partial one would take that one's place. Nor does a second full
+    # run of a commit that has the lane's full result (the cron's retry, a
+    # dispatch): a checkpoint would replace that result with a part of one,
+    # and if the run then died, the commit would be left with less than it had.
+    has_result = bool(published) and not (regression_skip.is_scoped(published)
+                                          or regression_skip.is_partial(published))
+    checkpoints = long_cadence and not named and not args.skip_publish and not has_result
 
     def checkpoint():
-        done = len(results)
+        # A workflow the deadline did not reach has a cell and no result.
+        done = sum(cell.get("worker_status") != NOT_REACHED for cell in results.values())
         try:
             store.publish_summary(args.branch, args.commit,
                                   summarise({"done": done, "of": len(selected)}))
@@ -1015,7 +1068,11 @@ def main():
     verdicts = {r["workflow_id"]: r["verdict"] for r in cells}
     overall = summary["overall"]
 
-    if named and published and not args.skip_publish:
+    # What a run that did not finish pushed on its way (`partial`) is no result
+    # to merge into: the commit would enter the history as if the lane had run
+    # it. A re-test there writes a summary of its own, as for a commit without one.
+    if (named and published and not regression_skip.is_partial(published)
+            and not args.skip_publish):
         # The commit already has a result on the lane: only the cells of the
         # workflows tested again are replaced, so one re-test does not cost the
         # results of all the others.

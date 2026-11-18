@@ -2,6 +2,8 @@
 millisecond delay, and never retry a deterministic bad_request."""
 import json
 
+import pytest
+
 import submit_and_poll
 
 
@@ -328,11 +330,15 @@ class FakeRunPod:
 
     def __init__(self):
         self.states, self.calls, self.jobs, self.down = {}, [], 0, False
+        self.cancel_answer = 200  # the status code of an answer to a cancel call
 
     def post(self, url, headers=None, json=None, timeout=None):
-        self.calls.append(("POST", url.rsplit("/v2/", 1)[1], timeout))
+        path = url.rsplit("/v2/", 1)[1]
+        self.calls.append(("POST", path, timeout))
         if self.down:
             raise self.RequestException("no network")
+        if "/cancel/" in path:
+            return self._answer({"status": "CANCELLED"}, self.cancel_answer)
         self.jobs += 1
         return self._answer({"id": f"job-{self.jobs}"})
 
@@ -340,9 +346,10 @@ class FakeRunPod:
         return self._answer({"status": self.states[url.rsplit("/", 1)[1]]})
 
     @staticmethod
-    def _answer(body):
+    def _answer(body, status_code=200):
         import types
-        return types.SimpleNamespace(raise_for_status=lambda: None, json=lambda: body)
+        return types.SimpleNamespace(raise_for_status=lambda: None, json=lambda: body,
+                                     status_code=status_code)
 
 
 def test_the_client_knows_which_of_its_jobs_runpod_has_not_ended(monkeypatch):
@@ -371,19 +378,110 @@ def test_the_client_knows_which_of_its_jobs_runpod_has_not_ended(monkeypatch):
     assert client.live == {third}
     # A job the runner cancels itself (the queue, its deadline) is not live either.
     fourth = client.run({})
-    client.cancel(fourth)
+    assert client.cancel(fourth) is True
     assert client.live == {third} and api.calls[-1] == ("POST", "ep/cancel/job-6", 60)
 
     # The stop: one cancel call for each live job, with a few seconds each.
     fifth = client.run({})
     api.calls.clear()
-    assert client.cancel_live() == sorted([third, fifth])
+    assert client.cancel_live() == (sorted([third, fifth]), [])
     assert api.calls == [("POST", f"ep/cancel/{third}", submit_and_poll.STOP_CANCEL_TIMEOUT_S),
                          ("POST", f"ep/cancel/{fifth}", submit_and_poll.STOP_CANCEL_TIMEOUT_S)]
-    assert client.live == set() and client.cancel_live() == []
-    # A cancel that cannot reach RunPod does not raise: the run is going down anyway.
+    assert client.live == set() and client.cancel_live() == ([], [])
+    # A cancel that cannot reach RunPod does not raise: the run is going down
+    # anyway. But the job is not cancelled, and nothing may say that it is:
+    # it stays live, so the next stop asks again.
     sixth = client.run({})
     api.down = True
-    assert client.cancel_live() == [sixth] and client.live == set()
+    assert client.cancel(sixth) is False and client.live == {sixth}
+    assert client.cancel_live() == ([], [sixth]) and client.live == {sixth}
+    # Nor is a job cancelled for which RunPod answers an error.
+    api.down = False
+    for code in (500, 401, 404):
+        api.cancel_answer = code
+        assert client.cancel_live() == ([], [sixth]) and client.live == {sixth}, code
+    api.cancel_answer = 200
+    assert client.cancel_live() == ([sixth], []) and client.live == set()
+
+
+def test_a_job_whose_status_stays_out_of_reach_is_given_up_after_five_minutes_and_cancelled(
+        tmp_path, monkeypatch):
+    """The runner counted 30 failed looks: 5 minutes at the usual 10 seconds,
+    a minute and a half at the 3 seconds of a nightly or weekly run. And it
+    left the job running, unread and billed, while such a run submits the
+    workflow again at its end."""
+    clock = Clock()
+    monkeypatch.setattr(submit_and_poll, "time", clock)
+
+    class Unreachable(QueuedClient):
+        """No look at a job is answered in its first `down_s` seconds."""
+
+        def __init__(self, down_s, run_s):
+            super().__init__(clock, queue_s=0, run_s=run_s)
+            self.down_s, self.looks = down_s, 0
+
+        def status(self, job_id):
+            self.looks += 1
+            if clock.now - self.submitted[job_id] < self.down_s:
+                raise submit_and_poll.requests.RequestException("no network")
+            return super().status(job_id)
+
+    assert submit_and_poll.STATUS_PATIENCE_S == 300
+    # 200 seconds without an answer, at either pause: the job is read when the
+    # network is back. One job, and nothing is cancelled.
+    for kw in ({}, {"poll_interval_s": 3}):
+        client = Unreachable(down_s=200, run_s=250)
+        rec = _once(client, tmp_path, **kw)
+        assert (rec["status"], client.runs, client.cancelled) == ("ok", 1, []), kw
+    # No answer at all: given up after 5 minutes, and the job is cancelled.
+    for pause, looks in ((3, 101), (10, 31)):
+        client, start = Unreachable(down_s=10 ** 6, run_s=10), clock.now
+        rec = _once(client, tmp_path, poll_interval_s=pause)
+        assert rec == {"status": "infra_error", "attempt": 1, "error": {"message": "no network"}}
+        assert (client.runs, client.looks, client.cancelled) == (1, looks, ["job-1"]), pause
+        assert clock.now - start == pause * (looks - 1) == 300
+    # With two attempts each job has the same patience, and neither is left running.
+    client = Unreachable(down_s=10 ** 6, run_s=10)
+    rec = _job(client, tmp_path)
+    assert rec == {"status": "infra_error", "attempt": 2, "error": {"message": "no network"}}
+    assert (client.runs, client.looks, client.cancelled) == (2, 62, ["job-1", "job-2"])
+
+    # A submission that fails has no job to cancel.
+    class NoSubmit(QueuedClient):
+        def run(self, job_input):
+            self.runs += 1
+            raise submit_and_poll.requests.RequestException("no network")
+
+    client = NoSubmit(clock, queue_s=0)
+    assert _job(client, tmp_path)["status"] == "infra_error"
+    assert (client.runs, client.cancelled) == (2, [])
+    # The wait itself cancels nothing: the model sync waits with it too, and
+    # its download goes on while the runner cannot see it.
+    client = Unreachable(down_s=10 ** 6, run_s=10)
+    job_id = client.run({})
+    with pytest.raises(submit_and_poll.requests.RequestException):
+        submit_and_poll._poll(client, job_id, 7200)
+    assert client.cancelled == [] and client.looks == 31
+
+
+def test_an_output_whose_name_leaves_the_outputs_folder_is_written_nowhere(tmp_path):
+    """The worker names its files. The folder above the outputs is published
+    as it is, and the runner holds the token that pushes the results branch."""
+    dest = tmp_path / "run" / "wf" / "outputs"
+    names = ["../escape.png", "../../climbed.txt", "sub/../../side.png", "..", ".", "",
+             str(tmp_path / "abs_outside.png")]
+    kept = ["wf_00001_.png", "sub/wf_00002_.png", "sub/../wf_00003_.png",
+            str(dest / "abs_inside.png")]
+    sent = [{"filename": name, "bytes": 2, "sha256": "a" * 64, "data_b64": "aGk="}
+            for name in [*names, *kept]]
+    inventory = submit_and_poll._write_outputs(sent, dest)
+    assert [rec["filename"] for rec in inventory] == [*names, *kept]
+    # Each is listed as a file that was not sent, with what the worker said of it.
+    assert [rec for rec in inventory if rec.get("truncated")] == [
+        {"filename": name, "bytes": 2, "sha256": "a" * 64, "truncated": True} for name in names]
+    written = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")
+                     if p.is_file())
+    assert written == ["run/wf/outputs/abs_inside.png", "run/wf/outputs/sub/wf_00002_.png",
+                       "run/wf/outputs/wf_00001_.png", "run/wf/outputs/wf_00003_.png"]
     # 10 s after its first signal GitHub kills the step: connect and answer fit in that.
     assert 2 * submit_and_poll.STOP_CANCEL_TIMEOUT_S < 7.5

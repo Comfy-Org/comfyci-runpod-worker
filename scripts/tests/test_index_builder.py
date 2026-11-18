@@ -262,10 +262,10 @@ def test_a_backfill_leaves_out_what_a_run_that_did_not_finish_pushed(tmp_path):
     head = store.download_json(builder.head_path())
     assert [e["c"] for e in head["entries"]] == ["ccc", "bbb", "aaa"]
     assert head["first_bad"]["flux"]["commit"] == "bbb"  # the partial pass closed nothing
-    # A later run tested a workflow again at that commit and published: its
-    # publish put the commit in the index, so a rebuild does too.
-    store.publish_summary("master", "ddd", {**died, "partial": {"done": 1, "of": 9},
-                                            "retests": [{"run_id": 7, "workflows": ["flux"]}]})
+    # A run of named workflows at that commit does not merge into what the dead
+    # run left. It replaces it with a summary of its own (`scope`), and its
+    # publish puts the commit in the index: a rebuild does too.
+    store.publish_summary("master", "ddd", {**died, "scope": ["flux"]})
     store.finalize("a re-test at ddd")
     assert builder.backfill(with_meta=False, log=lambda *_: None) == 4
     assert store.download_json(builder.head_path())["entries"][0]["c"] == "ddd"
@@ -467,12 +467,53 @@ def test_a_smoke_chain_opens_with_its_level_and_closes_on_the_next_pass():
         "commit": "b", "run_ts": 2, "kind": "fail", "prev_good": "a", "pr": None, "author": None,
         "golden": None, "runs": 2, "level": "smoke"}}
     assert index_builder.first_bad([*runs, _smoke_entry("e", 5, "pass", prior="fail")]) == {}
-    # The level is that of the cell that opened the chain.
-    moved = [_entry("a", 1, "fail", wf="mesh"), _smoke_entry("b", 2, "fail", prior="fail")]
-    assert "level" not in index_builder.first_bad(moved)["mesh"]
-    assert index_builder.first_bad(moved)["mesh"]["runs"] == 2
-    assert index_builder.smoke_workflows(moved) == {"mesh"}
     assert index_builder.smoke_workflows(list(reversed(runs))) == {"mesh"}
+
+
+def test_a_workflow_that_changes_its_level_while_it_is_red_starts_a_new_chain():
+    """An output that differs from its reference and a failed smoke check are
+    not one failure. The chain used to keep the level and the reference of
+    the cell that opened it: a smoke failure read as an output that changed
+    against a reference the workflow no longer has, and the other way round."""
+    moved = [_entry("p", 0, "pass", wf="mesh"), _entry("a", 1, "fail", wf="mesh"),
+             _smoke_entry("b", 2, "fail"), _smoke_entry("c", 3, "fail", prior="fail")]
+    assert index_builder.first_bad(moved[:2])["mesh"] == {
+        "commit": "a", "run_ts": 1, "kind": "fail", "prev_good": "p", "pr": None, "author": None,
+        "golden": "v0.33.2", "runs": 1}
+    # The smoke chain starts at the first smoke failure. The last pass is kept.
+    assert index_builder.first_bad(moved)["mesh"] == {
+        "commit": "b", "run_ts": 2, "kind": "fail", "prev_good": "p", "pr": None, "author": None,
+        "golden": None, "runs": 2, "level": "smoke"}
+    # Back at reference level, still red: a reference chain again, from there.
+    back = [*moved, _entry("d", 4, "fail", wf="mesh"), _entry("e", 5, "execution_error", wf="mesh")]
+    assert index_builder.first_bad(back)["mesh"] == {
+        "commit": "d", "run_ts": 4, "kind": "fail", "prev_good": "p", "pr": None, "author": None,
+        "golden": "v0.33.2", "runs": 2}
+    # A change of the kind of failure alone is one chain, as it was.
+    kinds = [_entry("a", 1, "execution_error", wf="mesh"), _entry("b", 2, "fail", wf="mesh")]
+    assert (index_builder.first_bad(kinds)["mesh"]["commit"],
+            index_builder.first_bad(kinds)["mesh"]["runs"]) == ("a", 2)
+
+    # The failure before it, for the cell of the first smoke check: a reference
+    # failure is looked through, so the smoke failure is not inherited from it.
+    assert index_builder.prior_verdicts(moved[:2], "b") == {
+        "mesh": {"commit": "a", "verdict": "fail"}}
+    assert index_builder.prior_verdicts(moved[:2], "b", smoke=["mesh"]) == {
+        "mesh": {"commit": "p", "verdict": "pass"}}
+    assert index_builder.prior_verdicts(moved[1:2], "b", smoke={"mesh"}) == {}
+    # A smoke failure before it is the same failure, and an execution error or
+    # a pass at either level is a result.
+    assert index_builder.prior_verdicts(moved, "d", smoke={"mesh"})["mesh"] == {
+        "commit": "c", "verdict": "fail"}
+    assert index_builder.prior_verdicts(back, "f", smoke={"mesh"})["mesh"] == {
+        "commit": "e", "verdict": "execution_error"}
+    # Only for the workflows that are named: another one keeps the rule it had.
+    assert index_builder.prior_verdicts(moved[:2], "b", smoke={"other"})["mesh"]["commit"] == "a"
+
+
+def test_the_newest_cell_says_whether_a_workflow_is_at_smoke_level():
+    moved = [_entry("a", 1, "fail", wf="mesh"), _smoke_entry("b", 2, "fail", prior="fail")]
+    assert index_builder.smoke_workflows(moved) == {"mesh"}
     # The newest cell decides, in commit order: this workflow is at reference level again.
     back = [*moved, _entry("c", 3, "pass", wf="mesh")]
     assert index_builder.smoke_workflows(back) == set()
@@ -485,22 +526,65 @@ def test_an_entry_carries_the_range_of_each_workflow_and_a_chain_the_one_it_open
               "odd": "not a range"}
     summary = {**_smoke_summary("b", 2, "fail", prior="pass"), "ranges": ranges}
     entry = index_builder.entry_from_summary(summary, LANE, 1)
-    assert entry["wr"] == {"mesh": {"n": 7, "url": "u7"}, "other": {"n": None, "url": "u"}}
+    # `prev` is where the count starts: the workflow's last result when the run was made.
+    assert entry["wr"] == {"mesh": {"n": 7, "url": "u7", "prev": "p" * 40},
+                           "other": {"n": None, "url": "u", "prev": "q" * 40}}
     assert list(entry)[-1] == "wr"
     for none in ({}, None, ["mesh"]):
         assert "wr" not in index_builder.entry_from_summary({**summary, "ranges": none}, LANE, 1)
-    chain = index_builder.first_bad([_smoke_entry("a", 1, "pass"), entry,
+    chain = index_builder.first_bad([_smoke_entry("p" * 40, 1, "pass"), entry,
                                      _smoke_entry("c", 3, "fail", prior="fail")])["mesh"]
     # "A run that covered 7 commits": the chain's commit is only the newest of them.
-    assert chain == {"commit": "b", "run_ts": 2, "kind": "fail", "prev_good": "a", "pr": None,
-                     "author": None, "golden": None, "runs": 2, "level": "smoke",
+    assert chain == {"commit": "b", "run_ts": 2, "kind": "fail", "prev_good": "p" * 40,
+                     "pr": None, "author": None, "golden": None, "runs": 2, "level": "smoke",
                      "range": {"n": 7, "url": "u7"}}
     # The range is that of the run that opened the chain, for this workflow.
     late = index_builder.entry_from_summary(
         {**_smoke_summary("c", 3, "fail", prior="fail"), "ranges": ranges}, LANE, 1)
     assert "range" not in index_builder.first_bad([_smoke_entry("b", 2, "fail"), late])["mesh"]
-    other = {**entry, "wr": {"other": {"n": 3, "url": "u"}}}
+    other = {**entry, "wr": {"other": {"n": 3, "url": "u", "prev": "q" * 40}}}
     assert "range" not in index_builder.first_bad([other])["mesh"]
+
+
+def test_a_pass_inside_the_range_of_a_chain_takes_its_count_away():
+    """A step of a search for the commit: a run of the one workflow at a
+    commit inside the range. When it passes, the chain has a nearer last pass
+    and fewer commits to look at than its first run counted. The index stated
+    the old count next to the new last pass."""
+    first, middle, last = "1" * 40, "5" * 40, "9" * 40
+    compare = "https://github.com/Comfy-Org/ComfyUI/compare"
+    ranges = {"mesh": {"prev": first, "commits_between": 8,
+                       "compare_url": f"{compare}/{first}...{last}"}}
+    failing = index_builder.entry_from_summary(
+        {**_smoke_summary(last, 9, "fail", prior="pass", ct=90), "ranges": ranges}, LANE, 1)
+    runs = [_smoke_entry(first, 1, "pass", ct=10), failing]
+    assert index_builder.first_bad(runs)["mesh"]["range"] == {
+        "n": 8, "url": f"{compare}/{first}...{last}"}
+    # The step is tested later and stands earlier: commit order decides.
+    step = _smoke_entry(middle, 12, "pass", prior="pass", ct=50)
+    chain = index_builder.first_bad([*runs, step])["mesh"]
+    assert (chain["commit"], chain["prev_good"]) == (last, middle)
+    assert chain["range"] == {"n": None, "url": f"{compare}/{middle}...{last}"}
+    # A step that fails starts the chain itself, with the range it counted.
+    near = {"mesh": {"prev": middle, "commits_between": 2,
+                     "compare_url": f"{compare}/{middle}...{'7' * 40}"}}
+    failed_step = index_builder.entry_from_summary(
+        {**_smoke_summary("7" * 40, 13, "fail", prior="pass", ct=70), "ranges": near}, LANE, 1)
+    chain = index_builder.first_bad([*runs, step, failed_step])["mesh"]
+    assert (chain["commit"], chain["prev_good"], chain["runs"]) == ("7" * 40, middle, 2)
+    assert chain["range"] == {"n": 2, "url": f"{compare}/{middle}...{'7' * 40}"}
+    # The last step passes right before it: one commit is left, and still no number.
+    done = _smoke_entry("6" * 40, 14, "pass", prior="pass", ct=60)
+    chain = index_builder.first_bad([*runs, step, failed_step, done])["mesh"]
+    assert chain["range"] == {"n": None, "url": f"{compare}/{'6' * 40}...{'7' * 40}"}
+    assert index_builder.chain_range({"n": 3, "url": "u", "prev": "a"}, "a", "c") == {
+        "n": 3, "url": "u"}
+    # A range that does not say where it starts cannot be taken for the chain's.
+    assert index_builder.chain_range({"n": 3, "url": "u"}, "a", "c") == {
+        "n": None, "url": f"{compare}/a...c"}
+    # A chain without a pass before it has nothing to compare with.
+    assert index_builder.chain_range({"n": 3, "url": "u", "prev": "a"}, None, "c") == {
+        "n": None, "url": None}
 
 
 def test_merge_entry_takes_the_ranges_of_the_newest_summary():

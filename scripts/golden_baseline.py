@@ -151,12 +151,15 @@ def left_in_golden(store: storage.Storage, wf_id: str, tag: str, outputs: Path,
             "on the results branch, or use another ref")
 
 
-def unpublished_files(comparison: dict | None) -> list[str]:
+def unpublished_files(comparison: dict | None, sent: bool | None = None) -> list[str]:
     """The output files a run's comparison.json lists as not published
-    (`"published": false` in `smoke.files`): none for a reference-level run."""
+    (`"published": false` in `smoke.files`): none for a reference-level run.
+    With `sent`, only those the worker sent (True: the run held them back) or
+    did not send (False: no run has a copy of them)."""
     files = ((comparison or {}).get("smoke") or {}).get("files")
     return [str(f.get("name")) for f in (files if isinstance(files, list) else [])
-            if isinstance(f, dict) and f.get("published") is False]
+            if isinstance(f, dict) and f.get("published") is False
+            and (sent is None or (f.get("sent") is not False) is sent)]
 
 
 def promote_run(store: storage.Storage, branch: str, commit: str, wf_id: str, tag: str,
@@ -176,9 +179,16 @@ def promote_run(store: storage.Storage, branch: str, commit: str, wf_id: str, ta
         return False
     # A smoke run publishes a large output file only when it repeats. A run
     # that held one back is not whole on the results branch, and a reference
-    # made from it would lack that file.
-    held = unpublished_files(store.download_json(
-        f"{prefix}/runs/{branch}/{commit}/{wf_id}/comparison.json"))
+    # made from it would lack that file. A file the worker did not send is
+    # held back by every run: no later one has it either.
+    comparison = store.download_json(f"{prefix}/runs/{branch}/{commit}/{wf_id}/comparison.json")
+    unsent = unpublished_files(comparison, sent=False)
+    if unsent:
+        print(f"::error::[{wf_id}] {branch}/{commit} cannot be a reference: the worker did not "
+              f"send {', '.join(unsent[:5])} (over its size limit), so no run can publish it. "
+              "Make the output smaller, or generate the reference with a golden run")
+        return False
+    held = unpublished_files(comparison, sent=True)
     if held:
         print(f"::error::[{wf_id}] {branch}/{commit} cannot be a reference: it was a smoke run "
               f"that did not publish {', '.join(held[:5])}. Use a later run that shows the "

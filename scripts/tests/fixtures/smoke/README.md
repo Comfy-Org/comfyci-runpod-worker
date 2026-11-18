@@ -13,10 +13,11 @@ purpose. No model ran. The files are as that code left them.
 | `audio_silent_1s.flac` | silence, 1.0 s, 44,100 Hz, stereo | 142 bytes a second | fails: silent |
 | `mesh_300.glb` | a sphere | 300 vertices, 560 faces | passes |
 | `mesh_12.glb` | an icosahedron | 12 vertices, 20 faces | fails: size |
-| `video_5f.mp4` | H.264, 640x352, 5 frames of a moving pattern | 7,198 | passes |
-| `video_black_5f.mp4` | the same, all black | 1,183 | fails: blank |
+| `video_5f.mp4` | H.264, 640x352, 5 frames of a moving pattern | 5,034 | passes |
+| `video_black_5f.mp4` | the same, all black | 352 | fails: blank |
 
-The number of a video is its bytes a frame for each megapixel.
+The number of a video is its bytes a frame for each megapixel, over the frames
+after the first.
 
 Each FLAC file carries 8,192 bytes of padding that the writer adds. It is
 metadata, so it is no part of "bytes a second".

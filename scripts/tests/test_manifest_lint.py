@@ -133,6 +133,18 @@ def _level_problems(entry: dict) -> list[str]:
     return problems
 
 
+def _writes_mp4_h264(inputs: dict) -> bool:
+    """Whether a SaveVideo node writes an MP4 with H.264. Its `format` is mp4
+    or auto (auto is MP4 unless the codec asks for another container), and
+    its codec, where it names one (`format.codec`, or the node's own `codec`),
+    is h264 or auto. SaveVideo also writes mkv, webm and mov, and AV1 and
+    ProRes: the smoke check looks for an .mp4, and the limit of its blank
+    check was measured on H.264 (a moving AV1 clip measures under it)."""
+    codecs = [inputs[key] for key in ("format.codec", "codec") if key in inputs]
+    return (inputs.get("format", "auto") in ("mp4", "auto")
+            and all(codec in ("h264", "auto") for codec in codecs))
+
+
 def _sink_problems(wf_id: str, entry: dict, wf: dict) -> list[str]:
     """What is wrong with a workflow's output nodes, for its output kind."""
     kind = output_kinds.kind_of(entry)
@@ -162,6 +174,8 @@ def _sink_problems(wf_id: str, entry: dict, wf: dict) -> list[str]:
     if any(n["class_type"] == "SaveAudioAdvanced" and n["inputs"].get("format") != "flac"
            for n in sinks):
         problems.append("SaveAudioAdvanced must write format flac: only FLAC files are checked")
+    if any(n["class_type"] == "SaveVideo" and not _writes_mp4_h264(n["inputs"]) for n in sinks):
+        problems.append("SaveVideo must write mp4 with h264: only that is checked")
     for name in sorted({n["class_type"] for n in wf.values()} & UNCHECKED_SINKS):
         problems.append(f"{name} is not allowed: its file cannot be checked. Use "
                         "SaveAudioAdvanced with format flac")
@@ -210,16 +224,12 @@ def _volume_files(manifest: dict, lanes: dict) -> dict[str, int]:
     A workflow runs on the lanes of its own cadence, so one that only the
     weekly lane runs, whose models each job fetches, takes no room here. Nor
     does one that runs only on lanes without the volume (an empty
-    `network_volumes`)."""
+    `network_volumes`). Which workflows those are is `lanes.volume_workflows`,
+    the rule sync_models.py downloads by: the lint counts what the sync sends."""
     files: dict[str, int] = {}
-    for lane_id, lane in lanes["lanes"].items():
-        if (lanes_mod.is_retired(lane) or lane.get("model_storage") == "job"
-                or lanes_mod.without_volume(lanes, lane)):
-            continue
-        for wf_id in lanes_mod.workflows_for_lane(manifest, lane_id, enabled_only=False,
-                                                  lane=lane):
-            for m in manifest["workflows"][wf_id]["models"]:
-                files[f"{m['directory']}/{m['name']}"] = m["bytes"]
+    for wf_id in lanes_mod.volume_workflows(manifest, lanes):
+        for m in manifest["workflows"][wf_id]["models"]:
+            files[f"{m['directory']}/{m['name']}"] = m["bytes"]
     return files
 
 
@@ -633,6 +643,37 @@ def test_sink_rules_of_an_audio_workflow():
     image = {"1": _sink("SaveImage", filename_prefix="wf"),
              "2": _sink("SaveAudioAdvanced", filename_prefix="wf_audio", format="mp3")}
     assert _sink_problems("wf", {}, image) == [flac]
+
+
+def test_a_clip_is_saved_as_an_mp4_with_h264():
+    """SaveVideo offers mkv, webm and mov, and AV1 and ProRes. A smoke entry
+    that says webm passed the lint, and every run of it failed: "SaveVideo
+    wrote no .mp4 file"."""
+    image = {"1": _sink("SaveImage", filename_prefix="wf", images=["9", 0])}
+    said = "SaveVideo must write mp4 with h264: only that is checked"
+
+    def problems(**inputs):
+        clip = _sink("SaveVideo", filename_prefix="wf_video", video=["8", 0], **inputs)
+        return _sink_problems("wf", {}, {**image, "2": clip})
+
+    for fine in ({}, {"format": "mp4"}, {"format": "auto"}, {"format": "auto", "codec": "auto"},
+                 {"format": "mp4", "codec": "h264"}, {"format": "mp4", "format.codec": "h264"},
+                 {"format": "auto", "format.codec": "auto"}):
+        assert problems(**fine) == [], fine
+    for other in ({"format": "webm"}, {"format": "mkv"}, {"format": "mov"}, {"format": "MP4"},
+                  {"format": "mp4", "codec": "av1"}, {"format": "mp4", "format.codec": "av1"},
+                  {"format": "auto", "codec": "prores"}, {"format": "auto", "format.codec": "av1"},
+                  {"format": None}, {"format": ["4", 0]}, {"format": "mp4", "codec": ["4", 0]}):
+        assert problems(**other) == [said], other
+    # The check looks for the file this rule allows, and no other save node is held to it.
+    assert smoke.SINKS["SaveVideo"] == (".mp4",)
+    assert _sink_problems("wf", {}, {**image, "2": _sink(
+        "VHS_VideoCombine", filename_prefix="wf_gif", format="video/webm")}) == []
+    # A workflow of the manifest that saves a clip saves it that way.
+    for wf_id, entry in WORKFLOWS.items():
+        for node in _load_workflow(entry).values():
+            if node["class_type"] == "SaveVideo":
+                assert _writes_mp4_h264(node["inputs"]), wf_id
 
 
 def test_the_lint_knows_the_save_nodes_the_smoke_checks_know():

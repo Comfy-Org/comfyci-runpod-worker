@@ -784,9 +784,14 @@ def test_infra_error_is_not_a_verdict_and_says_whether_the_cron_retries(attempt,
             in lines)
     assert "RunPod attempt 2" in out
     assert "| `sdxl_t2i` | ⚠️ infra error |" in out
-    # Here the attempt tells something, so the Tested row names it.
-    named = f"attempt {attempt} of 2" if attempt <= 2 else f"attempt {attempt}"
-    assert f"· {named} · [Actions run]({RUN_URL}) |" in out
+    # The Tested row names the attempt where it tells something: a retry
+    # happened. "attempt 1 of 2" would promise a second run of a commit whose
+    # only untested workflow the cron leaves alone.
+    if attempt == 1:
+        assert "attempt 1" not in out and f"commit · [Actions run]({RUN_URL}) |" in out
+    else:
+        named = f"attempt {attempt} of 2" if attempt == 2 else f"attempt {attempt}"
+        assert f"· {named} · [Actions run]({RUN_URL}) |" in out
     # The report says what the cron does: neither tests the commit again.
     assert not run_report.regression_skip.decide(SHA, summary)[0]
     assert ONCE_MORE not in out
@@ -803,6 +808,8 @@ def test_the_cron_retries_a_commit_for_a_workflow_that_another_run_can_test():
         assert (f"Worker status: <code>{status.replace('_', chr(92) + '_')}</code>. This is not "
                 f"a verdict on the commit. {ONCE_MORE}") in out, status
         assert run_report.regression_skip.decide(SHA, summary)[0]
+        # A second attempt can follow, so the Tested row names this one.
+        assert f"· attempt 1 of 2 · [Actions run]({RUN_URL}) |" in out
     mixed = [_cell("flux_dev_t2i", "infra_error", worker_status="worker_error"),
              _cell("sdxl_t2i", "infra_error", worker_status="missing_model")]
     summary = _summary(mixed)
@@ -2960,7 +2967,7 @@ def test_a_similarity_that_is_not_a_share_of_words_says_what_it_is():
 # -- smoke level -----------------------------------------------------------------------------
 NIGHTLY = "py313-torch2.14.1-cu130-nightly"
 NP = f"regression/lanes/{NIGHTLY}"
-# A registry with a lane that runs once a night, as a later change adds one.
+# A registry with a lane that runs once a night, like the nightly lane of the registry.
 NIGHT_LANES = {"primary": LANE, "lanes": {**LANES["lanes"], NIGHTLY: {
     "label": "nightly · py3.13 / torch 2.14.1 / cu130 / RTX 4090", "cadence": "nightly",
     "blocking": False, "role": "lane", "layout": 2, "prefix": NP, "endpoint_id": "ep-night"}}}
@@ -3306,7 +3313,10 @@ def test_the_files_of_a_smoke_failure_are_cut_with_the_other_file_lists():
     assert len([line for line in full if line.startswith(f"| [{MESH_MD}\\_0000")]) == 5
     cut = run_report.smoke_block(data, view, run_report.Limits(files_per_workflow=3))
     assert len([line for line in cut if line.startswith("| [")]) == 3
-    assert "2 more files are listed under Output files." in cut
+    # Only a shortened report cuts this list, and it cuts the list under "Output
+    # files" to the same three: the record is where the other two are.
+    assert "2 more files are listed in run.json." in cut
+    assert not [line for line in cut if "Output files" in line]
     gone = run_report.smoke_block(data, view, run_report.Limits(files_per_workflow=0))
     assert not [line for line in gone if line.startswith("|")]
     assert gone[2] == "- <code>hunyuan3d\\_2\\_1\\_t23d\\_00001\\_.png</code>: blank"
@@ -3341,9 +3351,17 @@ def test_a_standing_smoke_failure_is_inherited_and_names_its_chain():
     one = {MUSIC: {**chain[MUSIC], "range": {"n": 1, "url": "u"}}}
     assert (f"failing since {last} ([#17700]({COMFY}/pull/17700), kijai, Add a node "
             f"(\\#{ZW}17700))") in run_report.failing_since(one[MUSIC], before)
-    # A range of unknown size (GitHub did not answer) blames no pull request either.
+    # A range of unknown size blames no pull request either, and states no number:
+    # GitHub did not answer, or a later run passed inside the range and the
+    # count of the chain's first run is no longer the chain's.
     unknown = run_report.failing_since({**chain[MUSIC], "range": {"n": None}}, before)
-    assert "(a run that covered an unknown number of commits, [compare](" in unknown
+    assert (f"failing since {last} (one of the commits since its last pass, [compare]({COMFY}/"
+            f"compare/{FIRST}...{LAST})), first seen ") in unknown
+    assert "covered" not in unknown and "17700" not in unknown
+    # Without a pass before it there is nothing to compare with.
+    never_passed = {**chain[MUSIC], "range": {"n": None}, "prev_good": None, "level": None}
+    assert "(a run that covered an unknown number of commits), first seen" in (
+        run_report.failing_since(never_passed, before))
     # A chain without a range of its own is read from the run's range, as before.
     plain = {k: v for k, v in chain[MUSIC].items() if k != "range"}
     assert "(a run that covered 6 commits), first seen" in run_report.failing_since(plain, before)
@@ -3438,7 +3456,9 @@ def test_the_checked_column_stands_where_nothing_is_compared():
              "frames": 25, "seconds": 1.042, "bytes_per_frame_mp": 14280}
     text = {"name": "t.txt", "type": "text", "bytes": 1300, "chars": 1204, "words": 231}
     assert checked(video) == "video 640x352 · 25 frames"
-    assert checked(text) == "text 1,204 characters"
+    # The count is of the characters that are not blank, and says so: the heading
+    # of a shown text counts every character and has another number.
+    assert checked(text) == "text 1,204 non-blank characters"
     assert checked(_flac("a.flac", channels=1)) == "30.0 s · 48000 Hz · mono"
     assert checked(_flac("a.flac", channels=6)) == "30.0 s · 48000 Hz · 6 channels"
     # Next to another type the audio file is named, and equal files are said once.
@@ -3475,7 +3495,8 @@ def test_smoke_facts_by_type():
         "1,204 non-blank characters · 1 word")
     assert facts({"type": "video", "width": 640, "height": 352, "frames": 25, "seconds": 1.042,
                   "bytes_per_frame_mp": 14280}) == (
-        "640x352 · 25 frames · 1.0 s · 14,280 bytes a frame for each megapixel")
+        "640x352 · 25 frames · 1.0 s · 14,280 bytes a frame for each megapixel after the "
+        "first frame")
     # A file that could not be read has nothing measured. One that was not sent says so.
     assert facts({"type": "mesh"}) == ""
     assert facts(_png("a.png", sent=False)) == "not sent, checked by size only"
@@ -3501,8 +3522,10 @@ def test_a_smoke_text_workflow_shows_its_text_under_generated_text():
                            "<details><summary>Generated text (208 characters)</summary>"]
     assert _pre_blocks(out) == [T_REF] and "identical to its reference" not in out
     assert f"[The whole file]({RAW}/{path})" in section
+    # One page, one word for each count: the 173 are the characters that are not blank.
     assert any(row.startswith(f"| `{wf}` | ✅ smoke pass | [text]({RAW}/{path}) |  |  |  | text "
-                              "173 characters |") for row in lines)
+                              "173 non-blank characters |") for row in lines)
+    assert any("173 non-blank characters · 36 words" in row for row in lines)
     # One that failed its checks shows its text in its block, where the failure is read.
     again = [{"file": name, "check": "repeat", "text": "one word is 30 of the 36 words"}]
     out = _smoke_report(_smoke_files([_smoke_cell(wf, [entry], again, output_kind="text")],
@@ -3666,18 +3689,21 @@ def test_the_title_of_a_nightly_run_names_the_commits_it_covers():
     lines = out.split("\n")
     assert lines[0] == ("## ✅ GPU regression · nightly · py3.13 / torch 2.14.1 / cu130 / RTX 4090 "
                         "· `e9afbcc`..`05e878f` (7 commits)")
-    assert "| New data published by this run | 402.7 KB |" in lines
-    assert "| New data published by this run | 0 B |" in _nightly(
-        [mesh], published_new_bytes=0).split("\n")
+    # The row says what the number is: the output files of smoke-level workflows,
+    # as the lane's own run of the commit published them. It does not say "this
+    # run": a skipped night and a re-test render the same summary.
+    row = "| New smoke-level output the lane's run published |"
+    assert f"{row} 402.7 KB |" in lines and "this run |" not in out
+    assert f"{row} 0 B |" in _nightly([mesh], published_new_bytes=0).split("\n")
     # A nightly run of one commit, and a run that has no range, name the tested commit.
     one = _smoke_files([mesh], lane=NIGHTLY, commit=HEAD)
     assert _smoke_report(one, lane=NIGHTLY, commit=HEAD).split("\n")[0].endswith("· `05e878f3`")
     # A per-commit run keeps its title and its facts, however many commits it covers.
     rng = {"prev": PREV, "commits_between": 3}
     out = _smoke_report(_smoke_files([_cell("flux_dev_t2i")], tested_range=rng))
-    assert out.split("\n")[0].endswith("· `cccccccc`") and "New data published" not in out
+    assert out.split("\n")[0].endswith("· `cccccccc`") and "the lane's run published" not in out
     for odd in (True, "412345", -1, None, [1]):
-        assert "New data published" not in _nightly([mesh], published_new_bytes=odd)
+        assert "the lane's run published" not in _nightly([mesh], published_new_bytes=odd)
 
 
 def test_cell_state_and_rollup_know_the_smoke_level():
@@ -4236,6 +4262,167 @@ def test_a_run_that_died_says_what_its_checkpoints_left_on_the_results_branch(tm
     assert "This run did not finish" not in out and "Progress" not in out
 
 
+def test_a_nightly_run_that_was_stopped_is_not_green(tmp_path):
+    """A nightly or weekly run tests a few workflows at a time. One that is
+    killed during its 25th job leaves 24 green folders on the runner. Its page
+    had a green check and "All 24 workflows passed", and listed the workflows
+    it never started as left out by a dispatch."""
+    workdir = tmp_path / "regression-work"
+
+    def left(verdicts):
+        for wf, verdict in verdicts.items():
+            (workdir / wf).mkdir(parents=True, exist_ok=True)
+            (workdir / wf / "run.json").write_text(json.dumps(_run(wf)), encoding="utf-8")
+            (workdir / wf / "comparison.json").write_text(json.dumps({
+                "verdict": verdict, "level": "smoke",
+                "smoke": {"files": [], "notes": [], "problems": [
+                    {"file": None, "check": "missing", "text": "wrote no file"}] * (
+                        verdict == "fail")}}), encoding="utf-8")
+
+    def page(lane=NIGHTLY, commit=HEAD):
+        files = {f"regression/index/master/{lane}.json": _head([_entry(LAST, 1794616236, {
+            MESH: "pass", MUSIC: "pass"})]), "regression/index/lanes.json": {"lanes": {}}}
+        manifest = {"workflows": {wf: {"enabled": True, "level": "smoke", "cadence": (
+            "nightly" if lane == NIGHTLY else "per-commit")} for wf in (MESH, MUSIC, CLIP)}}
+        return _smoke_report(files, lane=lane, commit=commit, workdir=str(workdir),
+                             summary_file=str(tmp_path / "no.json"), manifest=manifest)
+
+    left({MESH: "pass", MUSIC: "pass"})
+    lines = page().split("\n")
+    # Every workflow it has is green, and the run is not.
+    assert lines[0] == ("## ⚠️ GPU regression · nightly · py3.13 / torch 2.14.1 / cu130 / "
+                        "RTX 4090 · `05e878f3`")
+    assert lines[2:4] == ["> [!WARNING]", (
+        "> This run stopped before it published its results. The report is rebuilt from the "
+        "files on the runner, so images and links to published files are missing. The attached "
+        "files hold the outputs. It shows the workflows that had a result when the run stopped, "
+        "and no other.")]
+    assert "All 2 workflows passed their smoke checks." in lines
+    assert (f"- ➖ not run, on this lane, and the run left no result for them: it stopped before "
+            f"it published (a dispatch can also name only some workflows): `{CLIP}`") in lines
+    assert not [line for line in lines if "not part of this run" in line]
+    # A failure among them keeps the title red.
+    left({MUSIC: "fail"})
+    assert page().startswith("## ❌ GPU regression · nightly")
+    # A per-commit run submits every job at once, and its page is the one it was.
+    left({MUSIC: "pass"})
+    out = page(LANE, SHA)
+    assert out.startswith("## ✅ GPU regression · py3.13")
+    assert "It shows the workflows that had a result" not in out
+    assert "it stopped before it published" not in out and f"`{CLIP}`" in out
+    assert not run_report.stopped_early(run_report.LaneData(
+        commit=SHA, branch="master", lane_id=NIGHTLY, lane=NIGHT_LANES["lanes"][NIGHTLY],
+        prefix=NP, run_dir=None, reader=run_report.Reader(), source="published"))
+
+
+def test_an_execution_error_of_a_smoke_workflow_names_its_last_result_in_smoke_words():
+    """On the per-commit lane too. Nothing was compared before the error, so
+    the last result is no "pass" of the legend and no "output changed"."""
+    prev = f"[`{PREV[:7]}`]({COMFY}/commit/{PREV})"
+    for prior, said in (("pass", "smoke pass"), ("fail", "smoke check failed")):
+        broken = _smoke_cell(CLIP, verdict="execution_error", prior_verdict=prior,
+                             prior_commit=PREV)
+        out = _smoke_report(_smoke_files([broken]))
+        assert (f"Before this commit it last ran to the end at {prev} ({said}), so the error is "
+                "new at this commit.") in out, prior
+    # A reference-level workflow keeps the words of its level.
+    for prior, said in (("pass", "pass"), ("fail", "output changed")):
+        broken = _cell("flux_dev_t2i", "execution_error", prior_verdict=prior, prior_commit=PREV)
+        out = _report(_tree(_summary([broken])))
+        assert (f"Before this commit it last ran to the end at {prev} ({said}), so the error is "
+                "new at this commit.") in out, prior
+
+
+def test_a_changed_output_after_a_run_that_left_none_says_what_is_missing():
+    """A full run of a nightly or weekly lane always moves the pointer. So the
+    run before can be one in which this workflow ended in an error and wrote
+    nothing. "There is no previous run" stood under a row that named it."""
+    last = f"[`e9afbcc`]({COMFY}/commit/{LAST})"
+    cell = _cell("flux_dev_t2i", "fail", previous_commit=LAST, previous_verdict=None,
+                 prior_verdict="execution_error", prior_commit=LAST)
+    out = _nightly([cell, _smoke_cell(MESH, [_png(f"{MESH}_00001_.png")])])
+    assert ("The output differs from the reference beyond its limits. The run before, at "
+            f"{last}, left no output of this workflow, so nothing tells whether the change is "
+            "new in this run.") in out.split("\n")
+    assert "There is no previous run" not in out
+    assert f"| Covers | 7 commits since {last}" in out
+    # No pointer at all: there is no run before.
+    first = _cell("flux_dev_t2i", "fail", previous_commit=None, previous_verdict=None)
+    out = _smoke_report(_smoke_files([first], lane=NIGHTLY, commit=HEAD, tested_range=None),
+                        lane=NIGHTLY, commit=HEAD)
+    assert ("The output differs from the reference beyond its limits. There is no previous run "
+            "to tell whether the change is new at this commit.") in out.split("\n")
+    # The per-commit lane keeps its sentence: its pointer moves only on runs with outputs.
+    out = _report(_tree(_summary([_cell("flux_dev_t2i", "fail")])))
+    assert "There is no previous run to tell whether the change is new at this commit." in out
+    assert "left no output of this workflow" not in out
+
+
+def test_an_output_the_worker_did_not_send_is_not_said_to_be_attached():
+    """The artifact takes the runner's folder, and a file over the worker's
+    size limit never reached the runner. The row pointed to the attached files
+    while the Checked cell beside it said "not sent"."""
+    big = _flac(bytes=20 * 1024 * 1024, sent=False, published=False)
+    note = f"{FLAC} was not sent (over the worker's size limit): checked by size only"
+    cell = _smoke_cell(MUSIC, [big], output_kind="audio", notes=[note])
+    out = _smoke_report(_smoke_files([cell]), artifact_url=ARTIFACT)
+    assert (f"| `{MUSIC}` | ✅ smoke pass | audio, not sent | 1 file not sent, checked by size "
+            "only |") in out
+    assert "attached files](" not in out.split("### All workflows")[1].split("<details>")[0]
+    # Without an artifact too: nothing points to the run for a file it never had.
+    assert f"| `{MUSIC}` | ✅ smoke pass | audio, not sent |" in _smoke_report(_smoke_files([cell]))
+    # A file that was sent and held back is in the attached files, as before.
+    held = _smoke_cell(MUSIC, [_flac(published=False)], output_kind="audio")
+    out = _smoke_report(_smoke_files([held]), artifact_url=ARTIFACT)
+    assert f"| `{MUSIC}` | ✅ smoke pass | audio, in the [attached files]({ARTIFACT}) |" in out
+    # A picture the worker did not send has no thumbnail either: the same words.
+    huge = _png(f"{MESH}_00001_.png", bytes=20 * 1024 * 1024, sent=False, published=False)
+    cell = {**_smoke_cell(MESH, [huge]), "thumbnail": None}
+    assert f"| `{MESH}` | ✅ smoke pass | PNG, not sent |" in _smoke_report(
+        _smoke_files([cell]), artifact_url=ARTIFACT)
+
+
+def test_a_smoke_failure_after_a_reference_failure_is_not_inherited_from_it():
+    """A workflow that moves to smoke level while its output differs from its
+    reference. Its first smoke check fails: that is a new failure, placed by
+    the workflow's last pass, and not the old one going on. A summary without
+    the workflow's last result is read from the index by the same rule."""
+    blank = [{"file": f"{MESH}_00001_.png", "check": "blank", "text": "blank"}]
+    cell = _smoke_cell(MESH, [_png(f"{MESH}_00001_.png")], blank, prior_verdict=None,
+                       prior_commit=None)
+    before = [_entry(PREV, 1794700000, {MESH: "fail"}), _entry(FIRST, 1794690000, {MESH: "pass"})]
+    out = _smoke_report(_smoke_files([cell], before=before))
+    assert f"#### ❌ `{MESH}`: smoke check failed (new since `aaaaaaa`)" in out.split("\n")
+    assert "inherited" not in "\n".join(_block(out, MESH))
+    # After a failed smoke check it is the same failure.
+    smoke_before = [_entry(PREV, 1794700000, {MESH: {"v": "fail", "l": "smoke"}})]
+    out = _smoke_report(_smoke_files([cell], before=smoke_before))
+    assert f"#### ❌ `{MESH}`: smoke check failed (inherited)" in out.split("\n")
+    # A reference-level cell reads every earlier result, as it did.
+    prior = run_report.prior_result
+    entries = run_report.entries_of(_head(before))
+    assert prior(entries, SHA, MESH, {"level": "smoke"}) == {"verdict": "pass", "commit": FIRST}
+    assert prior(entries, SHA, MESH, {}) == {"verdict": "fail", "commit": PREV}
+    assert prior(entries, SHA, MESH, {"level": "smoke", "prior_verdict": "fail",
+                                      "prior_commit": PREV}) == {"verdict": "fail", "commit": PREV}
+
+
+def test_a_weekly_page_names_no_attempt_when_the_cron_leaves_the_commit_alone():
+    """The Tested row said "attempt 1 of 2" on a page whose only untested
+    workflows are ones the cron does not test again."""
+    mesh = _smoke_cell(MESH, [_png(f"{MESH}_00001_.png")])
+    out = _night_report([mesh, _late("wan_a"), _late("wan_b")])
+    assert not run_report.regression_skip.decide(HEAD, _summary(
+        [mesh, _late("wan_a")], lane=NIGHTLY, commit=HEAD))[0]
+    tested = next(line for line in out.split("\n") if line.startswith("| Tested |"))
+    assert "attempt" not in tested and f"[Actions run]({RUN_URL}) |" in tested
+    # One workflow that another run can test: a second attempt can follow.
+    flaky = _smoke_cell(MUSIC, verdict="infra_error", worker_status="worker_error")
+    out = _night_report([mesh, _late("wan_a"), flaky])
+    tested = next(line for line in out.split("\n") if line.startswith("| Tested |"))
+    assert "· attempt 1 of 2 ·" in tested
+
+
 def test_a_workflow_that_a_later_run_tested_again_is_marked():
     """A dispatch that names workflows at a commit the lane has a result for
     replaces their cells and records itself under `retests`. The facts of the
@@ -4319,23 +4506,49 @@ def test_the_workflows_a_deadline_did_not_reach_are_one_list():
 
 def test_an_untested_workflow_on_a_nightly_lane_says_what_the_run_did_and_what_is_left():
     """No cron tests the commit again the next minute on such a lane. The run
-    itself tries once more, and after it the reader has the command."""
+    itself tries once more when that can help and its deadline allows, the
+    page says whether it did, and after the run the reader has the command."""
     first = ("An infrastructure problem stopped this workflow. Worker status: <code>{}</code>. "
              "This is not a verdict on the commit. ")
     command = ["", "```", f"{DISPATCH} -f commit={HEAD} -f workflows={MUSIC}", "```"]
+    no_second = ("The run did not try it again at its end: its deadline did not allow a second "
+                 "job, or the run stopped before it came to that.")
 
-    def block(status, run=None):
-        cell = _smoke_cell(MUSIC, verdict="infra_error", worker_status=status, prior_commit=LAST)
+    def page(status, run=None, **cell):
+        cell = _smoke_cell(MUSIC, verdict="infra_error", worker_status=status, prior_commit=LAST,
+                           **cell)
         runs = {MUSIC: _run(MUSIC, status, outputs=[], **(run or {}))}
-        lines = _night_report([cell, _smoke_cell(MESH, [_png(f"{MESH}_00001_.png")])],
-                              runs).split("\n")
+        return _night_report([cell, _smoke_cell(MESH, [_png(f"{MESH}_00001_.png")])],
+                             runs).split("\n")
+
+    def block(status, run=None, **cell):
+        lines = page(status, run, **cell)
         at = lines.index(f"#### ⚠️ `{MUSIC}`: infra error")
         return lines[at + 2:at + 7]
 
+    # The result of the second job the run gave it (`tries` in its cell). The
+    # record of that job is a first attempt's: the page does not call it one.
+    assert block("worker_error", tries=2) == [
+        first.format("worker\\_error") + "The run tried it once more at its end, and this is the "
+        f"result of that second job. {NEXT_RUN} To test it now (needs write access to the worker "
+        "repository):", *command]
+    lines = page("worker_error", tries=2)
+    assert [line for line in lines if "the run's second job for this workflow" in line]
+    assert not [line for line in lines if "RunPod attempt" in line]
+    # Whatever the second job ended with: it was tried.
+    for status, run in (("infra_error", {"reason": "timed_out"}), ("missing_model", None)):
+        assert "The run tried it once more at its end" in block(status, run, tries=2)[0]
+    # No second job: the cell of the first stays, and the page says why there was none.
     assert block("worker_error") == [
-        first.format("worker\\_error") + "A nightly or weekly run tries such a workflow once more "
-        f"at its end, when its deadline still allows the job. {NEXT_RUN} To test it now (needs "
-        "write access to the worker repository):", *command]
+        first.format("worker\\_error") + f"{no_second} {NEXT_RUN} To test it now (needs write "
+        "access to the worker repository):", *command]
+    assert [line for line in page("worker_error") if "RunPod attempt 1" in line]
+    assert block("bad_request")[0] == (
+        first.format("bad\\_request") + "The worker refused the request as it was sent. Another "
+        f"attempt would have ended the same way, so the run did not try it again. {NEXT_RUN} To "
+        "test it now (needs write access to the worker repository):")
+    for odd in (1, "2", True, [2]):
+        assert no_second in block("worker_error", tries=odd)[0], odd
     # Its job used up its whole time: RunPod ended it, or the runner gave up on it.
     assert block("infra_error", {"reason": "timed_out"})[0] == (
         first.format("infra\\_error") + "Its job used up its whole time, so the run did not try "
@@ -4357,7 +4570,7 @@ def test_an_untested_workflow_on_a_nightly_lane_says_what_the_run_did_and_what_i
                          _smoke_cell("y && z", verdict="execution_error", prior_commit=FIRST)],
                         ranges={"y && z": {"prev": FIRST, "commits_between": 12}})
     assert [line for line in out.split("\n")
-            if line.endswith(f"when its deadline still allows the job. {NEXT_RUN}")]
+            if line.endswith(f"or the run stopped before it came to that. {NEXT_RUN}")]
     assert "12 commits since then: " in out and "new since `aaaaaaa`, 12 commits" in out
     assert "gh workflow run" not in out and "```" not in out
     # The per-commit lane keeps its words for the same cell.

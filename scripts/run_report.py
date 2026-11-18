@@ -711,6 +711,9 @@ def failing_since(fb: dict, entries: list[dict] | tuple = ()) -> str:
     several commits names that run: it cannot be pinned on one pull request.
     A chain with a `range` of its own (a nightly or weekly lane) is read from
     that: the commits since the workflow's own last result, not the run's.
+    Its count is not known when GitHub did not answer, or when a later run
+    passed inside the range: the line then names the commits since the last
+    pass, with their compare link, and no number.
     A smoke-level chain of a workflow that never passed on the lane names no
     pull request and no range: its first run failed, and nothing says a commit
     did it."""
@@ -724,8 +727,12 @@ def failing_since(fb: dict, entries: list[dict] | tuple = ()) -> str:
         who = "the workflow's first run on this lane"
     elif isinstance(own, dict) and as_int(n) != 1:
         cmp_ = compare_link(fb.get("prev_good"), fb["commit"])
-        who = (f"a run that covered {n} commits" if is_batch(n)
-               else "a run that covered an unknown number of commits")
+        if is_batch(n):
+            who = f"a run that covered {n} commits"
+        elif cmp_:
+            who = "one of the commits since its last pass"
+        else:
+            who = "a run that covered an unknown number of commits"
         who += f", {cmp_}" if cmp_ else ""
     elif is_batch(n):
         who = f"a run that covered {n} commits"
@@ -1001,13 +1008,18 @@ def prior_result(entries: list[dict], commit: str, wf: str, cell: dict,
     """{verdict, commit} of the workflow's most recent red or green result
     before `commit`. The summary carries it; one that does not (an older one,
     or one rebuilt from the runner's files) gets it from the index, by the rule
-    of index_builder.prior_verdicts."""
+    of index_builder.prior_verdicts: for a smoke-level cell a failure at
+    reference level is looked through, as it is no failed smoke check."""
     if cell.get("prior_verdict"):
         return {"verdict": cell["prior_verdict"], "commit": cell.get("prior_commit")}
+    at_smoke = cell.get("level") == "smoke"
     for e in entries:  # newest first
         if e["c"] == commit or (is_num(committed_ts) and entry_key(e)[0] > committed_ts):
             continue
-        verdict = as_dict(as_dict(e.get("w")).get(wf)).get("v")
+        earlier = as_dict(as_dict(e.get("w")).get(wf))
+        verdict = earlier.get("v")
+        if verdict == "fail" and at_smoke and earlier.get("l") != "smoke":
+            continue
         if verdict in ("pass", "fail", "execution_error"):
             return {"verdict": verdict, "commit": e["c"]}
     return {}
@@ -1432,6 +1444,15 @@ def progress_text(summary) -> str:
     return f"{done} of {plural(of, 'workflow')} {'has' if of == 1 else 'have'} a result"
 
 
+def stopped_early(d: LaneData) -> bool:
+    """A nightly or weekly run that reports from the files on the runner: it
+    did not reach its final publish (stopped, killed, or the push failed), so
+    what it has is not the lane's result of the commit. Such a run tests its
+    workflows a few at a time, and one that is stopped has started only some
+    of them: a page with every started workflow green is not a green run."""
+    return d.source == "workdir" and lanes_mod.is_long_cadence(d.lane)
+
+
 def retests_of(summary) -> dict[str, dict]:
     """Per workflow that a later run tested again at this commit (`retests`
     in the summary): the last such run. Its cell is that run's, and every
@@ -1454,7 +1475,7 @@ def title_block(d: LaneData, limits: Limits | None = None) -> list[str]:
     mark = lane_icon(d.views) if d.summary else DASH
     summary = as_dict(d.summary)
     unfinished = progress_text(summary)
-    if unfinished and mark == CHECK:
+    if (unfinished or stopped_early(d)) and mark == CHECK:
         mark = WARN  # green so far is not green: workflows are still without a result
     out = [f"## {mark} GPU regression · {lane_label(d.lane_id, d.lane)} · {title_commits(d)}"]
     if unfinished:
@@ -1478,6 +1499,9 @@ def title_block(d: LaneData, limits: Limits | None = None) -> list[str]:
         text = ("> This run stopped before it published its results. The report is rebuilt "
                 "from the files on the runner, so images and links to published files are "
                 "missing. The attached files hold the outputs.")
+        if stopped_early(d):
+            text += (" It shows the workflows that had a result when the run stopped, and no "
+                     "other.")
         if progress_text(d.earlier):
             # What a run pushed on its way, this one or an attempt before it.
             text += (" The results branch holds part of a result for this commit: "
@@ -1636,9 +1660,10 @@ def facts_block(d: LaneData) -> list[str]:
         tested.append(f"{minutes:.0f} min after the commit" if minutes < 120
                       else f"{minutes / 60:.1f} h after the commit")
     # The attempt is named where it tells something: a retry happened or can follow.
-    # "attempt 1 of 2" on a run with a verdict reads as if a second one were due.
+    # "attempt 1 of 2" on a run with a verdict reads as if a second one were due,
+    # and so it does when the only untested workflows are ones the cron leaves alone.
     attempt = run_attempt(d)
-    if (attempt or 0) > 1 or d.source == "workdir" or any(v.state == "infra" for v in d.views):
+    if (attempt or 0) > 1 or d.source == "workdir" or cron_would_retry(d):
         tested.append(attempt_text(attempt))
     url = tested_run_url(d)
     if url:
@@ -1702,10 +1727,13 @@ def facts_block(d: LaneData) -> list[str]:
     env = environment_text(summary)
     if env:
         rows.append(["Environment", env])
-    # Only a nightly or weekly run counts what it added to the results branch.
+    # Only a nightly or weekly run counts what it added to the results branch:
+    # the output files of its smoke-level workflows. The number is the lane's
+    # own run's, also on a page that a later run renders (a skipped night, a
+    # re-test), so the row does not say "this run".
     added = as_int(summary.get("published_new_bytes"))
     if added is not None and added >= 0:
-        rows.append(["New data published by this run", size_text(added)])
+        rows.append(["New smoke-level output the lane's run published", size_text(added)])
     return table(["", ""], rows)
 
 
@@ -1993,6 +2021,11 @@ def drift_block(d: LaneData, v: View, limits: Limits | None = None) -> list[str]
         out.append(f"{differs}, yet it is "
                    f"identical to the previous tested commit{' ' + sha_link(prev) if prev else ''}"
                    ", which did not fail: the reference changed in between, not the output.")
+    elif is_sha(prev) and not vs_prev and lanes_mod.is_long_cadence(d.lane):
+        # A full run of a nightly or weekly lane always moves the pointer, so
+        # the run before can be one in which this workflow wrote nothing.
+        out.append(f"{differs}. The run before, at {sha_link(prev)}, left no output of this "
+                   "workflow, so nothing tells whether the change is new in this run.")
     else:
         out.append(f"{differs}. There is no "
                    "previous run to tell whether the change is new at this commit.")
@@ -2092,7 +2125,10 @@ def failure_detail(d: LaneData, v: View, limits: Limits) -> list[str]:
         job.append(f"queued {delay:.1f} s")
     if is_num(run.get("execution_ms")):
         job.append(f"ran {run['execution_ms'] / 1000:.1f} s")
-    if is_num(run.get("attempt")):
+    if second_try(v):
+        # Each job of such a run is submitted once, so "attempt 1" would hide the first.
+        job.append("the run's second job for this workflow")
+    elif is_num(run.get("attempt")):
         job.append(f"RunPod attempt {run['attempt']:g}")
     if job:
         bullets.append(", ".join(job))
@@ -2140,20 +2176,33 @@ def cron_would_retry(d: LaneData) -> bool:
     return any(not (isinstance(s, str) and s in regression_skip.NO_RETRY) for s in statuses)
 
 
+def second_try(v: View) -> bool:
+    """Whether a workflow's result is that of the second job a nightly or
+    weekly run gave it, in the pass at its end (`"tries": 2` in its cell)."""
+    return as_int(v.cell.get("tries")) == 2
+
+
 def untested_on_a_long_lane(d: LaneData, v: View) -> list[str]:
     """What happens to a workflow that a nightly or weekly run did not test.
-    The run itself tries it once more at its end. After the run nothing does:
-    the lane's next run is a day or a week away, so the command is given."""
+    The run itself tries it once more at its end, when that can help and its
+    deadline allows: the text says whether it did. After the run nothing
+    does: the lane's next run is a day or a week away, so the command is given."""
     status = v.cell.get("worker_status")
-    if v.run.get("reason") == "timed_out":  # submit_and_poll.TIMED_OUT, in its run.json
+    if second_try(v):
+        tried = ("The run tried it once more at its end, and this is the result of that "
+                 "second job.")
+    elif v.run.get("reason") == "timed_out":  # submit_and_poll.TIMED_OUT, in its run.json
         tried = ("Its job used up its whole time, so the run did not try it again: a second "
                  "job can cost as much.")
     elif isinstance(status, str) and status in NO_RETRY_WHY:
         tried = (f"{NO_RETRY_WHY[status]}. Another attempt would have ended the same way, so "
                  "the run did not try it again.")
+    elif status == "bad_request":
+        tried = ("The worker refused the request as it was sent. Another attempt would have "
+                 "ended the same way, so the run did not try it again.")
     else:
-        tried = ("A nightly or weekly run tries such a workflow once more at its end, when "
-                 "its deadline still allows the job.")
+        tried = ("The run did not try it again at its end: its deadline did not allow a "
+                 "second job, or the run stopped before it came to that.")
     after = "Nothing tests it again before the lane's next run."
     if not (v.safe and is_sha(d.commit)):
         return [f"{tried} {after}"]
@@ -2170,18 +2219,19 @@ def error_block(d: LaneData, v: View, limits: Limits) -> list[str]:
         at = f" at {sha_link(v.prior['commit'])}" if v.prior.get("commit") else ""
         here = "in this run" if batch_size(d) else "at this commit"
         started = covers_text(d, "the error started in one of them")
+        # Its last result, in the words of its level: nothing was compared for
+        # a smoke-level workflow, so its pass is no "pass" of the legend.
+        smoke_level = v.level == "smoke"
+        result = words(("smoke_pass" if smoke_level else "pass") if prior == "pass"
+                       else "smoke_fail" if smoke_level else "changed")
         if v.origin == "new" and is_sha(v.since.get("prev")):
             # A nightly or weekly lane: the error is placed by the workflow's
             # own last result, not by the commits the run covers.
-            smoke_level = v.level == "smoke"
-            result = words(("smoke_pass" if smoke_level else "pass") if prior == "pass"
-                           else "smoke_fail" if smoke_level else "changed")
             last = f"Before this commit it last ran to the end{at} ({result})"
             out += since_lines(d, v, f"{last}, so the error is new at this commit."
                                if v.since.get("n") == 1
                                else f"{last}: the error started after that commit.")
         elif v.origin == "new" and prior in ("pass", "fail"):
-            result = words("pass" if prior == "pass" else "changed")
             out.append(f"Before this commit it last ran to the end{at} ({result}), so the "
                        f"error is new {here}.{started}")
         elif v.origin == "new":
@@ -2305,7 +2355,8 @@ def smoke_facts(f: dict) -> str:
     else:
         bits = [pixels(f), counted(f.get("frames"), "frame"), seconds,
                 counted(f.get("bytes_per_frame_mp"), "byte")
-                and f"{f['bytes_per_frame_mp']:,} bytes a frame for each megapixel"]
+                and f"{f['bytes_per_frame_mp']:,} bytes a frame for each megapixel after the "
+                    "first frame"]
     return " · ".join(b for b in bits if b)
 
 
@@ -2315,7 +2366,9 @@ def brief_facts(f: dict) -> str:
     if kind == "image":
         return pixels(f)
     if kind == "text":
-        return counted(f.get("chars"), "character")
+        # The same words as in the file list: the heading of a shown text
+        # counts every character, blanks too, and gives another number.
+        return counted(f.get("chars"), "non-blank character")
     if kind == "audio":
         rate, channels = as_int(f.get("sample_rate")), as_int(f.get("channels"))
         return " · ".join(b for b in (
@@ -2422,6 +2475,10 @@ def smoke_output_cell(d: LaneData, v: View) -> str:
     word = v.kind if v.kind in ("text", "audio") else "PNG"
     if not isinstance(name, str):
         return ""
+    if any(f["name"] == name and f.get("sent") is False for f in smoke_files(v)):
+        # The worker did not send it, so the run has no copy: not on the
+        # results branch, and not in the files attached to the run either.
+        return f"{word}, not sent"
     if name in held:
         return f"{word}, {attached_link(d) or 'not published'}"
     url = published_url(d, v, name)
@@ -2468,7 +2525,9 @@ def smoke_files_table(d: LaneData, v: View, limits: Limits) -> list[str]:
         return []
     out = table(["File", "Type", "Size", "Measured"], rows)
     if len(files) > len(rows):
-        out += ["", f"{len(files) - len(rows)} more files are listed under Output files."]
+        # Only a shortened report cuts this list, and it cuts the list under
+        # Output files to the same length: the record holds them all.
+        out += ["", f"{len(files) - len(rows)} more files are listed in run.json."]
     if any(f.get("published") is False and f.get("sent") is not False for f in files):
         out += ["", f"A file over {PUBLISH_MAX} is published only when the run before wrote "
                 "the same file. Until then it is in the files attached to the run, which "
@@ -2932,6 +2991,10 @@ def not_run_block(d: LaneData) -> list[str]:
     if left_out and progress_text(d.summary):
         out.append(f"- {label('not_run')}, on this lane, and the run had no result for them "
                    f"when it pushed this summary: {', '.join(left_out)}")
+    elif left_out and stopped_early(d):
+        out.append(f"- {label('not_run')}, on this lane, and the run left no result for them: "
+                   "it stopped before it published (a dispatch can also name only some "
+                   f"workflows): {', '.join(left_out)}")
     elif left_out and d.manifest_is_snapshot:
         out.append(f"- {label('not_run')}, on this lane but not part of this run (a dispatch "
                    f"can name only some workflows): {', '.join(left_out)}")
@@ -2953,6 +3016,11 @@ def history_block(d: LaneData, limits: Limits) -> list[str]:
     shown = d.entries[:limits.history_rows]
     if not shown:
         return out
+    # On a nightly or weekly lane a run that names one workflow (a step of a
+    # search for a commit) has a row like any other. Its result is of that
+    # workflow alone, so the row says how many of the lane's workflows it has.
+    runs = (lane_workflows(d.manifest, d.lane_id, d.lane)
+            if lanes_mod.is_long_cadence(d.lane) else None)
     rows = []
     for e in shown:
         m = as_dict(e.get("m"))
@@ -2965,8 +3033,11 @@ def history_block(d: LaneData, limits: Limits) -> list[str]:
             commit += " **this report**"
         when = utc(e.get("t")).replace(" UTC", "")
         url = entry_run_url(e)
+        result = rollup(states)
+        if runs and not runs <= set(states):
+            result += f" · {len(runs & set(states))} of {plural(len(runs), 'workflow')}"
         rows.append([commit, md(m.get("s"), 90), pr_link(m.get("pr")), md(m.get("a"), 40),
-                     f"[{when}]({url})" if url and when else when, rollup(states),
+                     f"[{when}]({url})" if url and when else when, result,
                      not_passing(states, batch=is_batch(n))])
     out += ["", *table(["Commit", "Subject", "PR", "Author", "Tested (UTC)", "Result",
                         "Not passing"], rows)]

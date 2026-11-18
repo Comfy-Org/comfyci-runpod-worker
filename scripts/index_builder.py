@@ -206,8 +206,11 @@ def entry_from_summary(summary: dict, lane: str, layout: int,
     ranges = summary.get("ranges")
     if isinstance(ranges, dict) and ranges:
         # Per workflow, the commits between its own last result and this one. A
-        # summary names them only where one run covers many commits.
-        entry["wr"] = {wf_id: {"n": r.get("commits_between"), "url": r.get("compare_url")}
+        # summary names them only where one run covers many commits. `prev` is
+        # that last result's commit: a later run can put a result inside the
+        # range, and the count is then no longer the chain's (`first_bad`).
+        entry["wr"] = {wf_id: {"n": r.get("commits_between"), "url": r.get("compare_url"),
+                               "prev": r.get("prev")}
                        for wf_id, r in ranges.items() if isinstance(r, dict)}
     return entry
 
@@ -231,13 +234,32 @@ def merge_entry(old: dict | None, new: dict) -> dict:
     return merged
 
 
+def chain_range(covered: dict, prev_good: str | None, commit: str) -> dict:
+    """The `range` of a chain that starts at `commit`, from what the run there
+    recorded for the workflow (`covered`, the entry's `wr`): the commits since
+    the workflow's last result, counted when the run was made. A later run can
+    pass inside that range (a step of a search for the commit). The chain's
+    last pass (`prev_good`) is then newer than the range's start, and the
+    count is not the chain's any more: the range is given from the chain's own
+    last pass, without a count. Nothing here can count commits: only GitHub
+    knows how many lie between two tested ones."""
+    if covered.get("prev") == prev_good:
+        return {"n": covered.get("n"), "url": covered.get("url")}
+    url = (f"https://github.com/{commit_meta.DEFAULT_REPO}/compare/{prev_good}...{commit}"
+           if prev_good else None)
+    return {"n": None, "url": url}
+
+
 def first_bad(entries: list[dict]) -> dict:
     """Per workflow: the start of the currently open failing chain, walking the
     runs in commit order. Runs without a red or green verdict (infra errors,
     missing baselines) neither start nor break a chain. A chain that a
-    smoke-level cell opened says so in `level`. A chain whose first run covered
-    several commits for this workflow (the entry's `wr`) carries that `range`:
-    its commit is then only the newest of them."""
+    smoke-level cell opened says so in `level`, and a workflow that changes
+    its level while it is red starts a new chain there: a failed smoke check
+    and an output that differs from a reference are not one failure. A chain
+    whose first run covered several commits for this workflow (the entry's
+    `wr`) carries that `range` (`chain_range`): its commit is then only the
+    newest of them."""
     chains: dict[str, dict | None] = {}
     last_good: dict[str, dict | None] = {}
     for e in sorted(entries, key=sort_key):
@@ -247,19 +269,21 @@ def first_bad(entries: list[dict]) -> dict:
                 chains[wf_id] = None
                 last_good[wf_id] = e
             elif v in RED:
-                if chains.get(wf_id) is None:
-                    chains[wf_id] = {"commit": e["c"], "run_ts": e["t"], "kind": v,
-                                     "prev_good": (last_good.get(wf_id) or {}).get("c"),
-                                     "pr": (e.get("m") or {}).get("pr"),
-                                     "author": (e.get("m") or {}).get("a"),
-                                     "golden": cell.get("g"), "runs": 0}
-                    if cell.get("l") == "smoke":
-                        chains[wf_id]["level"] = "smoke"
+                at_smoke = cell.get("l") == "smoke"
+                chain = chains.get(wf_id)
+                if chain is None or (chain.get("level") == "smoke") != at_smoke:
+                    chain = chains[wf_id] = {
+                        "commit": e["c"], "run_ts": e["t"], "kind": v,
+                        "prev_good": (last_good.get(wf_id) or {}).get("c"),
+                        "pr": (e.get("m") or {}).get("pr"),
+                        "author": (e.get("m") or {}).get("a"),
+                        "golden": cell.get("g"), "runs": 0}
+                    if at_smoke:
+                        chain["level"] = "smoke"
                     covered = (e.get("wr") or {}).get(wf_id)
                     if isinstance(covered, dict):
-                        chains[wf_id]["range"] = {"n": covered.get("n"),
-                                                  "url": covered.get("url")}
-                chains[wf_id]["runs"] += 1
+                        chain["range"] = chain_range(covered, chain["prev_good"], e["c"])
+                chain["runs"] += 1
     return {wf_id: chain for wf_id, chain in chains.items() if chain}
 
 
@@ -272,19 +296,27 @@ def smoke_workflows(entries: list[dict]) -> set[str]:
     return {wf_id for wf_id, cell in newest.items() if cell.get("l") == "smoke"}
 
 
-def prior_verdicts(entries: list[dict], commit: str, committed_ts: int | None = None) -> dict:
+def prior_verdicts(entries: list[dict], commit: str, committed_ts: int | None = None,
+                   smoke=()) -> dict:
     """Per workflow: the most recent red or green verdict before `commit` in
     commit order, as {wf_id: {"commit", "verdict"}}. Unlike the previous-run
     pointer (advanced only by fully comparable runs), this sees runs that had
     execution errors, so it tells a new execution error from a standing one.
     Entries newer than `committed_ts` (a re-test of an older commit) are
-    skipped; infra errors and missing baselines are looked through."""
+    skipped; infra errors and missing baselines are looked through.
+
+    `smoke`: the workflows that are at smoke level now. For those a failure at
+    reference level is looked through too. It says that an output differed
+    from its reference, which is no failed smoke check: a smoke failure after
+    it is not the same failure, and must not read as inherited from it."""
     out: dict[str, dict] = {}
     for e in sorted(entries, key=sort_key, reverse=True):
         if e.get("c") == commit or (committed_ts and sort_ts(e) > committed_ts):
             continue
         for wf_id, cell in (e.get("w") or {}).items():
             v = cell.get("v")
+            if v == "fail" and wf_id in smoke and cell.get("l") != "smoke":
+                continue
             if wf_id not in out and (v == "pass" or v in RED):
                 out[wf_id] = {"commit": e["c"], "verdict": v}
     return out
@@ -445,10 +477,9 @@ class IndexBuilder:
             s = self.store.read_blob_json(p)
             # A summary with `partial` is what a run that did not finish pushed
             # on its way. No publish indexed it, so a rebuild does not either:
-            # a run that died is in no history table. Unless a later run tested
-            # workflows again at that commit (`retests`): its publish did.
-            if (s and s.get("commit") and s.get("run_ts")
-                    and not ("partial" in s and not s.get("retests"))):
+            # a run that died is in no history table. A later run of named
+            # workflows at that commit does not merge into it: it replaces it.
+            if s and s.get("commit") and s.get("run_ts") and "partial" not in s:
                 summaries.append(s)
         summaries.sort(key=lambda s: (s["run_ts"], s["commit"]))
         log(f"index: {len(summaries)} summaries under {runs_prefix}")
