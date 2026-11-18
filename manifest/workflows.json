@@ -542,7 +542,7 @@
         },
         {
           "name": "hunyuan_3d_v2.1.safetensors",
-          "url": "https://huggingface.co/Comfy-Org/Hunyuan-3D-2.1/resolve/main/hunyuan_3d_v2.1.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/hunyuan3D_2.1_repackaged/resolve/main/hunyuan_3d_v2.1.safetensors",
           "directory": "checkpoints",
           "sha256": "5f21e98a6cb99b13b5e224abaee33929570fff7af2b6a0060001559a04ba9d72",
           "bytes": 7365943290
@@ -566,7 +566,7 @@
       "models": [
         {
           "name": "hunyuan3d-dit-v2-mv-turbo_fp16.safetensors",
-          "url": "https://huggingface.co/Comfy-Org/Hunyuan-3D-2.0/resolve/main/split_files/hunyuan3d-dit-v2-mv-turbo_fp16.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/hunyuan3D_2.0_repackaged/resolve/main/split_files/hunyuan3d-dit-v2-mv-turbo_fp16.safetensors",
           "directory": "checkpoints",
           "sha256": "172d7a989b99f66af760da0080d8c6f6350c72609536cf0c55b87a4afa574e45",
           "bytes": 4930777530
@@ -629,7 +629,7 @@
       "models": [
         {
           "name": "ace_step_1.5_turbo_aio.safetensors",
-          "url": "https://huggingface.co/Comfy-Org/ACE-Step-1.5/resolve/main/checkpoints/ace_step_1.5_turbo_aio.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files/resolve/main/checkpoints/ace_step_1.5_turbo_aio.safetensors",
           "directory": "checkpoints",
           "sha256": "67b0f43aa5c51c840bd0228e6a935d8ff416ec87e5df2fc0637da17a561252bc",
           "bytes": 10025478736

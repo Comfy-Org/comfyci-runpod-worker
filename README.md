@@ -132,6 +132,11 @@ this repo per template.
    ComfyUI reads them from the volume. A model that lives in a subfolder of a
    models directory keeps the subfolder in its `name`, the way the loader's
    combo lists it (`"name": "bbox/face_yolov8m.pt", "directory": "ultralytics"`).
+   For a workflow made from a template, a model's `url` is the link the
+   template gives, also where the host has renamed the repository since: the
+   old name redirects, and the sync follows it. A file that another entry
+   already has keeps that entry's `url`: the lint wants one `url` for one
+   file, and the sync downloads a file again when its `url` changes.
 
    A workflow that uses custom nodes lists its packs under `custom_nodes`
    (names from `manifest/custom_nodes.json`) and restricts itself with `lanes`

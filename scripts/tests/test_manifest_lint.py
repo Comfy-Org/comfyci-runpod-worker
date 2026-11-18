@@ -873,6 +873,12 @@ def _missing_files(wf_id: str, names: list[str]) -> list[str]:
     return [problem["text"] for problem in found["problems"]]
 
 
+def _repository(wf_id: str, name: str) -> str:
+    """The Hugging Face repository in the url of one model file of a workflow."""
+    (model,) = [m for m in WORKFLOWS[wf_id]["models"] if m["name"] == name]
+    return model["url"].removeprefix("https://huggingface.co/").split("/resolve/")[0]
+
+
 def test_the_3d_workflows_run_nightly_at_smoke_level_and_save_a_picture_and_a_mesh():
     """What the two Hunyuan3D workflows rely on, so an edit cannot drop it
     quietly. A 3D workflow is an image workflow: the picture of its mesh is
@@ -918,6 +924,15 @@ def test_the_3d_workflows_run_nightly_at_smoke_level_and_save_a_picture_and_a_me
     shared = {(m["directory"], m["name"]) for m in WORKFLOWS["z_image_turbo_t2i"]["models"]}
     own = {(m["directory"], m["name"]) for m in chain["models"]} - shared
     assert len(shared) == 3 and own == {("checkpoints", "hunyuan_3d_v2.1.safetensors")}
+    # A model's url is the link its template gives. Hugging Face has renamed
+    # both repositories since and redirects the old names. The importer
+    # writes a template's link too, so another workflow with one of these
+    # files names the url this entry has, as `test_shared_model_keys_agree`
+    # asks.
+    assert _repository(chain_id, "hunyuan_3d_v2.1.safetensors") == (
+        "Comfy-Org/hunyuan3D_2.1_repackaged")
+    assert _repository(views_id, "hunyuan3d-dit-v2-mv-turbo_fp16.safetensors") == (
+        "Comfy-Org/hunyuan3D_2.0_repackaged")
     # One node saves two pictures: the render first, then the picture the mesh
     # was made from. The first by name is the thumbnail and the output sha.
     assert wf["save_png"]["inputs"]["images"] == ["frames", 0]
@@ -975,6 +990,10 @@ def test_the_audio_workflow_runs_nightly_at_smoke_level_and_saves_thirty_seconds
     # samples the audio codes.
     assert {nid for nid, n in wf.items() if "seed" in n["inputs"]} == {"3", "94"}
     assert entry["seed_overrides"] == {"3": {"seed": 31}, "94": {"seed": 31}}
-    # One file holds the model, its text encoder and its VAE.
+    # One file holds the model, its text encoder and its VAE. Its url is the
+    # template's link, which Hugging Face redirects to the repository's new
+    # name.
     assert [m["name"] for m in entry["models"]] == ["ace_step_1.5_turbo_aio.safetensors"]
+    assert _repository(wf_id, "ace_step_1.5_turbo_aio.safetensors") == (
+        "Comfy-Org/ace_step_1.5_ComfyUI_files")
     assert entry["timeout_s"] == 900
