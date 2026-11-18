@@ -26,11 +26,17 @@ and what is wrong with it, with the limits in LIMITS:
                 finite, and a bounding box larger than 0.0001 in at least two
                 directions.
   video  .mp4   An MP4 with a video track. At least 2 frames, each side at
-                least 64 px, and not blank or still: the frames after the
-                first hold at least 1,500 bytes a frame for each megapixel.
-                The first frame is left out: it is stored whole, with the
-                encoder's headers, and alone it carries a small black clip
-                over the limit.
+                least 64 px, and not blank or still: a frame after the first
+                has at least 100 bytes plus 500 for each megapixel, on
+                average. The first frame is left out: it is stored whole,
+                with the encoder's headers, and alone it carries a small
+                black clip over the limit. The limit has a fixed part
+                because a frame that holds nothing still costs some bytes,
+                whatever its size: no limit for each megapixel alone tells a
+                small black clip from a large moving one. It rests on
+                made-up clips (test_smoke.py has the numbers) and is to be
+                checked against real model clips before the first video
+                workflow gets the smoke level.
 
 A manifest entry's `expect` can pin what its author knows: `width` and
 `height` (PNG files), `frames` (video), `seconds` (audio, within 5 % and never
@@ -72,7 +78,8 @@ LIMITS = {
               "seconds_tolerance": 0.05, "min_seconds_slack": 0.5,
               "min_bytes_per_second": 4000},
     "mesh": {"min_vertices": 100, "min_faces": 100, "min_extent": 1e-4},
-    "video": {"min_frames": 2, "min_side": 64, "min_bytes_per_frame_mp": 1500},
+    "video": {"min_frames": 2, "min_side": 64, "min_frame_bytes": 100,
+              "min_frame_bytes_per_mp": 500},
 }
 TYPES = {".png": "image", ".txt": "text", ".flac": "audio", ".glb": "mesh", ".mp4": "video"}
 # What SaveGLB writes: a mesh becomes a .glb, a 3D file keeps its own extension.
@@ -499,11 +506,15 @@ def _video_track(data: bytes) -> tuple[int, int, int, float, int]:
 def check_video(path: Path, expect: dict | None = None) -> tuple[dict, list[dict]]:
     """(facts, problems) of an MP4 file. Facts: `width`, `height`, `frames`,
     `seconds` and `bytes_per_frame_mp`, the bytes of the frames after the
-    first for each of those frames and megapixel (0 for a clip of one frame)."""
+    first for each of those frames and megapixel (0 for a clip of one frame).
+    The blank check holds the bytes of such a frame, not that number, against
+    its limit: a fixed part and a part for each megapixel."""
     lim = LIMITS["video"]
     width, height, frames, seconds, later = _video_track(Path(path).read_bytes())
     megapixels = width * height / 1e6
-    density = round(later / (frames - 1) / megapixels) if frames > 1 and megapixels else 0
+    per_frame = later / (frames - 1) if frames > 1 else 0
+    density = round(per_frame / megapixels) if megapixels else 0
+    need = lim["min_frame_bytes"] + lim["min_frame_bytes_per_mp"] * megapixels
     facts = {"width": width, "height": height, "frames": frames, "seconds": round(seconds, 3),
              "bytes_per_frame_mp": density}
     problems = []
@@ -516,10 +527,11 @@ def check_video(path: Path, expect: dict | None = None) -> tuple[dict, list[dict
     want = _expected(expect, "frames")
     if want is not None and frames != want:
         problems.append(_problem("expect", f"{_count(frames, 'frame')}, {want:g} expected"))
-    if frames > 1 and megapixels and density < lim["min_bytes_per_frame_mp"]:
-        problems.append(_problem("blank", f"blank or still: {density} bytes a frame for each "
-                                          "megapixel after the first frame, under "
-                                          f"{lim['min_bytes_per_frame_mp']}"))
+    if frames > 1 and megapixels and per_frame < need:
+        problems.append(_problem("blank", f"blank or still: {per_frame:.0f} bytes a frame after "
+                                          f"the first, and a {width}x{height} clip needs "
+                                          f"{need:.0f} ({lim['min_frame_bytes']}, plus "
+                                          f"{lim['min_frame_bytes_per_mp']} for each megapixel)"))
     return facts, problems
 
 
@@ -612,15 +624,27 @@ def _why(e: Exception) -> str:
     return (f"{type(e).__name__}: {line}" if line else type(e).__name__)[:200]
 
 
+_LEAVES = "its name leaves the outputs folder"
+
+
+def _leaves(root: Path, name: str) -> bool:
+    """Whether the name the worker gave an output file leaves the outputs
+    folder ("../x", an absolute path). A name that cannot be resolved is not
+    judged here: opening it says what is wrong with it."""
+    try:
+        return root.resolve() not in (root / name).resolve().parents
+    except (OSError, ValueError):
+        return False
+
+
 def _on_runner(root: Path | None, name: str) -> Path:
     """Where the output file `name` is on the runner. The name comes from the
     worker: one that leaves the outputs folder is not opened."""
     if root is None:
         raise Unreadable("the run has no outputs folder")
-    path = (root / name).resolve()
-    if root.resolve() not in path.parents:
-        raise Unreadable("its name leaves the outputs folder")
-    return path
+    if _leaves(root, name):
+        raise Unreadable(_LEAVES)
+    return (root / name).resolve()
 
 
 def _check_file(root: Path | None, rec: dict, expect: dict | None,
@@ -632,6 +656,10 @@ def _check_file(root: Path | None, rec: dict, expect: dict | None,
     sent = not rec.get("truncated")
     if not sent:
         entry["sent"] = False
+    if root is not None and _leaves(root, name):
+        # No file of the run, whatever its type. The runner wrote it nowhere
+        # and lists it as not sent, and it must not pass on its size for that.
+        return entry, [_problem("decode", f"could not be read: {_LEAVES}")]
     if kind is None:
         return entry, []
     if not sent:
@@ -675,9 +703,10 @@ def check_outputs(outputs_dir: Path | str | None, run_rec: dict | None, workflow
     the three lists are empty and the status is the result.
 
     A file that was not sent cannot be opened. It passes on its size alone
-    from UNSENT_MIN_BYTES, with a note. Check ids: missing, decode, size,
-    expect, blank, flat, empty, repeat, duration, silent, nonfinite, geometry,
-    frames."""
+    from UNSENT_MIN_BYTES, with a note. A file whose name leaves the outputs
+    folder is a `decode` problem, of any type, sent or not: the runner writes
+    such a file nowhere. Check ids: missing, decode, size, expect, blank,
+    flat, empty, repeat, duration, silent, nonfinite, geometry, frames."""
     smoke: dict = {"files": [], "problems": [], "notes": []}
     if status == "no_outputs":
         smoke["problems"].append({"file": None, **_problem(

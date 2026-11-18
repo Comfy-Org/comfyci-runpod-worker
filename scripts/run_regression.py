@@ -61,8 +61,8 @@ import packs
 import regression_skip
 import smoke
 import storage
-from submit_and_poll import (INFRA_STATUSES, QUEUE_DEADLINE_S, STOP_CANCEL_TIMEOUT_S, TIMED_OUT,
-                             RunPodClient, poll_deadline_s, run_workflow_job)
+from submit_and_poll import (INFRA_STATUSES, QUEUE_DEADLINE_S, TIMED_OUT, RunPodClient,
+                             poll_deadline_s, run_workflow_job)
 
 HERE = Path(__file__).resolve().parent
 # A run submits all its jobs at once, and the endpoint has fewer workers than a
@@ -90,9 +90,17 @@ NO_SECOND_TRY = regression_skip.NO_RETRY | {"bad_request"}
 # What GitHub sends a step's process when the run is cancelled or out of time:
 # an interrupt, 7.5 s later a terminate, and 2.5 s after that it kills.
 STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)
-# A stopped run cancels its jobs twice, this many seconds apart: a job whose
-# submission RunPod had not answered at the signal is known only afterwards.
+# A stopped run cancels its jobs twice. A job whose submission RunPod had not
+# answered at the signal is known only afterwards, so the second pass waits
+# until no submission is in progress: this long at least (a job that was about
+# to be submitted has been by then), and no longer than STOP_LAST_PASS_S.
 STOP_SECOND_PASS_S = 1.0
+STOP_LAST_PASS_S = 4.5
+# Seconds after the signal at which the stop is over, answered or not. GitHub's
+# second signal comes 7.5 s after the first and ends the process without a
+# word: the last line must be out before, with a second to spare.
+STOP_BUDGET_S = 6.0
+STOP_LOOK_S = 0.05  # the pause between two looks while the stop waits
 # custom_node_error: a custom-node pack the workflow requested did not import on
 # the commit under test (whether or not the workflow uses any of its nodes).
 EXEC_FAIL_STATUSES = {"execution_error", "validation_error", "timeout", "prompt_rejected",
@@ -672,31 +680,57 @@ def own_ranges(cells: list[dict], commit: str, commits_since) -> dict:
     return ranges
 
 
-def cancel_in_flight(clients: list, pause=None) -> tuple[list[str], list[str]]:
+def cancel_in_flight(clients: list, pause=None,
+                     clock=time.monotonic) -> tuple[list[str], list[str], int]:
     """Cancel every RunPod job the run's clients still have in flight: (the
-    ids RunPod cancelled, the ids whose cancel it did not take). All at once,
-    and once more STOP_SECOND_PASS_S later: a job whose submission RunPod had
-    not answered at the first pass is in no client's list until it has, and a
-    cancel that failed gets a second call. Each call has a few seconds: GitHub
-    sends its terminate 7.5 seconds after the first signal. `pause` waits
-    (default: the real wait)."""
-    cancelled: set[str] = set()
-    failed: set[str] = set()
-    for second in (False, True):
-        if second:
-            (pause or threading.Event().wait)(STOP_SECOND_PASS_S)
-        answers: list[tuple[list[str], list[str]]] = []
-        threads = [threading.Thread(target=lambda c=client: answers.append(c.cancel_live()),
-                                    daemon=True)
-                   for client in list(clients) if getattr(client, "live", None)]
-        for thread in threads:
+    ids that are no longer in flight after their cancel call, the ids that
+    still are, the submissions RunPod had not answered when the stop was over).
+
+    All at once, and once more when no submission is in progress any more: a
+    job whose submission RunPod had not answered at the first pass is in no
+    client's list until it has, and a cancel that failed gets a second call.
+    The second pass comes STOP_SECOND_PASS_S after the first at the earliest
+    and STOP_LAST_PASS_S at the latest. STOP_BUDGET_S after the first the stop
+    is over: a call RunPod has not answered by then is left, and its job is
+    named as not cancelled. What is in flight at the end is read from the
+    clients' own lists: a job leaves one when RunPod takes its cancel, and
+    also when a look at the job finds that RunPod has ended it. `pause` waits
+    and `clock` tells the time (default: the real ones)."""
+    wait = pause or threading.Event().wait
+    start = clock()
+    asked: set[str] = set()
+    threads: list[threading.Thread] = []
+
+    def in_flight(client) -> set[str]:
+        # A call that is still out can change a client's set: it is copied whole.
+        return set(getattr(client, "live", None) or ())
+
+    def cancel_pass():
+        calls = []
+        for client in list(clients):
+            live = in_flight(client)
+            if live:
+                asked.update(live)
+                calls.append(threading.Thread(target=client.cancel_live, daemon=True))
+        for thread in calls:
             thread.start()
-        for thread in threads:
-            thread.join(2 * STOP_CANCEL_TIMEOUT_S)
-        for done, not_done in list(answers):
-            cancelled.update(done)
-            failed.update(not_done)
-    return sorted(cancelled), sorted(failed - cancelled)
+        threads.extend(calls)
+
+    def calling() -> bool:
+        return any(thread.is_alive() for thread in threads)
+
+    def submitting() -> int:
+        return sum(getattr(client, "submitting", 0) for client in list(clients))
+
+    cancel_pass()
+    while clock() - start < STOP_LAST_PASS_S and (
+            clock() - start < STOP_SECOND_PASS_S or calling() or submitting()):
+        wait(STOP_LOOK_S)
+    cancel_pass()
+    while clock() - start < STOP_BUDGET_S and calling():
+        wait(STOP_LOOK_S)
+    live = set().union(*(in_flight(client) for client in list(clients)))
+    return sorted(asked - live), sorted(live), submitting()
 
 
 def stop_handler(clients: list, stopping: threading.Event, leave=os._exit):
@@ -704,19 +738,25 @@ def stop_handler(clients: list, stopping: threading.Event, leave=os._exit):
     flight would run on, billed, with nobody to read them. It cancels them and
     ends the process: there is no time to push anything, which is what the
     checkpoints are for. A job whose cancel RunPod did not take is named as
-    not cancelled. `stopping` keeps the run from starting another job in
-    between. `leave` ends the process (the code is 128 plus the signal)."""
+    not cancelled, and a submission RunPod had not answered is counted: its
+    job has no id yet. `stopping` keeps the run from starting another job in
+    between. `leave` ends the process (the code is 128 plus the signal). It
+    is over STOP_BUDGET_S after the signal at the latest (`cancel_in_flight`)."""
     def handle(signum, frame):
         again = stopping.is_set()
         stopping.set()
         try:
             if not again:  # the second signal finds the cancels sent
-                cancelled, failed = cancel_in_flight(clients)
+                cancelled, failed, unanswered = cancel_in_flight(clients)
                 line = (f"::error::stopped by signal {signum}: cancelled {len(cancelled)} RunPod "
                         f"job(s) in flight ({', '.join(cancelled) or 'none'})")
                 if failed:
                     line += (f". Not cancelled, RunPod did not take the call: {', '.join(failed)}"
                              ". They may run on to their end: cancel them by hand")
+                if unanswered:
+                    line += (f". {unanswered} submission(s) RunPod had not answered yet: each "
+                             "may have started a job that nothing cancelled. Look for them on "
+                             "the endpoint and cancel them by hand")
                 print(line, flush=True)
         except Exception:  # noqa: BLE001 - whatever goes wrong here, the process ends
             pass

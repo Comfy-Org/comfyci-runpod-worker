@@ -404,6 +404,37 @@ def test_the_client_knows_which_of_its_jobs_runpod_has_not_ended(monkeypatch):
     assert client.cancel_live() == ([sixth], []) and client.live == set()
 
 
+def test_the_client_counts_the_submissions_runpod_has_not_answered(monkeypatch):
+    """RunPod can have created a job before the runner knows its id. Such a
+    job is in no list: a run that is stopped has to know that an answer is
+    still on its way, and wait for it before its last cancel pass."""
+    api = FakeRunPod()
+    monkeypatch.setattr(submit_and_poll, "requests", api)
+    client = submit_and_poll.RunPodClient("ep", api_key="k")
+    assert client.submitting == 0
+    seen, post = [], api.post
+
+    def watched(url, **kw):
+        seen.append((client.submitting, sorted(client.live)))
+        return post(url, **kw)
+
+    monkeypatch.setattr(api, "post", watched)
+    first = client.run({})
+    # Counted while the call is out, and not after the id is in the list.
+    assert seen == [(1, [])] and (client.submitting, client.live) == (0, {first})
+    second = client.run({})
+    assert seen[1] == (1, [first]) and (client.submitting, client.live) == (0, {first, second})
+    # A submission that failed is not on its way any more, and left no job.
+    api.down = True
+    with pytest.raises(api.RequestException):
+        client.run({})
+    assert (client.submitting, client.live) == (0, {first, second})
+    # A cancel call is no submission.
+    api.down = False
+    client.cancel(first)
+    assert seen[-1] == (0, [first, second]) and client.submitting == 0
+
+
 def test_a_job_whose_status_stays_out_of_reach_is_given_up_after_five_minutes_and_cancelled(
         tmp_path, monkeypatch):
     """The runner counted 30 failed looks: 5 minutes at the usual 10 seconds,

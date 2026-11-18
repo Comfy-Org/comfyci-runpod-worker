@@ -891,7 +891,8 @@ class View:
     kind: str = output_kinds.DEFAULT_KIND      # what its output is: "image", "text", "audio"
     level: str | None = None                   # "smoke": checked, not compared with a reference
     # {prev, n}, its own range: of a new smoke failure, and of a new execution
-    # error on a nightly or weekly lane.
+    # error on a nightly or weekly lane. With `later`, the commit of a pass
+    # that a later run added between `prev` and this commit (`later_pass`).
     since: dict = field(default_factory=dict)
 
 
@@ -1070,6 +1071,20 @@ def own_range(summary: dict | None, wf: str, prior: dict) -> dict:
     return {"prev": prev, "n": as_int(rng.get("commits_between")) if same else None}
 
 
+def later_pass(entries: list[dict], fb: dict, prior: dict, since: dict) -> str | None:
+    """The last pass of a workflow's open chain (`fb`), when it is a later one
+    than the failing run recorded (`since`, with `prior` a pass): a run that
+    named the workflow passed afterwards at a commit between the two, as a
+    step of a search for the commit does. What the run counted then reaches
+    back past that pass, so its number is no longer the failure's."""
+    good, prev = fb.get("prev_good"), since.get("prev")
+    if prior.get("verdict") != "pass" or not is_sha(good) or not is_sha(prev) or good == prev:
+        return None
+    at = {e["c"]: entry_key(e) for e in entries if e["c"] in (good, prev)}
+    # An entry that is no longer in the head is older than every one that is.
+    return good if good in at and (prev not in at or at[good] > at[prev]) else None
+
+
 def not_identical(cell: dict) -> bool:
     """A comparison ran and found a difference, with the reference or the previous run."""
     return any(m and not m.get("error") and not m.get("identical")
@@ -1227,11 +1242,14 @@ def gather_lane(reader: Reader, lanes: dict, commit: str, branch: str, lane_id: 
         # execution error on a nightly or weekly lane, whose run covers many
         # commits.
         placed = origin == "new" and (state == "smoke_fail" or (long and state == "exec"))
+        since = own_range(d.summary, wf, prior) if placed else {}
+        moved = later_pass(d.entries, fb, prior, since)
+        if moved:
+            since["later"] = moved
         view = View(wf=wf, name=workflow_name(wf), safe=safe, cell=cell, run=run,
                     state=state, origin=origin,
                     prior=prior, sha=sha if isinstance(sha, str) else None, chain=fb,
-                    kind=kind, level=level,
-                    since=own_range(d.summary, wf, prior) if placed else {})
+                    kind=kind, level=level, since=since)
         d.views.append(view)
         if kind == "text" and safe and state in (*GREEN, *DRIFT, "no_ref", "smoke_fail"):
             d.texts[wf] = gather_text(d, wf, cell, run, workdir)
@@ -1392,6 +1410,16 @@ def attempts_spent(d: LaneData) -> int:
     the latest of the reported run and the start marker, which a run that died
     before it published still pushed."""
     return max(run_attempt(d) or 1, as_int(d.marker.get("attempt")) or 0, 1)
+
+
+def no_attempt(d: LaneData) -> bool:
+    """Whether the reported run is no attempt of the lane at the commit: it
+    named its workflows (`scope` in its summary), or it published nothing (its
+    summary is on the runner alone, and the results branch was read). The
+    cron counts neither, so the attempt such a summary records is that of the
+    runs before it, and what the cron does next does not depend on it."""
+    return "scope" in as_dict(d.summary) or bool(
+        d.source == "local" and not d.published and d.reader.sha)
 
 
 def attempt_text(attempt) -> str:
@@ -1662,8 +1690,10 @@ def facts_block(d: LaneData) -> list[str]:
     # The attempt is named where it tells something: a retry happened or can follow.
     # "attempt 1 of 2" on a run with a verdict reads as if a second one were due,
     # and so it does when the only untested workflows are ones the cron leaves alone.
+    # A run that is no attempt of the lane names none.
     attempt = run_attempt(d)
-    if (attempt or 0) > 1 or d.source == "workdir" or cron_would_retry(d):
+    if not no_attempt(d) and ((attempt or 0) > 1 or d.source == "workdir"
+                              or cron_would_retry(d)):
         tested.append(attempt_text(attempt))
     url = tested_run_url(d)
     if url:
@@ -2228,9 +2258,14 @@ def error_block(d: LaneData, v: View, limits: Limits) -> list[str]:
             # A nightly or weekly lane: the error is placed by the workflow's
             # own last result, not by the commits the run covers.
             last = f"Before this commit it last ran to the end{at} ({result})"
-            out += since_lines(d, v, f"{last}, so the error is new at this commit."
-                               if v.since.get("n") == 1
-                               else f"{last}: the error started after that commit.")
+            moved = passed_since(v)
+            if moved:
+                said = f"{moved} The error started after that pass."
+            elif v.since.get("n") == 1:
+                said = f"{last}, so the error is new at this commit."
+            else:
+                said = f"{last}: the error started after that commit."
+            out += since_lines(d, v, said)
         elif v.origin == "new" and prior in ("pass", "fail"):
             out.append(f"Before this commit it last ran to the end{at} ({result}), so the "
                        f"error is new {here}.{started}")
@@ -2258,6 +2293,10 @@ def error_block(d: LaneData, v: View, limits: Limits) -> list[str]:
             out.append("The lane is retired, so nothing runs it again.")
         elif lanes_mod.is_long_cadence(d.lane):
             out += untested_on_a_long_lane(d, v)
+        elif no_attempt(d):
+            # Its attempt number is that of the runs before it: nothing about a
+            # retry can be read from it.
+            out.append("This run is no attempt of the lane, so it changes nothing for the cron.")
         elif (spent < regression_skip.MAX_ATTEMPTS and isinstance(held, str)
               and held in NO_RETRY_WHY and not cron_would_retry(d)):
             out.append(f"{NO_RETRY_WHY[held]}. Another run right away would end the same way, "
@@ -2545,6 +2584,9 @@ def origin_words(v: View, batch: bool = False) -> str:
     prev, n = v.since.get("prev"), v.since.get("n")
     if not is_sha(prev):
         return "new in this run" if batch else "new at this commit"
+    if v.since.get("later"):
+        # The run's own count reaches back past a later pass: it is not said.
+        return f"new since {tick(v.since['later'][:7])}"
     if n == 1:
         return "new at this commit"
     return f"new since {tick(prev[:7])}" + (f", {n} commits" if is_batch(n) else "")
@@ -2558,18 +2600,37 @@ def dispatch_command(d: LaneData, workflows: str, commit: str = "<sha>") -> list
             f"-f cadence={d.lane['cadence']} -f commit={commit} -f workflows={workflows}", "```"]
 
 
+def passed_since(v: View) -> str:
+    """What a failure's own block says of its last pass when a later run has
+    passed between that pass and this commit (`later` in `v.since`), '' when
+    none has. The open failure names the later pass, so the block must not
+    name the older one as the last."""
+    prev, later = v.since.get("prev"), v.since.get("later")
+    if not later:
+        return ""
+    return (f"When this run was made it had last passed at {sha_link(prev)}. A later run of "
+            f"this workflow passed at {sha_link(later)}, which lies between that commit and "
+            "this one.")
+
+
 def since_lines(d: LaneData, v: View, text: str) -> list[str]:
     """`text`, which says where the workflow's last result stands, then the
     commits since that result (`v.since`, its own range) and, on a nightly or
     weekly lane, how to test one of them. Nothing more for a range of one
-    commit: the tested one."""
-    prev, n = v.since.get("prev"), v.since.get("n")
-    if n == 1:
+    commit: the tested one. After a later pass (`passed_since`) the commits
+    are those of the open chain, from that pass on, and they are not counted:
+    the run's own count reaches back past it."""
+    prev, n, later = v.since.get("prev"), v.since.get("n"), v.since.get("later")
+    if later:
+        cmp_ = compare_link(later, v.chain.get("commit")) or compare_link(later, d.commit)
+        text += f" The commits since that pass: {cmp_}." if cmp_ else ""
+    elif n == 1:
         return [text]
-    cmp_ = compare_link(prev, d.commit)
-    if cmp_:
-        text += (f" {n} commits since then: {cmp_}." if is_batch(n)
-                 else f" The commits since then: {cmp_}.")
+    else:
+        cmp_ = compare_link(prev, d.commit)
+        if cmp_:
+            text += (f" {n} commits since then: {cmp_}." if is_batch(n)
+                     else f" The commits since then: {cmp_}.")
     if not (lanes_mod.is_long_cadence(d.lane) and v.safe):
         return [text]
     return [text + " To test one commit of that range (needs write access to the worker "
@@ -2591,7 +2652,7 @@ def smoke_origin_lines(d: LaneData, v: View) -> list[str]:
     if not is_sha(prev):
         return []
     if v.prior.get("verdict") == "pass":
-        text = f"It last passed at {sha_link(prev)}."
+        text = passed_since(v) or f"It last passed at {sha_link(prev)}."
     else:
         text = (f"Its last result before this one, at {sha_link(prev)}, was an execution "
                 "error: it finishes now, and its output does not pass.")
@@ -3019,6 +3080,8 @@ def history_block(d: LaneData, limits: Limits) -> list[str]:
     # On a nightly or weekly lane a run that names one workflow (a step of a
     # search for a commit) has a row like any other. Its result is of that
     # workflow alone, so the row says how many of the lane's workflows it has.
+    # Only the row of such a run (`named` in its index entry): a full run
+    # from before a workflow joined the lane lacks one too, and is no step.
     runs = (lane_workflows(d.manifest, d.lane_id, d.lane)
             if lanes_mod.is_long_cadence(d.lane) else None)
     rows = []
@@ -3034,7 +3097,7 @@ def history_block(d: LaneData, limits: Limits) -> list[str]:
         when = utc(e.get("t")).replace(" UTC", "")
         url = entry_run_url(e)
         result = rollup(states)
-        if runs and not runs <= set(states):
+        if runs and e.get("named") is True:
             result += f" · {len(runs & set(states))} of {plural(len(runs), 'workflow')}"
         rows.append([commit, md(m.get("s"), 90), pr_link(m.get("pr")), md(m.get("a"), 40),
                      f"[{when}]({url})" if url and when else when, result,

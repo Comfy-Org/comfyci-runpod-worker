@@ -637,8 +637,8 @@ def test_a_black_clip_fails(tmp_path):
     entry, problems = _one(tmp_path, "wf_video_00001_.mp4", FIX / "video_black_5f.mp4")
     assert (entry["frames"], entry["bytes_per_frame_mp"]) == (5, 352)
     assert problems == [{"file": "wf_video_00001_.mp4", "check": "blank", "text": (
-        "blank or still: 352 bytes a frame for each megapixel after the first frame, "
-        "under 1500")}]
+        "blank or still: 79 bytes a frame after the first, and a 640x352 clip needs 213 "
+        "(100, plus 500 for each megapixel)")}]
 
 
 def _frame_sizes(data: bytes, sizes=None, fixed: int = 0) -> bytes:
@@ -683,6 +683,120 @@ def test_the_first_frame_does_not_carry_a_blank_or_a_still_clip(tmp_path):
     for size, checks in ((500, []), (100, ["blank"])):
         entry, problems = _one(tmp_path, "a.mp4", _frame_sizes(clip, fixed=size))
         assert entry["bytes_per_frame_mp"] == round(size / 0.22528) and _ids(problems) == checks
+
+
+# What the blank limit of a video rests on: `bytes_per_frame_mp` of 267 made-up
+# clips, written as ComfyUI writes a clip (PyAV 14.2.0, h264, crf 18, yuv420p,
+# MP4). (what the clip shows, whether it is blank or still, its frame counts,
+# {(width, height): the number at each frame count}). "moving pattern" and
+# "stripes, no noise" are one pattern, measured twice at three sizes.
+MEASURED_CLIPS = (
+    ("black", True, (5, 9, 17, 25, 49, 81), {
+        (256, 256): (931, 988, 1017, 1026, 1038, 1042),
+        (384, 256): (621, 659, 678, 684, 692, 695),
+        (512, 288): (414, 441, 456, 461, 468, 471),
+        (512, 512): (488, 515, 528, 533, 541, 545),
+        (640, 352): (356, 377, 390, 394, 398, 399),
+        (832, 480): (295, 312, 320, 323, 327, 328),
+        (1280, 720): (209, 219, 225, 226, 229, 230)}),
+    ("one grey", True, (5, 9, 17, 25, 49, 81), {
+        (256, 256): (931, 988, 1017, 1026, 1038, 1042),
+        (384, 256): (621, 659, 678, 684, 692, 695),
+        (512, 288): (414, 441, 456, 461, 468, 471),
+        (512, 512): (488, 515, 528, 533, 541, 545),
+        (640, 352): (356, 377, 390, 394, 398, 399),
+        (832, 480): (295, 312, 320, 323, 327, 328),
+        (1280, 720): (209, 219, 225, 226, 229, 230)}),
+    ("one frame of noise repeated", True, (5, 9, 17, 25, 49, 81), {
+        (256, 256): (839, 900, 923, 931, 941, 945),
+        (384, 256): (559, 601, 619, 623, 633, 638),
+        (512, 288): (373, 403, 416, 420, 427, 429),
+        (512, 512): (439, 469, 484, 490, 498, 501),
+        (640, 352): (323, 344, 356, 360, 364, 366),
+        (832, 480): (271, 289, 296, 298, 301, 302),
+        (1280, 720): (190, 203, 207, 209, 212, 213)}),
+    ("moving pattern", False, (5, 9, 17, 25, 49, 81), {
+        (256, 256): (5520, 6077, 6213, 6320, 6543, 6747),
+        (384, 256): (4204, 4754, 4961, 5176, 5373, 5492),
+        (512, 288): (3454, 4090, 4314, 4481, 4485, 4489),
+        (512, 512): (3129, 3516, 3593, 3640, 3876, 3950),
+        (640, 352): (2507, 3023, 3028, 3253, 3366, 3666),
+        (832, 480): (1934, 2065, 2471, 2503, 2381, 2538),
+        (1280, 720): (1409, 1613, 1774, 1932, 1852, 1956)}),
+    ("stripes, no noise", False, (5, 17, 81), {
+        (512, 288): (3454, 4314, 4489), (832, 480): (1934, 2471, 2538),
+        (1280, 720): (1409, 1774, 1956)}),
+    ("stripes, noise sigma 1", False, (5, 17, 81), {
+        (512, 288): (3650, 3888, 3732), (832, 480): (2570, 2659, 2733),
+        (1280, 720): (1926, 2230, 2344)}),
+    ("stripes, noise sigma 2", False, (5, 17, 81), {
+        (512, 288): (5291, 4998, 4843), (832, 480): (4131, 4075, 3967),
+        (1280, 720): (3290, 3641, 3609)}),
+    ("stripes, noise sigma 4", False, (5, 17, 81), {
+        (512, 288): (25360, 28411, 34062), (832, 480): (24773, 27053, 32917),
+        (1280, 720): (24176, 26792, 32912)}),
+    ("soft scene, pan 1 px a frame", False, (5, 17, 81), {
+        (512, 288): (2667, 1577, 1618), (832, 480): (1591, 1374, 1269),
+        (1280, 720): (1962, 1396, 1162)}),
+    ("soft scene, pan 4 px a frame", False, (5, 17, 81), {
+        (512, 288): (1851, 1989, 1360), (832, 480): (1747, 1534, 1046),
+        (1280, 720): (1493, 1359, 1054)}),
+    ("soft scene, pan 4 px, noise sigma 1", False, (5, 17, 81), {
+        (512, 288): (3045, 3117, 2819), (832, 480): (3437, 3777, 3518),
+        (1280, 720): (3985, 4143, 3627)}),
+    ("soft scene, pan 4 px, noise sigma 2", False, (5, 17, 81), {
+        (512, 288): (5790, 6736, 6273), (832, 480): (6329, 6484, 7235),
+        (1280, 720): (6609, 8031, 9466)}),
+    ("soft scene, still, noise sigma 2", False, (5, 17, 81), {
+        (512, 288): (3374, 4685, 5565), (832, 480): (4444, 5888, 6620),
+        (1280, 720): (5687, 8593, 9756)}),
+    ("soft scene, still, noise sigma 4", False, (5, 17, 81), {
+        (512, 288): (85517, 81490, 78723), (832, 480): (91590, 87519, 95643),
+        (1280, 720): (105642, 112365, 106066)}),
+    ("soft scene that gets brighter", False, (5, 17, 81), {
+        (512, 288): (4483, 9588, 8389), (832, 480): (4572, 8703, 8509),
+        (1280, 720): (9271, 9053, 7409)}),
+)
+
+
+def test_the_blank_limit_of_a_video_has_a_fixed_part_for_each_frame(tmp_path):
+    """A frame that holds nothing still costs some bytes, whatever its size:
+    a black clip at 256x256 measures up to 1,042 bytes a frame for each
+    megapixel, and a soft picture that pans at 832x480 measures 1,046. The
+    limit was 1,500 for each megapixel. No such limit tells the two apart, and
+    that one failed 11 of the 141 moving clips of MEASURED_CLIPS as "blank or
+    still". Held against 100 bytes plus 500 for each megapixel, every blank or
+    still clip has at most 0.62 of what a frame needs and every moving one at
+    least 1.15.
+
+    The clips are made up: flat colours, one noise picture repeated, moving
+    stripes, a blurred noise picture that pans or gets brighter, with and
+    without grain. No clip of a model is among them. The limit is to be
+    checked against real ones before the first video workflow gets the smoke
+    level (the README says so too)."""
+    lim = smoke.LIMITS["video"]
+    clip = (FIX / "video_5f.mp4").read_bytes()
+    shares, per_megapixel = {True: [], False: []}, {True: [], False: []}
+    for kind, still, counts, sizes in MEASURED_CLIPS:
+        for (width, height), numbers in sizes.items():
+            megapixels = width * height / 1e6
+            need = lim["min_frame_bytes"] + lim["min_frame_bytes_per_mp"] * megapixels
+            assert len(numbers) == len(counts), kind
+            for number in numbers:
+                shares[still].append(number * megapixels / need)
+                per_megapixel[still].append(number)
+                # The check itself, on a clip of this size whose frames after
+                # the first have these bytes.
+                data = _frame_sizes(_picture_size(clip, width, height),
+                                    fixed=round(number * megapixels))
+                entry, problems = _one(tmp_path, "a.mp4", data)
+                assert abs(entry["bytes_per_frame_mp"] - number) <= 8, (kind, width, number)
+                assert _ids(problems) == (["blank"] if still else []), (kind, width, number)
+    assert (len(shares[True]), len(shares[False])) == (126, 141)
+    assert 0.61 < max(shares[True]) < 0.62 and 1.15 < min(shares[False]) < 1.16
+    # What a limit for each megapixel alone has to tell apart, and what 1,500 did.
+    assert (max(per_megapixel[True]), min(per_megapixel[False])) == (1042, 1046)
+    assert sum(number < 1500 for number in per_megapixel[False]) == 11
 
 
 def test_a_sound_track_cannot_hide_a_blank_picture(tmp_path):
@@ -815,6 +929,39 @@ def test_a_name_that_leaves_the_outputs_folder_is_not_opened(tmp_path):
         assert res["problems"] == [{"file": name, "check": "decode", "text": (
             "could not be read: its name leaves the outputs folder")}]
         assert list(res["files"][0]) == ["name", "type", "bytes", "sha256"]
+
+
+def test_a_name_that_leaves_the_outputs_folder_never_passes_on_its_size(tmp_path):
+    """The runner writes such a file nowhere and lists it as not sent
+    (submit_and_poll._write_outputs). A file that was not sent passes on its
+    size, so the run passed, with a note that blamed the worker's size limit.
+    Only a worker that was tampered with names such a file."""
+    out, rec = _run(tmp_path, {"wf_00001_.png": _png(_picture())})
+    good = rec["outputs"][0]
+    said = {"check": "decode", "text": "could not be read: its name leaves the outputs folder"}
+    for name, kind in (("../escape.png", "image"), ("../../escape2.png", "image"),
+                       (str(tmp_path / "abs_escape.png"), "image"), ("sub/../../x.flac", "audio"),
+                       ("../run.json", None), ("..", None), (".", None)):
+        rec["outputs"] = [good, {"filename": name, "bytes": 5000, "sha256": "ab" * 32,
+                                 "truncated": True}]
+        res = smoke.check_outputs(out, rec, {}, None, "ok")
+        assert res["problems"] == [{"file": name, **said}], name
+        assert res["notes"] == []
+        # Listed with what the worker said of it, and as a file that is not there.
+        assert {"name": name, "type": kind, "bytes": 5000, "sha256": "ab" * 32,
+                "sent": False} in res["files"]
+        assert run_regression.smoke_verdict("ok", res["problems"]) == "fail"
+    # A name that stays inside is what it was: checked by its size when it was not sent.
+    for name in ("sub/wf_00002_.png", "sub/../wf_00002_.png", "./wf_00002_.png",
+                 str(out / "wf_00002_.png")):
+        rec["outputs"] = [good, {"filename": name, "bytes": 5000, "sha256": "ab" * 32,
+                                 "truncated": True}]
+        res = smoke.check_outputs(out, rec, {}, None, "ok")
+        assert res["problems"] == [] and len(res["notes"]) == 1, name
+    # Without an outputs folder nothing can be judged: the size rule stays.
+    assert smoke.check_outputs(None, {"outputs": [{"filename": "../x.png", "bytes": 5000,
+                                                   "truncated": True}]}, {}, None, "ok")[
+        "problems"] == []
 
 
 # -- which files a run must have written ---------------------------------------------
@@ -1174,8 +1321,8 @@ def test_the_limits_and_types_are_the_documented_ones():
                                      "min_seconds": 1.0, "seconds_tolerance": 0.05,
                                      "min_seconds_slack": 0.5, "min_bytes_per_second": 4000}
     assert smoke.LIMITS["mesh"] == {"min_vertices": 100, "min_faces": 100, "min_extent": 1e-4}
-    assert smoke.LIMITS["video"] == {"min_frames": 2, "min_side": 64,
-                                     "min_bytes_per_frame_mp": 1500}
+    assert smoke.LIMITS["video"] == {"min_frames": 2, "min_side": 64, "min_frame_bytes": 100,
+                                     "min_frame_bytes_per_mp": 500}
     assert smoke.TYPES == {".png": "image", ".txt": "text", ".flac": "audio", ".glb": "mesh",
                            ".mp4": "video"}
     assert set(smoke.SINKS) == {"SaveImage", "SaveText", "SaveAudio", "SaveAudioAdvanced",

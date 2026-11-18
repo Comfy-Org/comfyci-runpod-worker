@@ -821,6 +821,57 @@ def test_the_cron_retries_a_commit_for_a_workflow_that_another_run_can_test():
     assert ONCE_MORE in _report(_tree(_summary([old])))
 
 
+NO_ATTEMPT = "This run is no attempt of the lane, so it changes nothing for the cron."
+
+
+def test_a_run_that_is_no_attempt_of_the_lane_says_nothing_about_the_crons_retry(tmp_path):
+    """A run that names its workflows, or that publishes nothing, is not
+    counted: its summary records the attempts of the runs before it. The page
+    read that number as its own. A first look with `publish` off at a commit
+    with the lane's clean result said "attempt 1 of 2: the cron tests the
+    commit once more", and the cron skips that commit."""
+    untested = _cell("sdxl_t2i", "infra_error", worker_status="worker_error")
+    first = ("An infrastructure problem stopped this workflow. Worker status: "
+             "<code>worker\\_error</code>. This is not a verdict on the commit. ")
+
+    def tested(out):
+        return next(line for line in out.split("\n") if line.startswith("| Tested |"))
+
+    # Publish off: the summary is on the runner alone, with the attempts so far.
+    published = _summary([_cell("flux_dev_t2i")])
+    files = _tree(published, extra={f"{P}/runs/master/{SHA}/attempt.json": {"attempt": 1}})
+    look = _summary([untested], run_ts=published["run_ts"] + 900, scope=["sdxl_t2i"])
+    for local in (look, {k: v for k, v in look.items() if k != "scope"}):
+        path, workdir = _write_local(tmp_path / str("scope" in local), local, {
+            "sdxl_t2i": _run("sdxl_t2i", "worker_error", outputs=[])})
+        out = _report(files, summary_file=path, workdir=workdir)
+        assert first + NO_ATTEMPT in out
+        assert "attempt" not in tested(out) and "attempt 1 of 2" not in out
+        assert "the cron tests the commit once more" not in out
+        assert "the cron does not retry it" not in out
+    # What the cron does at that commit: nothing.
+    assert not run_report.regression_skip.decide(SHA, published, None, False, {"attempt": 1})[0]
+    # A run of named workflows that published (`scope`): no attempt either,
+    # whatever number its summary carries.
+    for attempt in (1, 2, 3):
+        out = _report(_tree(_summary([untested], scope=["sdxl_t2i"], attempt=attempt)))
+        assert first + NO_ATTEMPT in out and "attempt" not in tested(out), attempt
+    held = _cell("sdxl_t2i", "infra_error", worker_status="missing_model")
+    out = _report(_tree(_summary([held], scope=["sdxl_t2i"])))
+    assert NO_ATTEMPT in out and "so the cron does not test the commit again" not in out
+    # The lane's own run keeps its words, and so does a run whose summary may
+    # well be published: the results branch could not be read.
+    assert ONCE_MORE in _report(_tree(_summary([untested])))
+    path, workdir = _write_local(tmp_path / "unread", _summary([untested]))
+    out = run_report.lane_report(run_report.Reader(), LANES, SHA, "master", LANE,
+                                 summary_file=path, workdir=workdir)
+    assert ONCE_MORE in out and NO_ATTEMPT not in out and "· attempt 1 of 2" in tested(out)
+    # A nightly or weekly lane has no cron that retries: its words do not change.
+    night = _smoke_cell(MUSIC, verdict="infra_error", worker_status="worker_error")
+    out = _night_report([night], scope=[MUSIC])
+    assert NEXT_RUN in out and NO_ATTEMPT not in out and "attempt" not in tested(out)
+
+
 def test_no_reference_says_how_to_make_one():
     cells = [_cell("flux_dev_t2i"), _cell("new_wf", "no_baseline")]
     out = _report(_tree(_summary(cells)))
@@ -1814,7 +1865,9 @@ def test_local_summary_and_run_records_win_over_the_published_copy(tmp_path):
     path, workdir = _write_local(tmp_path, local, {"flux_dev_t2i": _run(
         "flux_dev_t2i", "timeout", runpod_job_id="local-job", error={"timeout_s": 600})})
     out = _report(_tree(published), summary_file=path, workdir=workdir)
-    assert "1 of 1 workflow failed" in out and "attempt 2 of 2" in out
+    assert "1 of 1 workflow failed" in out
+    # A run that published nothing is no attempt of the lane: the page names none.
+    assert "attempt 2" not in out
     assert "RunPod job <code>local-job</code>" in out
     # The branch holds an older summary of the commit: say that this run's is missing.
     assert ("> The results branch does not hold this run's summary. The report is built from "
@@ -4405,6 +4458,122 @@ def test_a_smoke_failure_after_a_reference_failure_is_not_inherited_from_it():
     assert prior(entries, SHA, MESH, {}) == {"verdict": "fail", "commit": PREV}
     assert prior(entries, SHA, MESH, {"level": "smoke", "prior_verdict": "fail",
                                       "prior_commit": PREV}) == {"verdict": "fail", "commit": PREV}
+
+
+def test_only_the_row_of_a_run_that_named_its_workflows_says_how_many_it_has():
+    """The history row of a step of a search says "1 of N workflows", so a
+    green step does not read as a green night. The row took that from a count
+    against the lane's workflows of today: once a workflow had joined the
+    lane, every older full run read "1 of 2 workflows" too, the words of a
+    run that named one workflow."""
+    mesh = _smoke_cell(MESH, [_png(f"{MESH}_00001_.png")])
+    music = _smoke_cell(MUSIC, [_flac()], output_kind="audio")
+    manifest = {"workflows": {wf: {"enabled": True, "level": "smoke", "cadence": "nightly"}
+                              for wf in (MESH, MUSIC)}}
+    # A full run from when the lane ran one workflow, and a step after it.
+    full = _entry(FIRST, 1794530000, {MESH: {"v": "pass", "l": "smoke"}}, pr=17699)
+    step = {**_entry(LAST, 1794616236, {MESH: {"v": "pass", "l": "smoke"}}, pr=17700),
+            "named": True}
+
+    def results(before, **kw):
+        files = _night_files([mesh, music], before=before)
+        out = _smoke_report(files, lane=NIGHTLY, commit=HEAD, **kw)
+        rows = [line for line in _section(out, "Recent commits on this lane")
+                if line.startswith("| [`")]
+        return [row.split(" | ")[-2] for row in rows]
+
+    assert results([step, full], manifest=manifest) == [
+        "✅ smoke pass", "✅ smoke pass · 1 of 2 workflows", "✅ smoke pass"]
+    # The mark alone says so: not a count, and nothing but `true`.
+    for odd in (None, False, "yes", 1):
+        assert results([{**step, "named": odd}, full], manifest=manifest)[1] == "✅ smoke pass"
+    whole = {**step, "w": {MESH: {"v": "pass", "l": "smoke"}, MUSIC: {"v": "pass", "l": "smoke"}}}
+    assert results([whole, full], manifest=manifest)[1] == "✅ smoke pass · 2 of 2 workflows"
+    # The lane's workflows are not known: no row counts against them.
+    assert results([step, full]) == ["✅ smoke pass"] * 3
+    # A per-commit lane keeps its rows, whatever an entry says.
+    cells = [_cell("flux_dev_t2i"), _cell("sdxl_t2i")]
+    head = _head([_entry(SHA, 1794702636, {"flux_dev_t2i": "pass", "sdxl_t2i": "pass"}, run=4242),
+                  {**_entry(PREV, 1794700000, {"flux_dev_t2i": "pass"}, pr=17753), "named": True}])
+    out = _report(_tree(_summary(cells), head=head), manifest=MANIFEST)
+    assert "workflows |" not in "\n".join(_section(out, "Recent commits on this lane"))
+
+
+def test_a_failure_whose_chain_has_a_later_pass_does_not_name_the_older_one_as_its_last():
+    """A step of a search for the commit: a run that names the workflow at a
+    commit inside the range, and it passes. The open failure then names that
+    pass as the last. The page of the failing run still said "It last passed
+    at e9afbcc. 7 commits since then" in the failure's own block: one page,
+    two last passes, and a count that reached back past the newer one."""
+    mid = "7c1d2e3" + "5" * 33
+    last, step = (f"[`{sha[:7]}`]({COMFY}/commit/{sha})" for sha in (LAST, mid))
+    chain = {"commit": HEAD, "run_ts": 1794702636, "kind": "fail", "prev_good": mid, "pr": 17754,
+             "author": "kijai", "golden": None, "runs": 1, "level": "smoke",
+             "range": {"n": None, "url": f"{COMFY}/compare/{mid}...{HEAD}"}}
+    before = [{**_entry(mid, 1794650000, {MUSIC: {"v": "pass", "l": "smoke"}}, pr=17720),
+               "named": True},
+              _entry(LAST, 1794616236, {MUSIC: {"v": "pass", "l": "smoke"}}, pr=17700)]
+    ranges = {MUSIC: {"prev": LAST, "commits_between": 7, "compare_url": "u"}}
+    out = _nightly([_silent(prior_commit=LAST)], before=before, first_bad={MUSIC: chain},
+                   ranges=ranges)
+    block = _block(out, MUSIC)
+    assert block[0] == f"#### ❌ `{MUSIC}`: smoke check failed (new since `7c1d2e3`)"
+    assert block[-4:] == [
+        f"When this run was made it had last passed at {last}. A later run of this workflow "
+        f"passed at {step}, which lies between that commit and this one. The commits since that "
+        f"pass: [compare]({COMFY}/compare/{mid}...{HEAD}). To test one commit of that range "
+        "(needs write access to the worker repository):",
+        "```", f"{DISPATCH} -f commit=<sha> -f workflows={MUSIC}", "```"]
+    assert "7 commits" not in "\n".join(block) and "It last passed at" not in out
+    # The line of the open failure names the same last pass and the same commits.
+    assert (f"- `{MUSIC}`: smoke check failed, failing since [`05e878f`]({COMFY}/commit/{HEAD}) "
+            f"(one of the commits since its last pass, [compare]({COMFY}/compare/{mid}...{HEAD})"
+            f"), first seen 2026-11-15, 1 run, last passed at {step}") in out.split("\n")
+
+    def own_block(first_bad, cells=None, entries=before):
+        cells = cells or [_silent(prior_commit=LAST)]
+        return _block(_nightly(cells, before=entries, first_bad=first_bad, ranges=ranges), MUSIC)
+
+    # A failing step between the two starts the chain: its commits are the ones to look at.
+    failed = "8d2e3f4" + "6" * 33
+    block = own_block({MUSIC: {**chain, "commit": failed}})
+    assert f"The commits since that pass: [compare]({COMFY}/compare/{mid}...{failed})." in block[-4]
+    # Nothing passed since: the block says what it said, with the run's count.
+    was = (f"It last passed at {last}. 7 commits since then: [compare]({COMFY}/compare/{LAST}..."
+           f"{HEAD}). To test one commit")
+    for same in ({MUSIC: {**chain, "prev_good": LAST}}, {}):
+        block = own_block(same)
+        assert block[0].endswith("(new since `e9afbcc`, 7 commits)") and was in block[-4], same
+    # A last pass that is not a later one (it stands before the run's, or
+    # nowhere in the history) is not taken for one.
+    for odd in (FIRST, "9" * 40, None, 7):
+        entries = [*before, _entry(FIRST, 1794530000, {MUSIC: {"v": "pass", "l": "smoke"}})]
+        assert was in own_block({MUSIC: {**chain, "prev_good": odd}}, entries=entries)[-4], odd
+    # Its last result was no pass: that sentence stays as it is.
+    block = own_block({MUSIC: chain}, [_silent(prior_commit=LAST, prior_verdict="execution_error")])
+    assert block[-4].startswith(f"Its last result before this one, at {last}, was an execution")
+    assert "7 commits since then" in block[-4]
+
+    # An execution error on such a lane is placed the same way.
+    broken = _smoke_cell(MUSIC, verdict="execution_error", prior_commit=LAST)
+    block = own_block({MUSIC: {**chain, "kind": "execution_error"}}, [broken])
+    assert block[0] == f"#### ❌ `{MUSIC}`: execution error (new since `7c1d2e3`)"
+    assert block[1] == (
+        "The workflow did not finish on this commit. Worker status: <code>timeout</code>. When "
+        f"this run was made it had last passed at {last}. A later run of this workflow passed at "
+        f"{step}, which lies between that commit and this one. The error started after that "
+        f"pass. The commits since that pass: [compare]({COMFY}/compare/{mid}...{HEAD}). To test "
+        "one commit of that range (needs write access to the worker repository):")
+    # The per-commit lane reads the same, without the command of the other lanes.
+    files = _smoke_files([_silent()], before=[{**before[0], "t": 1794701000}, _entry(
+        PREV, 1794600000, {MUSIC: {"v": "pass", "l": "smoke"}}, pr=17753)],
+        first_bad={MUSIC: {**chain, "commit": SHA}},
+        tested_range={"prev": PREV, "commits_between": 3})
+    block = _block(_smoke_report(files), MUSIC)
+    assert block[0].endswith("(new since `7c1d2e3`)") and block[-1] == (
+        f"When this run was made it had last passed at [`bbbbbbb`]({COMFY}/commit/{PREV}). A "
+        f"later run of this workflow passed at {step}, which lies between that commit and this "
+        f"one. The commits since that pass: [compare]({COMFY}/compare/{mid}...{SHA}).")
 
 
 def test_a_weekly_page_names_no_attempt_when_the_cron_leaves_the_commit_alone():

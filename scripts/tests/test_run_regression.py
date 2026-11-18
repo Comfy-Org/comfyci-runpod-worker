@@ -3033,6 +3033,25 @@ class LiveClient:
         return cancelled, [job_id for job_id in job_ids if job_id in self.refuse]
 
 
+class StopClock:
+    """The time of a stop. Every look takes its seconds, and a moment of real
+    time in which a cancel call that is answered at once is over. `at` maps a
+    time to what happens then."""
+
+    def __init__(self, at=None):
+        self.now, self.at = 0.0, dict(at or {})
+
+    def __call__(self):
+        return self.now
+
+    def pause(self, seconds):
+        import time
+        time.sleep(0.002)
+        self.now = round(self.now + seconds, 6)
+        for when in sorted(t for t in self.at if t <= self.now):
+            self.at.pop(when)()
+
+
 def test_a_stopped_run_cancels_once_more_a_second_later(monkeypatch, capsys):
     """A job whose submission RunPod had not answered when the signal came is
     in no client's list yet: it was created, ran on to its end and was billed,
@@ -3040,31 +3059,36 @@ def test_a_stopped_run_cancels_once_more_a_second_later(monkeypatch, capsys):
     not take was reported as done too."""
     import signal
     import threading
-    import submit_and_poll
-    # The submission that was on its way is answered between the two passes.
-    log, pauses = [], []
+    # A job that gets its id between the two passes: the second one cancels it.
+    log = []
     late = LiveClient(log=log)
-
-    def answered(seconds):
-        pauses.append(seconds)
-        late.live.add("job-2")
-
+    clock = StopClock({0.5: lambda: late.live.add("job-2")})
     clients = [LiveClient("job-1", log=log), late]
-    assert run_regression.cancel_in_flight(clients, pause=answered) == (["job-1", "job-2"], [])
-    assert pauses == [run_regression.STOP_SECOND_PASS_S] and log == ["job-1", "job-2"]
-    # The first pass and the pause are over before GitHub's terminate, 7.5 s after the signal.
-    assert (2 * submit_and_poll.STOP_CANCEL_TIMEOUT_S + run_regression.STOP_SECOND_PASS_S) < 7.5
+    assert run_regression.cancel_in_flight(clients, pause=clock.pause, clock=clock) == (
+        ["job-1", "job-2"], [], 0)
+    assert log == ["job-1", "job-2"]
+    # No client said that a submission was on its way, so the second pass came
+    # a second after the first, as it always did.
+    second = run_regression.STOP_SECOND_PASS_S
+    assert second == 1.0 and second <= clock.now < second + 1.0
 
     # A cancel that failed gets the second call. A job that is still not
     # cancelled then is named as such, and not among the cancelled ones.
     log.clear()
     clients = [LiveClient("job-1", "job-2", log=log, refuse=["job-2"]),
                LiveClient("job-3", log=log, refuse=["job-3"])]
-    assert run_regression.cancel_in_flight(
-        clients, pause=lambda seconds: clients[1].refuse.clear()) == (
-        ["job-1", "job-3"], ["job-2"])
+    clock = StopClock({0.5: lambda: clients[1].refuse.clear()})
+    assert run_regression.cancel_in_flight(clients, pause=clock.pause, clock=clock) == (
+        ["job-1", "job-3"], ["job-2"], 0)
     assert sorted(log) == ["job-1", "job-2", "job-2", "job-3", "job-3"]
     assert [sorted(client.live) for client in clients] == [["job-2"], []]
+    # RunPod did not answer the cancel call, and a look at the job then finds
+    # it ended: it is in flight no more, so it is not named as one that may
+    # run on. The line used to say so of jobs RunPod had cancelled.
+    ended = LiveClient("job-1", refuse=["job-1"])
+    clock = StopClock({0.5: lambda: ended.live.discard("job-1")})
+    assert run_regression.cancel_in_flight([ended], pause=clock.pause, clock=clock) == (
+        ["job-1"], [], 0)
     monkeypatch.setattr(run_regression, "STOP_SECOND_PASS_S", 0)
     left = []
     clients = [LiveClient("job-1", "job-2", refuse=["job-2"]),
@@ -3075,6 +3099,83 @@ def test_a_stopped_run_cancels_once_more_a_second_later(monkeypatch, capsys):
         "(job-1). Not cancelled, RunPod did not take the call: job-2, job-3. They may run on to "
         "their end: cancel them by hand\n")
     assert left == [128 + signal.SIGINT]
+
+
+class SilentClient(LiveClient):
+    """A client whose cancel calls RunPod takes and does not answer."""
+
+    def __init__(self, *job_ids):
+        import threading
+        super().__init__(*job_ids)
+        self.release = threading.Event()
+
+    def cancel_live(self, timeout=None):
+        self.log.extend(sorted(self.live))
+        self.release.wait(60)
+        return [], sorted(self.live)
+
+
+def test_a_stopped_run_waits_for_the_submissions_runpod_has_not_answered(monkeypatch, capsys):
+    """The second pass came one second after the first, whatever was still on
+    its way. A submission that RunPod answered three seconds after the signal
+    left its job running, billed, and the log said "cancelled 0 RunPod job(s)
+    in flight (none)"."""
+    import signal
+    import threading
+    import time
+    last, budget = run_regression.STOP_LAST_PASS_S, run_regression.STOP_BUDGET_S
+    # GitHub's second signal comes 7.5 s after the first, and ends the process
+    # without a word. The stop is over a second before the 7 s it has at most.
+    assert run_regression.STOP_SECOND_PASS_S < last < budget <= 6.0
+    # RunPod answers the submission 3 s after the signal: the job is cancelled.
+    log = []
+    late = LiveClient(log=log)
+    late.submitting = 1
+
+    def answered():
+        late.live.add("job-2")
+        late.submitting = 0
+
+    clock = StopClock({3.0: answered})
+    assert run_regression.cancel_in_flight([LiveClient("job-1", log=log), late],
+                                           pause=clock.pause, clock=clock) == (
+        ["job-1", "job-2"], [], 0)
+    assert log == ["job-1", "job-2"] and 3.0 <= clock.now < 4.0
+    # It never answers: the last pass is not put off for ever, and the
+    # submission is counted. Its job, if there is one, has no id to name.
+    never = LiveClient()
+    never.submitting = 1
+    clock = StopClock()
+    assert run_regression.cancel_in_flight([LiveClient("job-1"), never, None],
+                                           pause=clock.pause, clock=clock) == (["job-1"], [], 1)
+    assert last <= clock.now < last + 1.0
+    # RunPod takes the cancel calls and stays silent: the stop does not wait
+    # for them past its limit, and the job is named as not cancelled.
+    silent = SilentClient("job-1")
+    clock = StopClock()
+    assert run_regression.cancel_in_flight([silent, LiveClient("job-2")], pause=clock.pause,
+                                           clock=clock) == (["job-2"], ["job-1"], 0)
+    assert budget <= clock.now < budget + 0.1 and silent.log == ["job-1", "job-1"]
+    silent.release.set()
+
+    # The same with the real clock, on limits a test can wait for. Both waits
+    # are held, and the last line says what is left.
+    for name, seconds in (("STOP_SECOND_PASS_S", 0.05), ("STOP_LAST_PASS_S", 0.3),
+                          ("STOP_BUDGET_S", 0.6), ("STOP_LOOK_S", 0.01)):
+        monkeypatch.setattr(run_regression, name, seconds)
+    silent, never, left = SilentClient("job-1"), LiveClient("job-3"), []
+    never.submitting = 2
+    start = time.monotonic()
+    run_regression.stop_handler([silent, never], threading.Event(), leave=left.append)(
+        signal.SIGINT, None)
+    assert 0.6 <= time.monotonic() - start < 1.6 and left == [128 + signal.SIGINT]
+    silent.release.set()
+    assert capsys.readouterr().out == (
+        f"::error::stopped by signal {int(signal.SIGINT)}: cancelled 1 RunPod job(s) in flight "
+        "(job-3). Not cancelled, RunPod did not take the call: job-1. They may run on to "
+        "their end: cancel them by hand. 2 submission(s) RunPod had not answered yet: each may "
+        "have started a job that nothing cancelled. Look for them on the endpoint and cancel "
+        "them by hand\n")
 
 
 def test_a_stop_signal_cancels_the_jobs_in_flight_and_ends_the_process(monkeypatch, capsys):
@@ -3103,7 +3204,7 @@ def test_a_stop_signal_cancels_the_jobs_in_flight_and_ends_the_process(monkeypat
     run_regression.stop_handler([], threading.Event(), leave=left.append)(signal.SIGTERM, None)
     assert left[-1] == 143 and "cancelled 0 RunPod job(s) in flight (none)" in (
         capsys.readouterr().out)
-    assert run_regression.cancel_in_flight([None, LiveClient()]) == ([], [])
+    assert run_regression.cancel_in_flight([None, LiveClient()]) == ([], [], 0)
     assert run_regression.STOP_SIGNALS == (signal.SIGINT, signal.SIGTERM)
 
 

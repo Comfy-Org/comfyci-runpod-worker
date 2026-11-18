@@ -148,6 +148,10 @@ this repo per template.
    workflows: those that run on a lane which reads its models from the volume
    (`lanes.volume_workflows`). A workflow that runs only on lanes with
    `"model_storage": "job"`, or on lanes without a volume, is in neither.
+   Nothing fetches models for a job yet, so the lint also fails for an
+   enabled workflow of that kind that loads a file which is not among the
+   volume's: "its models are on no volume". One whose files another workflow
+   puts on the volume passes. The rule goes when jobs can fetch models.
 
    **A text workflow** (a model that answers in text, like the
    `llm_qwen38_27b_t2t` entry) is written by hand: the importer only writes
@@ -320,7 +324,11 @@ the commit:
   tick tests the commit with every workflow, and that run replaces the
   summary. A second named run at the same commit adds its cells, and its ids
   to `scope`. What a nightly or weekly run that did not finish pushed on its
-  way (`partial`) is no result either: the named run replaces it.
+  way (`partial`) is no result either: the named run replaces it. In the run
+  index the entry of such a summary carries `"named": true`. It has its row
+  in the history, and it is not the lane's latest run: `latest`, in the
+  index head and in `index/lanes.json`, stays at the newest entry without
+  the mark, also when the named run is at a newer commit.
 - A result: only the cells of the named workflows are replaced. Every other
   cell stays as it is, byte for byte, and so do `run_ts`, `run_url`, `run_id`,
   `attempt`, `env`, `commit_meta` and `tested_range`, which describe the
@@ -386,7 +394,17 @@ another extension is listed and not checked.
 | text | `.txt` | it is UTF-8 and at most 1 MiB, has at least 8 characters that are not blank and 4 different ones, and with 20 words or more no word is more than half of them (a word has a letter or a digit: the bars of a table do not count) |
 | audio | `.flac` | it is a FLAC file that ends with a whole frame, 8,000 to 192,000 Hz, 1 to 8 channels, at least 1.0 s long, and not silent: at least 4,000 bytes of audio frames a second (FLAC stores silence in a few bytes) |
 | mesh | `.glb` | it is a GLB whose first primitive has positions, with at least 100 vertices and 100 faces, every position finite, and a bounding box larger than 0.0001 in at least two directions |
-| video | `.mp4` | it is an MP4 with a video track, at least 2 frames, each side at least 64 px, and not blank or still: the frames after the first hold at least 1,500 bytes a frame for each megapixel (the first frame is stored whole, and alone it carries a small black clip over that) |
+| video | `.mp4` | it is an MP4 with a video track, at least 2 frames, each side at least 64 px, and not blank or still: a frame after the first has at least 100 bytes plus 500 for each megapixel, on average (the first frame is stored whole, and alone it carries a small black clip over that) |
+
+The video limit is not settled. It rests on 267 made-up clips: flat colours,
+one picture repeated, moving stripes, a blurred picture that pans or gets
+brighter, with and without grain (`MEASURED_CLIPS` in
+`scripts/tests/test_smoke.py` has every number). Each blank or still one has
+at most 0.62 of what a frame needs, and each moving one at least 1.15. No
+clip of a model is among them, and no manifest entry has a video at smoke
+level today. Before the first video workflow gets the smoke level, measure
+real clips of its model (`bytes_per_frame_mp` in `smoke.files`, times the
+megapixels) and check the limit against them.
 
 - **A file that cannot be read fails.** A cut or broken file is a problem of
   that file (check `decode`), never a crash of the run.
@@ -405,6 +423,10 @@ another extension is listed and not checked.
   cannot be opened. It passes on its size alone from 1,024 bytes, and the
   report says "not sent, checked by size only". A text is held to its 1 MiB
   all the same: that needs no look at the file.
+- **A file whose name leaves the outputs folder** (`../x.png`, an absolute
+  path) fails, whatever its type: "could not be read: its name leaves the
+  outputs folder" (check `decode`). The runner writes such a file nowhere,
+  and it never passes on its size. Only a broken worker names one.
 - **New, inherited or first run.** Nothing is compared, so a failed check is
   placed by the workflow's own last verdict (`prior_verdict`): new when it
   passed before, inherited when it already failed, and "first run" when it
@@ -915,13 +937,17 @@ dollars, and the lane's next run is a day or a week away. So
 - **A stopped run.** When a run is cancelled or reaches its time limit, GitHub
   sends the step an interrupt, 7.5 seconds later a terminate, and 2.5 seconds
   after that it kills the step. On the first signal the script cancels its
-  RunPod jobs in flight, and once more a second later: a job whose submission
-  RunPod had not answered yet is known only then. Then it ends. Its last line
-  names the jobs it cancelled, and apart from them any job whose cancel
-  RunPod did not take: that one may run on, and is to be cancelled by hand.
-  There is no time to push anything then, which is what the checkpoints are
-  for. The step starts the script with `exec`, so the script itself is the
-  process that gets the signals.
+  RunPod jobs in flight, and once more when RunPod has answered every
+  submission that was on its way: a job is known only then. That second pass
+  comes after 1 second at the earliest and after 4.5 at the latest. After 6
+  seconds the script ends, whatever RunPod has answered, so its last line is
+  out before the terminate. The line names the jobs it cancelled, and apart
+  from them any job whose cancel RunPod did not take: that one may run on,
+  and is to be cancelled by hand. It also counts the submissions RunPod had
+  not answered: each may have started a job that has no id yet, to be looked
+  for on the endpoint. There is no time to push anything then, which is what
+  the checkpoints are for. The step starts the script with `exec`, so the
+  script itself is the process that gets the signals.
 - **Who broke it.** A nightly run covers about 6 commits and a weekly run
   about 44, and a workflow's last result is not always in the run before. So
   the summary says, for each red workflow, how many commits lie between the
@@ -945,8 +971,14 @@ dollars, and the lane's next run is a day or a week away. So
   commits the chain's start counted then reach back past that pass, so the
   open failure names "one of the commits since its last pass" with their
   compare link and no number: only GitHub can count them, and a passing step
-  does not ask. In the lane's history each step's row says "1 of N
-  workflows", so a green step does not read as a green week.
+  does not ask. So after a search that ends on a pass the reader gets a
+  compare link without a count, also when one commit is left. The page of the
+  failing run follows the chain from then on. Its block says "When this run
+  was made it had last passed at `e9afbcc`", names the commit of the later
+  pass, and gives the compare link from that pass without the count the run
+  recorded. In the lane's history each step's row says "1 of N workflows", so
+  a green step does not read as a green week. The row of a full run never
+  says so, also not one from before a workflow joined the lane.
 
 The keys a lane may add. Every one is optional, and `validate` checks its
 type:
@@ -963,7 +995,7 @@ type:
 | `network_volumes` | `runpod_endpoints.py create`, `status`, `validate`, the manifest lint | the network volumes the workers mount (default `endpoint_defaults.network_volumes`: the model volume). `[]` means no volume: the lane must then say `"model_storage": "job"`, and a workflow that runs only on such lanes does not count against the volume's size |
 | `timeout_minutes` | `lanes.py cadence`, `nightly-weekly.yml`, `run_regression.py`, `validate` | the time limit of the lane's job (default 360, GitHub's own). On a nightly or weekly lane the run's own deadline is this minus 25, so `validate` asks for more than 25 there, and for every enabled workflow of the lane that its `timeout_s` plus 2,100 seconds is under that deadline |
 | `max_in_flight` | `run_regression.py` | how many jobs a run has on the endpoint at once (default: all of them, as on the per-commit lanes). `--max-in-flight` overrides it |
-| `model_storage` | the manifest lint, `sync_models.py` | `"job"`: the lane's models are not on the network volume. The model sync leaves out a workflow that runs only on such lanes, and the lint does not count it against the volume's size. Nothing fetches models for a job yet, so such a workflow ends as `missing_model` unless another lane's workflow puts the same files on the volume. Default `"volume"` |
+| `model_storage` | the manifest lint, `sync_models.py` | `"job"`: the lane's models are not on the network volume. The model sync leaves out a workflow that runs only on such lanes, and the lint does not count it against the volume's size. Nothing fetches models for a job yet, so such a workflow ends as `missing_model` unless another lane's workflow puts the same files on the volume. The lint fails for an enabled one that does not find every file there. Default `"volume"` |
 
 None of them is published: the run index copies a fixed list of lane keys.
 
@@ -1126,7 +1158,8 @@ leaves out keeps the default. A weekly lane for models that need more than
   `"model_storage": "job"`, the lint does not count a workflow that runs only
   on such lanes against the volume, and the model sync does not download its
   models. Nothing fetches models for a job yet, so such a lane cannot run
-  until that exists.
+  until that exists, and the lint fails for an enabled workflow with models
+  of its own on it.
 - **Another volume.** A lane may name a volume in its own data center
   instead. The model sync fills only the volume of the primary lane's
   endpoint, so the models have to be copied there by hand, and the lint
@@ -1630,7 +1663,15 @@ workflow has. A reference-level image workflow's files do not change at all:
   at its end.
 - `attempt` counts the lane's runs of the commit. A run that names its
   workflows, or that publishes nothing, is none: its summary records the
-  attempts counted so far (at least 1).
+  attempts counted so far (at least 1). The report of such a run names no
+  attempt, and says of an untested workflow on a per-commit lane that the run
+  changes nothing for the cron.
+- An index entry with `"named": true` (after `s`, before `wr`) is that of a
+  summary with `scope`: a run that named its workflows at a commit without a
+  full result. No other entry has the key, and the lane's full run of the
+  commit takes it away. `latest`, in the index head and in the lane's
+  `branches` in `index/lanes.json`, is the newest entry without it, and null
+  when the lane has no such entry.
 
 ## Notes
 

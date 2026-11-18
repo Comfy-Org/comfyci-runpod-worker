@@ -8,7 +8,8 @@ A nightly or weekly run asks for one attempt (`attempts=1`) and decides itself,
 at its end, what to try again. Its failure record then says when the job used
 up its whole time (`"reason": "timed_out"`), which is not worth a second try.
 The client remembers the jobs it has submitted that RunPod has not ended, so a
-run that is stopped can cancel them.
+run that is stopped can cancel them. It also counts the submissions RunPod
+has not answered yet: such a job has no id to cancel it by.
 """
 from __future__ import annotations
 
@@ -33,7 +34,8 @@ ENDED_STATES = ("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT")
 TIMED_OUT = "timed_out"
 # Seconds one cancel call may wait for RunPod, to connect and again to be
 # answered, when a stopped run cancels its jobs: GitHub kills the step 10
-# seconds after its first signal.
+# seconds after its first signal. The run itself waits for no call past its
+# own limit for the stop (run_regression.STOP_BUDGET_S).
 STOP_CANCEL_TIMEOUT_S = 3
 # How long the status of a job may be out of reach before the runner gives the
 # job up: failed looks in a row, times the pause between two looks. At the
@@ -75,13 +77,21 @@ class RunPodClient:
         # The jobs this client submitted that RunPod has not ended, as far as
         # the client was told: what a run that is stopped has to cancel.
         self.live: set[str] = set()
+        # Submissions RunPod has not answered yet. Each can be a job already,
+        # one that is in no list: a run that is stopped waits for the answer
+        # before its last cancel pass.
+        self.submitting = 0
 
     def run(self, job_input: dict) -> str:
-        r = requests.post(f"{self.base}/run", headers=self.headers,
-                          json={"input": job_input}, timeout=60)
-        r.raise_for_status()
-        job_id = r.json()["id"]
-        self.live.add(job_id)
+        self.submitting += 1  # before the call, and until the id is in `live`
+        try:
+            r = requests.post(f"{self.base}/run", headers=self.headers,
+                              json={"input": job_input}, timeout=60)
+            r.raise_for_status()
+            job_id = r.json()["id"]
+            self.live.add(job_id)
+        finally:
+            self.submitting -= 1
         return job_id
 
     def status(self, job_id: str) -> dict:

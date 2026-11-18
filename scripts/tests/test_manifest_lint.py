@@ -249,6 +249,31 @@ def _volume_problems(manifest: dict, lanes: dict) -> list[str]:
             f"{largest} with {files[largest] / 1e9:.1f} GB"]
 
 
+def _off_volume_problems(manifest: dict, lanes: dict) -> list[str]:
+    """The enabled workflows that would end as `missing_model` in every run:
+    no lane that reads its models from the volume runs them, so the model sync
+    leaves their models out (`lanes.volume_workflows`), and they load a file
+    that is not among the volume's. A workflow whose files another workflow
+    puts on the volume is fine. One that no lane runs has no job at all, and
+    `lanes.validate` names it.
+
+    This rule goes when jobs can fetch models: `"model_storage": "job"` then
+    is a way to run a workflow, and no longer a way to lose its models."""
+    synced = set(lanes_mod.volume_workflows(manifest, lanes))
+    files = _volume_files(manifest, lanes)
+    problems = []
+    for wf_id, entry in manifest["workflows"].items():
+        if not entry.get("enabled") or wf_id in synced:
+            continue
+        if not lanes_mod.lanes_for_workflow(entry, lanes):
+            continue
+        missing = sorted({f"{m['directory']}/{m['name']}" for m in entry["models"]} - set(files))
+        if missing:
+            problems.append(f"{wf_id}: its models are on no volume: nothing fetches models for a "
+                            f"job yet ({', '.join(missing)})")
+    return problems
+
+
 def test_model_folders_parsed():
     assert {"checkpoints", "diffusion_models", "text_encoders", "vae", "loras",
             "ultralytics", "ultralytics_bbox"} <= _model_folders()
@@ -502,6 +527,54 @@ def test_a_workflow_only_on_lanes_without_the_volume_does_not_count_against_it()
     none = lanes(network_volumes=["vol"])
     none["endpoint_defaults"]["network_volumes"] = []
     assert _volume_files(manifest, none) == {"vae/huge": 60 * 10**9}
+
+
+def test_every_enabled_workflow_finds_its_models_on_the_volume():
+    assert _off_volume_problems(MANIFEST, LANES) == []
+
+
+def test_a_workflow_whose_models_reach_no_volume_is_a_problem():
+    """`validate` and the size rule accepted an enabled weekly workflow with
+    models of its own while the weekly lane says `"model_storage": "job"`.
+    The model sync left its models out, and nothing fetches models for a job
+    yet: it would have ended as missing_model in every weekly run, with one
+    line in the log of the sync job as the only word about it before."""
+    def model(name, size=10**9):
+        return {"name": name, "url": "https://x/" + name, "directory": "vae", "bytes": size}
+
+    lanes = {"endpoint_defaults": {"volume_gb": 200, "network_volumes": ["vol"]}, "lanes": {
+        "main": {"cadence": "per-commit"}, "old": {"cadence": "retired"},
+        "week": {"cadence": "weekly", "model_storage": "job"}}}
+    manifest = {"workflows": {
+        "a": {"enabled": True, "models": [model("shared"), model("a")]},
+        "big": {"enabled": True, "cadence": "weekly",
+                "models": [model("shared"), model("big", 100 * 10**9), model("big2")]}}}
+    assert "vae/big" not in _volume_files(manifest, lanes)
+    assert _volume_problems(manifest, lanes) == []
+    assert _off_volume_problems(manifest, lanes) == [
+        "big: its models are on no volume: nothing fetches models for a job yet "
+        "(vae/big, vae/big2)"]
+
+    def problems(**entry):
+        changed = {"workflows": {**manifest["workflows"],
+                                 "big": {**manifest["workflows"]["big"], **entry}}}
+        return _off_volume_problems(changed, lanes)
+
+    # Every file it loads is on the volume for another workflow, or it loads none.
+    assert problems(models=[model("shared"), model("a")]) == []
+    assert problems(models=[]) == []
+    # Switched off, it has no job. So has one that only a retired lane runs,
+    # which `validate` names.
+    assert problems(enabled=False) == []
+    assert problems(cadence="per-commit", lanes=["old"]) == []
+    # On a lane that reads its models from the volume, the sync sends them.
+    assert problems(cadence="per-commit") == []
+    volume = {**lanes, "lanes": {**lanes["lanes"], "week": {"cadence": "weekly"}}}
+    assert _off_volume_problems(manifest, volume) == []
+    # A lane without any volume is no better than one that leaves it unread.
+    apart = {**lanes, "lanes": {**lanes["lanes"], "week": {
+        "cadence": "weekly", "model_storage": "job", "network_volumes": []}}}
+    assert len(_off_volume_problems(manifest, apart)) == 1
 
 
 def test_builtin_loader_values_need_no_model_entry():

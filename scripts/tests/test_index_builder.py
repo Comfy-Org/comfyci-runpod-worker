@@ -600,6 +600,75 @@ def test_merge_entry_takes_the_ranges_of_the_newest_summary():
                                                  {"c": "x", "t": 2, "w": {}})
 
 
+def test_the_entry_of_a_run_that_named_its_workflows_says_so():
+    """A summary with `scope` is that of a run that named its workflows, at a
+    commit without a full result. Nothing in its entry said so: a reader could
+    only count its workflows against the lane's of today, and then took an
+    older full run for such a run once the lane had gained a workflow."""
+    full = _smoke_summary("b", 2, "fail", prior="pass")
+    plain = index_builder.entry_from_summary(full, LANE, 1)
+    assert "named" not in plain
+    entry = index_builder.entry_from_summary({**full, "scope": ["mesh"]}, LANE, 1)
+    # The entry of a full run with one key more, at its end.
+    assert list(entry) == [*plain, "named"] and entry["named"] is True
+    assert {k: v for k, v in entry.items() if k != "named"} == plain
+    # The ranges keep the last place.
+    ranges = {"mesh": {"prev": "p" * 40, "commits_between": 7, "compare_url": "u7"}}
+    both = index_builder.entry_from_summary({**full, "scope": ["mesh"], "ranges": ranges}, LANE, 1)
+    assert list(both)[-2:] == ["named", "wr"]
+    # Any `scope` marks it, also an empty one. A re-test that was merged into
+    # the lane's full result has none (`retests`), and is the lane's run still.
+    assert index_builder.entry_from_summary({**full, "scope": []}, LANE, 1)["named"] is True
+    retested = {**full, "retests": [{"run_ts": 3, "workflows": ["mesh"]}]}
+    assert "named" not in index_builder.entry_from_summary(retested, LANE, 1)
+    # A second run of named workflows at the commit keeps the mark. The lane's
+    # full run of the commit takes it away.
+    assert index_builder.merge_entry(entry, {**entry, "t": 3})["named"] is True
+    merged = index_builder.merge_entry(entry, {**plain, "t": 4})
+    assert "named" not in merged and merged["t"] == 4
+
+
+def test_a_run_that_named_its_workflows_is_not_the_lanes_latest_run(tmp_path):
+    """Pages read `latest`, in the head and in lanes.json, as the lane's run.
+    A run of one workflow at the newest commit took that place: a lane with a
+    failing workflow read as green, from a run that had not tested it."""
+    remote = make_remote(tmp_path, _seed_files())
+    store = storage.GitHubStorage("local/test", "results", tmp_path / "wt", remote_url=str(remote))
+    builder = index_builder.IndexBuilder(store, "master", LANE, 1, LANES)
+    builder.backfill(with_meta=False, log=lambda *_: None)
+
+    def latest():
+        lanes = store.download_json(builder.lanes_path())["lanes"][LANE]["branches"]["master"]
+        head = store.download_json(builder.head_path())
+        assert lanes["count"] == head["count"] == len(head["entries"])
+        return head["latest"], lanes["latest"], head["entries"][0]["c"]
+
+    full = {"commit": "ccc", "run_ts": 1725235200, "overall": "fail"}
+    assert latest() == (full, full, "ccc")
+
+    # One workflow alone, at a newer commit, and it passes.
+    named = _summary("ddd", 1725321600, "pass", IDENT, None, None, sha="s3")
+    builder.upsert([index_builder.entry_from_summary({**named, "scope": ["flux"]}, LANE, 1)])
+    assert latest() == (full, full, "ddd")
+    head = store.download_json(builder.head_path())
+    assert head["entries"][0]["named"] is True and head["count"] == 4
+    # Its row is in the history, and its pass closes the workflow's chain.
+    assert head["first_bad"] == {}
+    # The lane's own run of that commit takes the place, and the mark goes.
+    builder.upsert([index_builder.entry_from_summary({**named, "run_ts": 1725325200}, LANE, 1)])
+    newest = {"commit": "ddd", "run_ts": 1725325200, "overall": "pass"}
+    assert latest() == (newest, newest, "ddd")
+    assert "named" not in store.download_json(builder.head_path())["entries"][0]
+
+    # A lane that only ever had such runs has no latest run.
+    other = index_builder.IndexBuilder(store, "next", LANE, 1, LANES)
+    other.upsert([index_builder.entry_from_summary({**named, "scope": ["flux"]}, LANE, 1)])
+    assert store.download_json(other.head_path())["latest"] is None
+    assert store.download_json(other.head_path())["count"] == 1
+    assert store.download_json(other.lanes_path())["lanes"][LANE]["branches"]["next"] == {
+        "latest": None, "count": 1, "shards": ["2024-09"]}
+
+
 def _reference_then_smoke(tmp_path):
     """A workflow that passed at reference level (reference sha m1), then moved
     to smoke level. Its reference files are still on the results branch."""

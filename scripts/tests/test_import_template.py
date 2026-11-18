@@ -230,7 +230,8 @@ def test_a_loaded_file_the_template_never_links_is_refused():
 def test_an_entry_looked_up_on_the_network_carries_the_sha_and_the_size(monkeypatch):
     """The lint asks every models entry for its bytes, so a new entry has them."""
     prompt = {"1": {"class_type": "UNETLoader", "inputs": {"unet_name": "u.safetensors"}}}
-    template = {"nodes": [{"type": "Note", "widgets_values": ["[u](https://h.test/u.safetensors)"]}]}
+    template = {"nodes": [{"type": "Note", "widgets_values": [
+        "[u](https://h.test/u.safetensors)"]}]}
     monkeypatch.setattr(import_template, "published_sha256", lambda url: "a" * 64)
     monkeypatch.setattr(import_template, "published_bytes", lambda url: 1234)
     assert build_entry("my_wf", prompt, template, skip_sha=False)["models"] == [

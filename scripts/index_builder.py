@@ -15,6 +15,11 @@ the currently blessed golden (accepted drift) is not reported. A cell of a
 smoke-level workflow carries `"l": "smoke"`: it has no golden, so its chain
 is never accepted drift, and the lane lists no golden for it.
 
+The entry of a run that named its workflows at a commit without a full result
+carries `"named": true`. It has a row like any other, and it is not the lane's
+run: `latest`, in the head and in lanes.json, is the newest entry without the
+mark.
+
 The builder is registered as a derived writer: it is re-run on the freshest
 tree whenever a publish has to retry, so concurrent lanes never lose each
 other's entries.
@@ -203,6 +208,11 @@ def entry_from_summary(summary: dict, lane: str, layout: int,
         "w": w,
         "s": summary.get("suites") or None,
     }
+    if "scope" in summary:
+        # The run named its workflows, and the commit has no result of a full
+        # run: the entry holds those workflows alone, and is not the lane's
+        # run of the commit. Only such an entry has the key.
+        entry["named"] = True
     ranges = summary.get("ranges")
     if isinstance(ranges, dict) and ranges:
         # Per workflow, the commits between its own last result and this one. A
@@ -224,6 +234,8 @@ def merge_entry(old: dict | None, new: dict) -> dict:
     merged.update({k: v for k, v in new.items() if k != "w" and v is not None})
     if "wr" not in new:
         merged.pop("wr", None)  # the ranges are those of the newest summary, or none
+    if "named" not in new:
+        merged.pop("named", None)  # a full run came after the run of named workflows
     if new.get("run") is not None:
         merged["run_repo"] = new.get("run_repo")  # the id and its repository name one run
     merged["t"] = max(old.get("t", 0), new.get("t", 0))
@@ -392,8 +404,12 @@ class IndexBuilder:
     def _write_aggregates(self, shards: dict[str, list[dict]], workflows=()):
         union = sorted((e for es in shards.values() for e in es), key=sort_key, reverse=True)
         months = sorted(m for m, es in shards.items() if es)
-        latest = union[0] if union else None
-        wf_ids = set((latest or {}).get("w", {})) | set(workflows)
+        newest = union[0] if union else None
+        # The lane's latest run, as the head and lanes.json name it. A run
+        # that named its workflows (`named`) is not the lane's run of its
+        # commit: the newest entry without the mark stays the latest.
+        latest = next((e for e in union if not e.get("named")), None)
+        wf_ids = set((newest or {}).get("w", {})) | set(workflows)
         # A smoke-level workflow has no reference. One that had a reference
         # before keeps those files on the results branch, so they are not
         # looked up: a smoke failure with the old reference's sha is no
@@ -403,7 +419,7 @@ class IndexBuilder:
         chains = first_bad(union)
         for wf_id in list(chains):
             # Accepted drift: the latest output is the blessed golden itself.
-            cell = (latest or {}).get("w", {}).get(wf_id) or {}
+            cell = (newest or {}).get("w", {}).get(wf_id) or {}
             golden = goldens.get(wf_id) or {}
             if cell.get("sha") and golden.get("sha") == cell["sha"]:
                 del chains[wf_id]
