@@ -414,6 +414,62 @@
       "timeout_s": null,
       "thresholds": null,
       "golden_tag": null
+    },
+    "llm_qwen38_27b_t2t": {
+      "enabled": false,
+      "output_kind": "text",
+      "workflow_path": "manifest/workflows/llm_qwen38_27b_t2t_api.json",
+      "seed_overrides": {},
+      "models": [
+        {
+          "name": "qwen3.8_27b_w4a8.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/Qwen3.8-27B/resolve/main/text_encoders/qwen3.8_27b_w4a8.safetensors",
+          "directory": "text_encoders",
+          "sha256": "9b992a8f6142e6bad602ecc7bab1a56580483c2651824dd0ae64c346e08f60a5"
+        },
+        {
+          "name": "man_with_red_hat.png",
+          "url": "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/ff15d86b5a143d546ed632826d72501298563ddb/input/man_with_red_hat.png",
+          "directory": "input",
+          "sha256": "5eca57bc432702a9993b73ecbae126eb369cda25e91cdfe58cb2f29bfcb0e013"
+        }
+      ],
+      "comfy_flags": [
+        "--input-directory",
+        "/runpod-volume/models/input"
+      ],
+      "gpu_type": null,
+      "timeout_s": 900,
+      "thresholds": null,
+      "golden_tag": null
+    },
+    "llm_qwen3vl_4b_it2t": {
+      "enabled": false,
+      "output_kind": "text",
+      "workflow_path": "manifest/workflows/llm_qwen3vl_4b_it2t_api.json",
+      "seed_overrides": {},
+      "models": [
+        {
+          "name": "qwen3vl_4b_fp8_scaled.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
+          "directory": "text_encoders",
+          "sha256": "54bd5144df0bbc25dd6ccadfcb826b521445a1b06ae5a42570bdd2974ca87094"
+        },
+        {
+          "name": "example.png",
+          "url": "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/ff15d86b5a143d546ed632826d72501298563ddb/input/example.png",
+          "directory": "input",
+          "sha256": "a8e215ad32a0052fc4190e9c5863428d5ee35cd98b246243842ba8360511b7c4"
+        }
+      ],
+      "comfy_flags": [
+        "--input-directory",
+        "/runpod-volume/models/input"
+      ],
+      "gpu_type": null,
+      "timeout_s": null,
+      "thresholds": null,
+      "golden_tag": null
     }
   }
 }

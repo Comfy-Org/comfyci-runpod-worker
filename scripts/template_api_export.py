@@ -13,7 +13,8 @@ What it reproduces, rule by rule:
 * subgraph instances flatten to ``<instance id>:<inner id>`` keys, with the
   instance's promoted widget values overriding the inner nodes' own values
 * ``widgets_values`` arrays map onto named inputs in ``input_order``, skipping
-  the UI-only widget that follows a ``control_after_generate`` seed and
+  the UI-only widget that follows a ``control_after_generate`` seed (and the
+  control word some frontend versions store after any other seed) and
   expanding dynamic combos into their ``<name>.<sub>`` inputs
 * reroutes, legacy primitives, muted and bypassed nodes collapse away
 * nodes that do not feed an output node are dropped
@@ -60,6 +61,10 @@ OUTPUT_PREFIXES = (
 )
 
 WIDGET_TYPES = {"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"}
+# What the frontend's control widget after a seed holds, and the input names
+# it attaches that widget to even when the definition does not ask for one.
+CONTROL_WORDS = ("fixed", "increment", "decrement", "randomize")
+SEED_NAMES = ("seed", "noise_seed")
 DYNAMIC_COMBO = "COMFY_DYNAMICCOMBO_V3"
 AUTOGROW = "COMFY_AUTOGROW_V3"
 MATCHTYPE = "COMFY_MATCHTYPE_V3"
@@ -125,6 +130,30 @@ def dynamic_combo_subinputs(entry: Any, key: Any) -> list[tuple[str, Any]]:
                 out.append((sub_name, sub_entry))
         return out
     return []
+
+
+def _is_stray_control(entry: Any, value: Any, consumed: dict[str, Any]) -> bool:
+    """Whether ``value`` is a seed-control word and not a value of this widget.
+
+    The frontend puts a control widget after any INT named ``seed``, whether
+    or not the definition sets ``control_after_generate``, and some frontend
+    versions store its value in ``widgets_values``. The definition cannot
+    tell which, so the value decides: a control word that follows a seed and
+    that the next widget cannot hold is the stored control, not a value.
+    """
+    if not isinstance(value, str) or value not in CONTROL_WORDS or not consumed:
+        return False
+    if next(reversed(consumed)).rsplit(".", 1)[-1] not in SEED_NAMES:
+        return False
+    type_ = entry[0] if isinstance(entry, (list, tuple)) and entry else None
+    if isinstance(type_, list):
+        return value not in type_
+    if type_ == "COMBO":
+        return value not in (_entry_opts(entry).get("options") or [value])
+    if type_ == DYNAMIC_COMBO:
+        keys = [o.get("key") for o in _entry_opts(entry).get("options") or []]
+        return value not in keys
+    return type_ in ("BOOLEAN", "INT", "FLOAT")
 
 
 def default_of(entry: Any) -> Any:
@@ -447,13 +476,16 @@ class Converter:
             )
         if opts.get("hidden"):
             value = default_of(entry)
-        elif cursor < len(values):
-            value = values[cursor]
-            cursor += 1
-            if opts.get("control_after_generate") and cursor < len(values):
-                cursor += 1  # the UI-only control widget that follows a seed
         else:
-            value = default_of(entry)
+            if cursor < len(values) and _is_stray_control(entry, values[cursor], out):
+                cursor += 1  # a control word stored after a seed that asked for none
+            if cursor < len(values):
+                value = values[cursor]
+                cursor += 1
+                if opts.get("control_after_generate") and cursor < len(values):
+                    cursor += 1  # the UI-only control widget that follows a seed
+            else:
+                value = default_of(entry)
         out[name] = value
 
         if isinstance(entry, (list, tuple)) and entry[0] == DYNAMIC_COMBO:

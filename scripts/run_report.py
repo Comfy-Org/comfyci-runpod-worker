@@ -19,13 +19,16 @@ reads files with `git cat-file`; nothing is checked out. --summary and
 over the published copy, and they let a run that could not publish still report.
 
 Every string read from results is untrusted (commit subjects, PR titles, error
-messages, log tails). It is escaped before it enters the summary and never
-printed: a log line that starts with "::" is a workflow command. Links are
-built only from checked parts (hex shas, integer ids, fixed hosts).
+messages, log tails, the text a text workflow generated). It is escaped before
+it enters the summary and never printed: a log line that starts with "::" is a
+workflow command. Links are built only from checked parts (hex shas, integer
+ids, fixed hosts).
 
 GitHub drops a step summary over 1 MiB whole, so the report stays under
 MAX_BYTES by shortening, in this order: log tails, tracebacks, output file
-lists, history rows. The report never fails the job: main() returns 0.
+lists, history rows, generated texts. A generated text is never shown past
+Limits.text_chars characters in the first place. The report never fails the
+job: main() returns 0.
 
 Env: GITHUB_STEP_SUMMARY (where to write; otherwise --out), RESULTS_REPO /
 RESULTS_BRANCH (as in storage.py), REPORT_DASHBOARD_URL (footer link; empty
@@ -40,18 +43,21 @@ import html
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
 import lanes as lanes_mod
+import output_kinds
 import regression_skip
 
-# Standard library only, like lanes.py and regression_skip.py: a job renders the
-# report without installing anything.
+# Standard library only, like lanes.py, output_kinds.py and regression_skip.py: a
+# job renders the report without installing anything.
 COMFY_URL = "https://github.com/Comfy-Org/ComfyUI"
 DEFAULT_RESULTS_REPO = "Comfy-Org/comfyci-runpod-worker"  # the defaults storage.py uses
 DEFAULT_RESULTS_BRANCH = "results"
@@ -64,6 +70,7 @@ THUMB_PX = 96
 FIGURE_PX = 720
 INLINE_PNG_MAX_BYTES = 4 * 1024 * 1024
 TRACEBACK_CHARS = 8000
+TEXT_READ_MAX = 256 * 1024  # bytes of one text output the report reads
 USUAL_RUNS = 30       # passing runs a workflow's usual time range is taken from
 USUAL_MIN_RUNS = 8    # fewer than this and no range is shown
 SLOW_FACTOR = 1.5     # a time this many times the top of the range is marked slow
@@ -220,9 +227,10 @@ def tick(value: str) -> str:
 
 
 def pre(text: str) -> str:
-    """A <pre> block of untrusted text. No line may start with '::'."""
+    """A <pre> block of untrusted text. No line may start with '::', nor with
+    blanks and then '::': the runner trims a line before it looks for a command."""
     body = html.escape(text, quote=False)
-    body = re.sub(r"(?m)^::", "&#58;:", body)
+    body = re.sub(r"(?m)^([^\S\n]*)::", r"\1&#58;:", body)
     return f"<pre>\n{body}\n</pre>"
 
 
@@ -341,6 +349,11 @@ class Reader:
         """The JSON object at `path`; None when absent or unreadable."""
         return None
 
+    def read_text(self, path: str, limit: int = TEXT_READ_MAX) -> str | None:
+        """The start of the text file at `path` (at most `limit` bytes, bytes
+        that are not UTF-8 replaced); None when absent or unreadable."""
+        return None
+
     def list_dir(self, path: str) -> list[str]:
         """Names directly under `path`, from the trees alone."""
         return []
@@ -359,6 +372,11 @@ class DictReader(Reader):
     def read_json(self, path: str) -> dict | None:
         data = self.files.get(path)
         return data if isinstance(data, dict) else None
+
+    def read_text(self, path: str, limit: int = TEXT_READ_MAX) -> str | None:
+        data = self.files.get(path)
+        return data.encode("utf-8", "replace")[:limit].decode("utf-8", "replace") \
+            if isinstance(data, str) else None
 
     def list_dir(self, path: str) -> list[str]:
         base = path.strip("/") + "/"
@@ -406,6 +424,38 @@ class GitReader(Reader):
         except (OSError, subprocess.SubprocessError, ValueError, RecursionError):
             return None  # RecursionError: JSON nested deeper than the parser goes
         return data if isinstance(data, dict) else None
+
+    def read_text(self, path: str, limit: int = TEXT_READ_MAX) -> str | None:
+        # Through a pipe, and no further than `limit`: a blob can be any size.
+        try:
+            with subprocess.Popen(
+                    ["git", "-C", self.workdir, "cat-file", "blob",  # a file, never a tree
+                     f"{self.sha}:{path}"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                    start_new_session=True) as git:
+                def stop():
+                    # A blob that is not local is fetched by a child of git, and that
+                    # child holds the pipe too: the read ends only when the whole
+                    # group is gone. Windows has no process group to signal.
+                    try:
+                        if git.returncode is None:  # once git was waited for, its id is free
+                            os.killpg(git.pid, signal.SIGKILL)
+                    except (AttributeError, OSError):
+                        git.kill()
+
+                watchdog = threading.Timer(GIT_TIMEOUT_S, stop)
+                watchdog.start()
+                try:
+                    data = git.stdout.read(limit)
+                    cut = bool(git.stdout.read(1))
+                    if cut:
+                        git.kill()  # the rest is not read
+                    code = git.wait()
+                finally:
+                    watchdog.cancel()
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return data.decode("utf-8", "replace") if cut or code == 0 else None
 
     def list_dir(self, path: str) -> list[str]:
         try:
@@ -563,6 +613,26 @@ def first_png(run: dict) -> dict:
     return pngs[0] if pngs else {}
 
 
+def cell_kind(cell: dict) -> str:
+    """The output kind of a summary cell: the one it names, else the one its
+    comparison carries. Neither says so for an image."""
+    kind = cell.get("output_kind")
+    if isinstance(kind, str) and kind in output_kinds.KINDS:
+        return kind
+    for key in ("vs_golden", "vs_previous"):
+        kind = output_kinds.metrics_kind(cell.get(key))
+        if kind != output_kinds.DEFAULT_KIND:
+            return kind
+    return output_kinds.DEFAULT_KIND
+
+
+def output_sha(run: dict, kind: str):
+    """The sha256 that identifies a run's output, from its record."""
+    if kind == "text":
+        return output_kinds.text_sha(run)
+    return first_png(run).get("sha256")
+
+
 def entries_of(head: dict | None) -> list[dict]:
     """Index entries, newest commit first (commit time, else run time)."""
     entries = [e for e in as_list(as_dict(head).get("entries"))
@@ -632,6 +702,7 @@ class Limits:
     files_per_workflow: int = 200
     history_rows: int = HISTORY_ROWS
     matrix_rows: int = MATRIX_ROWS
+    text_chars: int = 4000
 
     def shortened(self) -> list[str]:
         full, out = Limits(), []
@@ -648,15 +719,20 @@ class Limits:
             rows = max(self.history_rows, self.matrix_rows)
             out.append(f"recent commits cut to {rows} rows" if rows
                        else "recent commits left out")
+        if self.text_chars < full.text_chars:
+            out.append(f"generated texts cut to their first {self.text_chars} characters"
+                       if self.text_chars else "generated texts left out")
         return out
 
 
-# The order GitHub's limit takes things away in: the least needed first.
+# The order GitHub's limit takes things away in: the least needed first. The
+# generated texts go last: for a text workflow they are the result itself.
 SHRINK_STEPS = ({"log_chars": 1500}, {"log_chars": 0},
                 {"traceback_lines": 5}, {"traceback_lines": 0},
                 {"files_per_workflow": 3}, {"files_per_workflow": 0},
                 {"history_rows": 10, "matrix_rows": 10}, {"history_rows": 5, "matrix_rows": 5},
-                {"history_rows": 0, "matrix_rows": 0})
+                {"history_rows": 0, "matrix_rows": 0},
+                {"text_chars": 1000}, {"text_chars": 0})
 
 
 def byte_size(text: str) -> int:
@@ -697,6 +773,7 @@ class View:
     prior: dict          # {verdict, commit} of its last red or green result before
     sha: str | None      # output sha256
     chain: dict = field(default_factory=dict)  # the open failing chain it is part of
+    kind: str = output_kinds.DEFAULT_KIND      # what its output is: "image" or "text"
 
 
 @dataclass
@@ -723,6 +800,7 @@ class LaneData:
     noise: dict = field(default_factory=dict)       # wf -> noise_floor.json
     figures: dict = field(default_factory=dict)     # wf -> figure file names
     first_figures: dict = field(default_factory=dict)  # wf -> (dir, names) at first_bad
+    texts: dict = field(default_factory=dict)       # wf -> the texts of a text workflow
     manifest: dict = field(default_factory=dict)
     manifest_is_snapshot: bool = False  # the manifest the run used, not today's
     packs: dict = field(default_factory=dict)
@@ -786,10 +864,12 @@ def summary_from_workdir(workdir: str | None, commit: str, branch: str,
             **{k: cmp_.get(k) for k in ("verdict", "detail", "vs_golden", "vs_previous",
                                         "thresholds_used", "golden_tag", "previous_commit",
                                         "previous_verdict", "figures")},
-            "output_sha256": first_png(run).get("sha256"), "thumbnail": thumb,
+            "output_sha256": output_sha(run, cell_kind(cmp_)), "thumbnail": thumb,
             **{k: run.get(k) for k in ("gpu_name", "timings", "vram_peak_mb", "rss_peak_mb",
                                        "comfy_version", "torch_version", "python_version",
                                        "env", "custom_nodes")}}
+        if cell_kind(cmp_) != output_kinds.DEFAULT_KIND:
+            cells[d.name]["output_kind"] = cell_kind(cmp_)
     if not cells:
         return None
     verdicts = [c.get("verdict") for c in cells.values()]
@@ -838,6 +918,52 @@ def not_identical(cell: dict) -> bool:
     """A comparison ran and found a difference, with the reference or the previous run."""
     return any(m and not m.get("error") and not m.get("identical")
                for m in (as_dict(cell.get("vs_golden")), as_dict(cell.get("vs_previous"))))
+
+
+def gather_text(d: LaneData, wf: str, cell: dict, run: dict, workdir: str | None) -> dict:
+    """{name, bytes, cand, ref, cand_url, ref_url, diff} of a text workflow, as
+    far as each can be read: the generated text from the runner's files or the
+    results branch, the reference text from the results branch. The reference
+    is read only when the comparison did not find the two identical (an
+    identical reference is the same text); `ref` is then None when it could
+    not be read. A file over TEXT_READ_MAX is linked, not read. `diff` is the
+    generated text with its changes marked, "" when the two texts show none."""
+    sent = {"outputs": [o for o in as_list(run.get("outputs"))
+                        if isinstance(o, dict) and not o.get("truncated")]}
+    files = output_kinds.outputs_of(sent, output_kinds.TEXT_EXTENSIONS)
+    vg = as_dict(cell.get("vs_golden"))
+    named = as_dict(vg.get("first_diff")).get("file")
+    entry = next((o for o in files if o.get("filename") == named), files[0] if files else {})
+    rel = join_path("outputs", entry.get("filename"))
+    if not rel or not is_num(entry.get("bytes")) or entry["bytes"] < 0:
+        return {}
+    out: dict = {"name": entry["filename"], "bytes": entry["bytes"]}
+    published = f"{d.run_dir}/{wf}/{rel}" if d.files_ok else None
+    if published:
+        out["cand_url"] = raw_url(d.reader, published)
+    if entry["bytes"] > TEXT_READ_MAX:
+        return out
+    local = Path(workdir) / wf / rel if workdir and d.source != "published" else None
+    try:
+        if local and local.is_file():
+            with open(local, "rb") as f:  # the size in run.json is only what the run said
+                out["cand"] = f.read(TEXT_READ_MAX).decode("utf-8", "replace")
+    except OSError:
+        pass
+    if "cand" not in out and published:
+        out["cand"] = d.reader.read_text(published)
+    tag = cell.get("golden_tag")
+    if vg and not vg.get("identical") and isinstance(tag, str) and SEGMENT_RE.fullmatch(tag):
+        path = f"{d.prefix}/golden/{wf}/{tag}/{rel}"
+        out["ref"] = d.reader.read_text(path) if d.reader.sha else None
+        if out["ref"] is not None:
+            out["ref_url"] = raw_url(d.reader, path)
+        if isinstance(out["ref"], str) and isinstance(out.get("cand"), str):
+            # Marked once, here: a report that has to shrink is rendered many times.
+            a, b = (output_kinds.normalise_text(clean(x, lines=True))
+                    for x in (out["ref"], out["cand"]))
+            out["diff"] = output_kinds.word_diff(a, b) if a != b else ""
+    return out
 
 
 def chain_of(d: LaneData, wf: str, committed_ts=None) -> dict:
@@ -928,7 +1054,8 @@ def gather_lane(reader: Reader, lanes: dict, commit: str, branch: str, lane_id: 
         index_cell = as_dict(index_cells.get(wf))
         # Summaries older than `detail` were classified by the index builder.
         detail = cell.get("detail") or index_cell.get("d")
-        sha = cell.get("output_sha256") or first_png(run).get("sha256") or index_cell.get("sha")
+        kind = cell_kind(cell)
+        sha = cell.get("output_sha256") or output_sha(run, kind) or index_cell.get("sha")
         state = cell_state(cell.get("verdict"), detail, sha,
                            cell.get("golden_tag") or index_cell.get("g"),
                            d.lane_references.get(wf))
@@ -936,7 +1063,10 @@ def gather_lane(reader: Reader, lanes: dict, commit: str, branch: str, lane_id: 
         prior = prior_result(d.entries, commit, wf, cell, committed_ts)
         d.views.append(View(wf=wf, name=workflow_name(wf), safe=safe, cell=cell, run=run,
                             state=state, origin=origin_of(state, prior, fb, commit),
-                            prior=prior, sha=sha if isinstance(sha, str) else None, chain=fb))
+                            prior=prior, sha=sha if isinstance(sha, str) else None, chain=fb,
+                            kind=kind))
+        if kind == "text" and safe and state in (*GREEN, *DRIFT, "no_ref"):
+            d.texts[wf] = gather_text(d, wf, cell, run, workdir)
         if not safe or not (state in DRIFT or (state == "pass" and not_identical(cell))):
             continue
         if state in DRIFT:
@@ -944,6 +1074,8 @@ def gather_lane(reader: Reader, lanes: dict, commit: str, branch: str, lane_id: 
         tag = cell.get("golden_tag")
         if isinstance(tag, str) and SEGMENT_RE.fullmatch(tag):
             d.noise[wf] = reader.read_json(f"{prefix}/golden/{wf}/{tag}/noise_floor.json") or {}
+        if kind == "text":
+            continue  # no figures: its texts were read above
         if d.files_ok:
             d.figures[wf] = reader.list_dir(f"{run_dir}/{wf}/figures")
         start = fb.get("commit")
@@ -1310,6 +1442,121 @@ def metric_cells(metrics, th=None, other: str = "the reference") -> list[str]:
             fmt(m.get("max_abs_diff"), "g"), frames]
 
 
+TEXT_COLUMNS = ["Compared with", "Result", "Similarity", "First difference", "Characters",
+                "Lines"]
+
+
+def text_metric_cells(metrics, th=None, other: str = "the reference",
+                      judged: bool = True) -> list[str]:
+    """Result, similarity, first difference, characters and lines of a text
+    comparison. Bold marks what fails, so only in a row that is `judged`: the
+    one against the reference."""
+    m, th = as_dict(metrics), as_dict(th)
+    if m.get("error"):
+        return [f"comparison failed: {md(m['error'], 300)}", "", "", "", ""]
+    if not m:
+        return ["not compared", "", "", "", ""]
+    bold = "**" if judged else ""
+
+    def pair(key: str) -> str:  # a count here and in the other text, said once when equal
+        cand, ref = m.get(f"{key}_cand"), m.get(f"{key}_ref")
+        if is_num(cand) and is_num(ref) and cand != ref:
+            return f"{cand:.0f} here, {ref:.0f} in {other}"
+        return fmt(cand, ".0f")
+
+    # Files pair by name: one without its pair was never compared.
+    files = ""
+    ref_n, cand_n, paired = (m.get(k) for k in ("file_count_ref", "file_count_cand",
+                                                "files_compared"))
+    if is_num(ref_n) and is_num(cand_n) and ref_n != cand_n:
+        files = f"{plural(round(cand_n), 'file')} here, {ref_n:.0f} in {other}"
+    elif is_num(ref_n) and is_num(paired) and paired < ref_n:
+        files = (f"only {paired:.0f} of {ref_n:.0f} text files" if paired else
+                 "no text file") + f" with the same name as in {other}"
+    files = f" ({bold}{files}{bold})" if files else ""
+    if m.get("identical"):
+        return ["identical" + files, "", "", pair("chars"), pair("lines")]
+    floor, sim = th.get("min_text_similarity"), m.get("similarity")
+    shown = ""
+    if is_num(sim) and paired != 0:  # with no pair of files there is nothing to be similar
+        shown = f"{output_kinds.percent(sim)} %{output_kinds.basis_note(m)}"
+        if is_num(floor):
+            shown = (f"**{shown}**" if sim < floor else shown) + f" (limit ≥ {floor * 100:g} %)"
+    diff = as_dict(m.get("first_diff"))
+    where = ""
+    if is_num(diff.get("line")) and is_num(diff.get("col")):
+        where = f"line {diff['line']:.0f}, column {diff['col']:.0f}"
+        if is_num(ref_n) and ref_n > 1 and diff.get("file"):
+            where += f" of {code(diff['file'], 120)}"
+    within = is_num(sim) and is_num(floor) and sim >= floor and not files
+    return [("differs" if within or not judged else "**differs**") + files, shown, where,
+            pair("chars"), pair("lines")]
+
+
+def text_shown(text: str, limit: int) -> tuple[str, bool, str]:
+    """(what a report shows of a text, whether that is less than all of it, a
+    note for its heading): no control characters, long lines folded, cut to
+    `limit` characters. The note says when lines were folded: a line and
+    column in the table count in the file, not in what is shown."""
+    plain = clean(text, lines=True).strip("\n")
+    text = output_kinds.wrap_lines(plain)
+    folded = ", long lines folded" if text.count("\n") > plain.count("\n") else ""
+    if len(text) <= limit:
+        return text, False, folded
+    return text[:limit].rstrip() + "\n…", True, folded
+
+
+def text_lines(d: LaneData, v: View, limits: Limits, diff: bool = True) -> list[str]:
+    """What a text workflow generated, the reference text and their difference.
+    All three are model output: untrusted, and shown only inside <pre> blocks.
+    A text is cut to limits.text_chars characters, and its heading says so."""
+    t = as_dict(d.texts.get(v.wf))
+    cand, ref = (t.get(k) if isinstance(t.get(k), str) else None for k in ("cand", "ref"))
+    link = f" [The whole file]({t['cand_url']})." if t.get("cand_url") else ""
+    if is_num(t.get("bytes")) and t["bytes"] > TEXT_READ_MAX:
+        return [f"The generated text is {size_text(t['bytes'])}, too large to show here.{link}"]
+    if cand is None and ref is None:
+        return []
+    if not limits.text_chars:
+        return [f"The generated text is left out here to keep the summary small.{link}"]
+    out: list[str] = []
+    vg = as_dict(v.cell.get("vs_golden"))
+    marked = t.get("diff")  # set when both texts were read
+    if diff and isinstance(marked, str) and marked:
+        shown, cut, folded = text_shown(marked, limits.text_chars * 2)
+        note = f", cut to its first {limits.text_chars * 2} characters" if cut else ""
+        # Texts too long to mark word by word come as a line diff, which has other signs.
+        form = ("line by line, with <code>-</code> before a removed line and <code>+</code> "
+                "before an added one" if marked.startswith(output_kinds.LINE_DIFF_HEAD) else
+                "with removed text as <code>[-…-]</code> and added text as <code>{+…+}</code>")
+        out += [f"**Difference from the reference**, {form}{folded}{note}:", "", pre(shown), ""]
+    elif diff and isinstance(marked, str) and as_dict(vg.get("first_diff")):
+        # The comparison found a difference that the cleaned texts no longer have.
+        out += ["The two texts differ only in characters that are not shown here (control or "
+                "zero-width characters, or a tab where the other text has blanks). Compare the "
+                "two files.", ""]
+    elif diff and cand is not None and ref is None and "ref" in t:
+        if vg.get("files_compared") == 0:  # the reference is there, under another name
+            out += [f"The reference has no text file named {code(t.get('name'), 120)}, so the "
+                    "difference is not shown.", ""]
+        else:
+            out += ["The reference text could not be read, so the difference is not shown.", ""]
+    for text, title, url in ((cand, "Generated text", t.get("cand_url")),
+                             (ref, "Reference text", t.get("ref_url"))):
+        if text is None:
+            continue
+        shown, cut, folded = text_shown(text, limits.text_chars)
+        size = plural(len(output_kinds.normalise_text(text)), "character")
+        if cut:
+            size += f", the first {limits.text_chars} shown"
+        size += folded
+        body = [pre(shown)] if shown else ["The text is empty."]
+        if url:
+            body += ["", f"[The whole file]({url})"]
+        out += [*details(f"{title} ({size})", body), ""]
+    return out[:-1]
+
+
 def reference_text(ref: dict) -> str:
     """Where a reference came from: tag, when it was approved, by whom, why."""
     tag = ref.get("tag")
@@ -1383,48 +1630,68 @@ def comparison_table(d: LaneData, v: View) -> list[str]:
     """The output against its reference, the previous run and the noise floor,
     each number next to its limit."""
     cell = v.cell
+    text = v.kind == "text"
+    cells = text_metric_cells if text else metric_cells
+    # A text is judged against its reference only: no bold in the other rows.
+    unjudged = {"judged": False} if text else {}
     prev = cell.get("previous_commit")
     tag = cell.get("golden_tag")
     tag_text = tick(tag) if isinstance(tag, str) and SEGMENT_RE.fullmatch(tag) else code(tag, 60)
     rows = [[f"Reference {tag_text}".strip(),
-             *metric_cells(cell.get("vs_golden"), cell.get("thresholds_used"))]]
+             *cells(cell.get("vs_golden"), cell.get("thresholds_used"))]]
     if cell.get("vs_previous") is not None or prev:
         rows.append([f"Previous tested commit {sha_link(prev) if prev else ''}".strip(),
-                     *metric_cells(cell.get("vs_previous"), None, "the previous run")])
+                     *cells(cell.get("vs_previous"), None, "the previous run", **unjudged)])
     noise = as_dict(d.noise.get(v.wf))
     if noise:
         how = "" if noise.get("measured", True) else ", not measured, taken from " + (
             code(noise.get("inherited_from"), 60) or "an earlier reference")
-        rows.append([f"Noise floor (the reference rendered twice{how})",
-                     *metric_cells(noise, None, "the first render")])
+        rows.append([f"Noise floor (the reference {'generated' if text else 'rendered'} "
+                     f"twice{how})",
+                     *cells(noise, None, "the first run" if text else "the first render",
+                            **unjudged)])
+    if text:
+        return table(TEXT_COLUMNS, rows)
     return table(["Compared with", "Mean MSE", "PSNR dB mean, min", "% pixels changed",
                   "Max abs diff", "Frames"], rows)
 
 
-def drift_block(d: LaneData, v: View) -> list[str]:
+def differs_text(v: View) -> str:
+    """How a failing output differs from its reference, in the words of its kind."""
+    if v.kind != "text":
+        return "The output differs from the reference beyond its limits"
+    if as_dict(v.cell.get("vs_golden")).get("error"):
+        return "The generated text could not be compared with the reference"
+    if is_num(as_dict(v.cell.get("thresholds_used")).get("min_text_similarity")):
+        return "The generated text differs from the reference beyond its similarity limit"
+    return "The generated text differs from the reference"
+
+
+def drift_block(d: LaneData, v: View, limits: Limits | None = None) -> list[str]:
     cell = v.cell
     prev = cell.get("previous_commit")
     vs_prev = as_dict(cell.get("vs_previous"))
+    differs = differs_text(v)
     out: list[str] = []
     if v.state == "accepted":
         out.append("The output differs from the reference this run was compared with. The "
                    "lane's reference was approved again after the run and is now this very "
                    "output, so nothing is open.")
     elif v.state == "new":
-        out.append("The output differs from the reference beyond its limits, and it differs from "
+        out.append(f"{differs}, and it differs from "
                    f"the previous tested commit{' ' + sha_link(prev) if prev else ''}: the change "
                    f"is new {'in this run' if batch_size(d) else 'at this commit'}."
                    + covers_text(d, "the change is in one of them"))
     elif v.state == "inherited":
-        out.append("The output differs from the reference beyond its limits. It is identical "
+        out.append(f"{differs}. It is identical "
                    f"to the previous tested commit{' ' + sha_link(prev) if prev else ''}, which "
                    "already failed: the change is inherited from an earlier commit.")
     elif vs_prev.get("identical"):
-        out.append("The output differs from the reference beyond its limits, yet it is "
+        out.append(f"{differs}, yet it is "
                    f"identical to the previous tested commit{' ' + sha_link(prev) if prev else ''}"
                    ", which did not fail: the reference changed in between, not the output.")
     else:
-        out.append("The output differs from the reference beyond its limits. There is no "
+        out.append(f"{differs}. There is no "
                    "previous run to tell whether the change is new at this commit.")
     since = failing_since(v.chain, d.entries)
     if since and v.state != "accepted":
@@ -1444,10 +1711,14 @@ def drift_block(d: LaneData, v: View) -> list[str]:
     if v.state == "accepted":
         return out
     # Runs from before inherited failures stopped rendering figures have their own.
-    figures = figure_lines(d, v) if v.state != "inherited" or d.figures.get(v.wf) else []
+    # A text workflow has no figures: it shows the texts and their difference.
+    if v.kind == "text":
+        figures = text_lines(d, v, limits or Limits())
+    else:
+        figures = figure_lines(d, v) if v.state != "inherited" or d.figures.get(v.wf) else []
     if figures:
         out += ["", *figures]
-    elif v.state == "inherited":
+    elif v.state == "inherited" and v.kind != "text":
         first_dir, names = d.first_figures.get(v.wf) or (None, [])
         links = [f"[{caption}]({raw_url(d.reader, f'{first_dir}/{name}')})"
                  for name, caption in FIGURES if name in names and raw_url(d.reader, first_dir)]
@@ -1599,16 +1870,20 @@ def error_block(d: LaneData, v: View, limits: Limits) -> list[str]:
     return [" ".join(out[:2]), *out[2:], "", *failure_detail(d, v, limits)]
 
 
-def no_reference_block(d: LaneData, v: View) -> list[str]:
+def no_reference_block(d: LaneData, v: View, limits: Limits | None = None) -> list[str]:
     out = ["No reference is approved for this workflow on this lane yet, so the output was not "
            "compared with anything."]
+    text = v.kind == "text"
+    shown = text_lines(d, v, limits or Limits(), diff=False) if text else []
+    shown = ["", *shown] if shown else []
     if d.retired or not (v.safe and LANE_RE.fullmatch(d.lane_id)):
-        return out
+        return out + shown
     base = (f"gh workflow run golden-baseline.yml --repo {worker_repo()} -f ref=RELEASE_TAG "
             f"-f workflows={v.wf} -f lane={d.lane_id}")
-    return out + ["To make one, render it from a release tag, look at the output, then approve "
+    return out + [f"To make one, {'generate' if text else 'render'} it from a release tag, look "
+                  "at the output, then approve "
                   "it with the second command:", "", "```", f"{base} -f bless=false", "```", "",
-                  "```", f"{base} -f bless_only=true", "```"]
+                  "```", f"{base} -f bless_only=true", "```"] + shown
 
 
 def attention_block(d: LaneData, limits: Limits) -> list[str]:
@@ -1624,11 +1899,11 @@ def attention_block(d: LaneData, limits: Limits) -> list[str]:
         for v in group:
             out += ["", f"#### {icon(v.state)} {v.name}: {words(v.state, batch)}", ""]
             if v.state in DRIFT:
-                out += drift_block(d, v)
+                out += drift_block(d, v, limits)
             elif v.state in ("exec", "infra"):
                 out += error_block(d, v, limits)
             elif v.state == "no_ref":
-                out += no_reference_block(d, v)
+                out += no_reference_block(d, v, limits)
             else:
                 status = code(v.cell.get("worker_status"), 60)
                 out.append("The run recorded no verdict for this workflow."
@@ -1637,15 +1912,31 @@ def attention_block(d: LaneData, limits: Limits) -> list[str]:
     return out
 
 
-def within_limits_block(d: LaneData) -> list[str]:
+def passed_with_a_difference(v: View) -> bool:
+    """A pass that is listed with its numbers and limits. For an image: any
+    difference, from the reference or from the previous run. For a text: a
+    difference from the reference (within a similarity limit). A text that
+    equals its reference is shown as that, whatever the run before produced:
+    a text is not compared bit by bit and that pass crossed no limit."""
+    if v.state != "pass":
+        return False
+    if v.kind != "text":
+        return not_identical(v.cell)
+    vg = as_dict(v.cell.get("vs_golden"))
+    return bool(vg) and not vg.get("error") and not vg.get("identical")
+
+
+def within_limits_block(d: LaneData, limits: Limits | None = None) -> list[str]:
     """Workflows that passed without being bit-identical: each number next to
-    its limit, the noise floor and the figures the run rendered."""
+    its limit, the noise floor and the figures the run rendered (for a text
+    workflow: the texts and their difference)."""
     out: list[str] = []
     for v in d.views:
-        if v.state != "pass" or not not_identical(v.cell):
+        if not passed_with_a_difference(v):
             continue
         body = comparison_table(d, v)
-        figures = figure_lines(d, v)
+        figures = (text_lines(d, v, limits or Limits()) if v.kind == "text"
+                   else figure_lines(d, v))
         name = f"<code>{v.wf}</code>" if v.safe else v.name  # no Markdown inside <summary>
         out += ["", *details(f"{name}: numbers and limits",
                              [*body, "", *figures] if figures else body)]
@@ -1656,10 +1947,26 @@ def within_limits_block(d: LaneData) -> list[str]:
             "within the limits.", *out]
 
 
+def text_outputs_block(d: LaneData, limits: Limits) -> list[str]:
+    """What the text workflows that match their reference generated. A text
+    that changed is shown where the change is reported."""
+    out: list[str] = []
+    for v in d.views:
+        if v.kind != "text" or v.state != "pass" or passed_with_a_difference(v):
+            continue
+        shown = text_lines(d, v, limits, diff=False)
+        if shown:
+            out += ["", f"{v.name}, identical to its reference:", "", *shown]
+    return ["### Generated text", *out] if out else []
+
+
 def output_cell(d: LaneData, v: View) -> str:
-    """The thumbnail, linking to the full PNG."""
+    """The thumbnail, linking to the full PNG (a text workflow: a link to its text)."""
     if not (d.files_ok and v.safe) or v.state in ("exec", "infra"):
         return ""
+    if v.kind == "text":
+        url = as_dict(d.texts.get(v.wf)).get("cand_url")
+        return f"[text]({url})" if url else ""
     # A PNG past the worker's size limit is listed but was never published.
     png = first_png({"outputs": [o for o in as_list(v.run.get("outputs"))
                                  if isinstance(o, dict) and not o.get("truncated")]})
@@ -1702,6 +2009,17 @@ def reference_cell(v: View) -> str:
         return "comparison failed"
     if not vg:
         return ""
+    if output_kinds.metrics_kind(vg) == "text":
+        if vg.get("identical"):
+            return "identical text"
+        if vg.get("files_compared") == 0:  # no pair of files, so no similarity to show
+            return "text file under another name"
+        line = as_dict(vg.get("first_diff")).get("line")
+        bits = [is_num(vg.get("similarity"))
+                and f"{output_kinds.percent(vg['similarity'])} % similar"
+                    f"{output_kinds.basis_note(vg)}",
+                is_num(line) and f"differs from line {line:.0f}"]
+        return " · ".join(b for b in bits if b) or "differs"
     if vg.get("identical"):
         return "bit-identical"
     bits = [fmt(vg.get("mean_mse"), ".4f") and f"MSE {vg['mean_mse']:.4f}",
@@ -1952,7 +2270,8 @@ def render_lane(d: LaneData, limits: Limits) -> str:
         blocks = [title_block(d), no_summary_block(d), footer_block(d, limits)]
     else:
         blocks = [title_block(d), facts_block(d), attention_block(d, limits),
-                  workflows_block(d, limits), within_limits_block(d), schema_block(d),
+                  workflows_block(d, limits), within_limits_block(d, limits),
+                  text_outputs_block(d, limits), schema_block(d),
                   packs_block(d), not_run_block(d), history_block(d, limits),
                   footer_block(d, limits)]
     return "\n\n".join("\n".join(b) for b in blocks if b) + "\n"

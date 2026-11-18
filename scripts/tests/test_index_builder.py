@@ -301,3 +301,76 @@ def test_two_publishers_both_land_in_the_index(tmp_path):
     assert [e["c"] for e in head["entries"]] == ["eee", "ddd"]  # fresh index, two runs
     shard = json.loads((check / "regression" / "index" / "master" / LANE / "2024-09.json").read_text())
     assert sorted(e["c"] for e in shard["entries"]) == ["ddd", "eee"]
+
+
+# -- text workflows -------------------------------------------------------------------
+TEXT_SAME = {"kind": "text", "files_compared": 1, "file_count_ref": 1, "file_count_cand": 1,
+             "identical": True, "similarity": 1.0, "similarity_basis": "words", "chars_ref": 40,
+             "chars_cand": 40, "lines_ref": 2, "lines_cand": 2}
+TEXT_DIFF = {**TEXT_SAME, "identical": False, "similarity": 0.864865, "chars_cand": 41,
+             "first_diff": {"file": "llm_00001.txt", "line": 2, "col": 22, "offset": 108,
+                            "ref": "what the reference says", "cand": "what the run says"}}
+
+
+def _text_summary(commit, ts, verdict, vs_golden, vs_previous, prev, sha, detail=None):
+    wf = {**_wf(verdict, vs_golden, vs_previous, prev, sha=sha, detail=detail),
+          "workflow_id": "llm", "thresholds_used": None, "figures": False, "thumbnail": None,
+          "output_kind": "text"}
+    return {"branch": "master", "commit": commit, "run_ts": ts, "overall": verdict,
+            "workflows": {"llm": wf}}
+
+
+def test_a_text_cell_names_its_kind_and_an_image_cell_keeps_its_keys():
+    s = _text_summary("b" * 40, 1700000100, "fail", TEXT_DIFF, TEXT_DIFF, "a" * 40, "t2",
+                      detail="new_drift")
+    cell = index_builder.entry_from_summary(s, LANE, 1)["w"]["llm"]
+    # The image numbers are null, as on a cell whose comparison failed; `k` says why.
+    assert cell == {"v": "fail", "d": "new_drift", "sha": "t2", "mse": None, "psnr": None,
+                    "pct": None, "pv": False, "exec": 100.0, "vram": 21500.0, "g": "v0.33.2",
+                    "th": None, "k": "text"}
+    assert list(cell)[-1] == "k"
+    same = _text_summary("c" * 40, 1700000200, "pass", TEXT_SAME, TEXT_SAME, "b" * 40, "t1")
+    assert index_builder.entry_from_summary(same, LANE, 1)["w"]["llm"]["pv"] is True
+
+    image = index_builder.entry_from_summary(
+        _summary("d" * 40, 1700000300, "pass", IDENT, IDENT, "c" * 40, sha="s1"), LANE, 1)
+    assert list(image["w"]["flux"]) == ["v", "d", "sha", "mse", "psnr", "pct", "pv", "exec",
+                                       "vram", "g", "th"]
+    # Only a kind other than image is written; anything that is no string is not a kind.
+    for odd in ("image", None, ["text"], 3):
+        s["workflows"]["llm"]["output_kind"] = odd
+        assert "k" not in index_builder.entry_from_summary(s, LANE, 1)["w"]["llm"]
+
+
+def test_blessing_a_changed_text_closes_its_failing_chain(tmp_path):
+    """Accepted drift works by sha. A text golden carries the text file's sha,
+    the same one its runs carry, so approving the changed text ends the chain."""
+    text_run = {"outputs": [{"filename": "llm_00001.txt", "sha256": "t2"}]}
+    remote = make_remote(tmp_path, {
+        "regression/runs/master/aaa/summary.json":
+            _text_summary("aaa", 1722470400, "pass", TEXT_SAME, None, None, "t1"),
+        "regression/runs/master/bbb/summary.json":
+            _text_summary("bbb", 1725148800, "fail", TEXT_DIFF, TEXT_DIFF, "aaa", "t2",
+                          detail="new_drift"),
+        "regression/runs/master/bbb/llm/run.json": text_run,
+        "regression/runs/master/ccc/summary.json":
+            _text_summary("ccc", 1725235200, "fail", TEXT_DIFF, TEXT_SAME, "bbb", "t2",
+                          detail="inherited"),
+        "regression/latest/master.json": {"commit": "ccc"},
+        "regression/golden/llm/current.json": {"tag": "v0.33.2", "output_sha256": "t1"},
+    })
+    store = storage.GitHubStorage("local/test", "results", tmp_path / "wt", remote_url=str(remote))
+    builder = index_builder.IndexBuilder(store, "master", LANE, 1, LANES)
+    assert builder.backfill(with_meta=False, log=lambda *_: None) == 3
+    head = store.download_json(builder.head_path())
+    assert head["first_bad"]["llm"]["commit"] == "bbb" and head["first_bad"]["llm"]["runs"] == 2
+    assert [e["w"]["llm"].get("k") for e in head["entries"]] == ["text", "text", "text"]
+    assert store.download_json(builder.lanes_path())["lanes"][LANE]["goldens"]["llm"] == {
+        "tag": "v0.33.2", "sha": "t1"}
+
+    store.upload_json("regression/golden/llm/current.json",
+                      {"tag": "ccc", "output_sha256": "t2"})
+    builder.refresh()
+    assert store.download_json(builder.head_path())["first_bad"] == {}
+    assert store.download_json(builder.lanes_path())["lanes"][LANE]["goldens"]["llm"] == {
+        "tag": "ccc", "sha": "t2"}

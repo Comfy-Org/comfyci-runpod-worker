@@ -1,0 +1,37 @@
+{
+  "1": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3.8_27b_w4a8.safetensors",
+      "type": "stable_diffusion",
+      "device": "default"
+    }
+  },
+  "2": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "man_with_red_hat.png"
+    }
+  },
+  "3": {
+    "class_type": "TextGenerateV2",
+    "inputs": {
+      "prompt": "Describe this image in extreme detail, including subject appearance, clothing, pose, expression, background elements, lighting, camera angle, composition, color palette, and overall aesthetic style. Use precise, descriptive language suitable for image generation prompts. Do not use vague terms. Only return the prompts itself. Focus on 90s retro tech aesthetic and photorealistic quality.",
+      "max_length": 256,
+      "sampling_mode": "off",
+      "thinking": false,
+      "use_default_template": true,
+      "mtp": "off",
+      "clip": ["1", 0],
+      "images.image1": ["2", 0]
+    }
+  },
+  "4": {
+    "class_type": "SaveText",
+    "inputs": {
+      "filename_prefix": "llm_qwen38_27b_t2t",
+      "format": "txt",
+      "text": ["3", 0]
+    }
+  }
+}

@@ -212,10 +212,13 @@ jobs:
           overwrite: true
       # The lane's report, first in the job summary. It always runs: after a
       # test, after a failed test, and on a skipped commit (where it shows the
-      # result that is already published). It never fails the job.
+      # result that is already published). It never fails the job. It gets ten
+      # minutes: a report that hangs would hold the run, and with it the group
+      # that every later commit waits in.
       - name: Report
         if: always()
         continue-on-error: true
+        timeout-minutes: 10
         env:
           COMMIT: ${{ needs.lanes.outputs.commit }}
           LANE: ${{ matrix.lane }}
@@ -257,6 +260,7 @@ jobs:
           python-version: '3.12'
       - name: Report
         continue-on-error: true
+        timeout-minutes: 10
         env:
           COMMIT: ${{ needs.lanes.outputs.commit }}
         run: python scripts/run_report.py overview --commit "$COMMIT" --branch master

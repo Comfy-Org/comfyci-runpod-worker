@@ -159,6 +159,10 @@ def entry_from_summary(summary: dict, lane: str, layout: int,
             "g": wr.get("golden_tag"),
             "th": wr.get("thumbnail"),
         }
+        kind = wr.get("output_kind")
+        if isinstance(kind, str) and kind != "image":
+            # What the output is, when it is not an image: an image cell keeps its keys.
+            w[wf_id]["k"] = kind
         if wr.get("custom_nodes"):
             # Per custom-node pack the run requested: whether ComfyUI imported it.
             w[wf_id]["cn"] = {name: (info or {}).get("import")

@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 import lanes as lanes_mod
+import output_kinds
 import packs
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,7 +24,7 @@ PACKS = packs.load_registry()
 
 ENTRY_KEYS = {"enabled", "workflow_path", "seed_overrides", "models",
               "gpu_type", "timeout_s", "thresholds", "golden_tag"}
-OPTIONAL_ENTRY_KEYS = {"comfy_flags", "custom_nodes", "lanes"}
+OPTIONAL_ENTRY_KEYS = {"comfy_flags", "custom_nodes", "lanes", "output_kind"}
 # Inputs whose string value names a file the worker must find on the volume.
 FILE_INPUT = re.compile(r"^(ckpt|unet|clip|vae|lora)_name\d*$")
 # Any other loader (control_net_name, upscale model_name, ...) is caught by extension.
@@ -34,9 +35,11 @@ INPUT_FILE_BY_NODE = {"LoadImage": "image", "VHS_LoadVideo": "video"}
 # nothing to sync: nodes.VAELoader appends "pixel_space" to its combo for
 # pixel-space models (PixelDiT), which have no VAE weights at all.
 BUILTIN_FILES = {"pixel_space"}
-# Output nodes a graph may end in: only SaveImage PNGs are compared, but a
-# VHS_VideoCombine (gif encode path) is a legitimate second sink.
-OUTPUT_NODES = {"SaveImage", "VHS_VideoCombine"}
+# Output nodes a graph may end in. One of them writes what is compared: the
+# SaveImage PNGs of an image workflow, the SaveText .txt of a text workflow
+# (`output_kind` in the entry). Any other, like a VHS_VideoCombine (gif encode
+# path), is a legitimate second sink.
+OUTPUT_NODES = {"SaveImage", "SaveText", "VHS_VideoCombine"}
 INPUT_DIR = "/runpod-volume/models/input"
 ENDPOINT_EXEC_TIMEOUT_S = 3600
 # What each pack workflow must exercise (so a prompt edit cannot quietly drop
@@ -94,6 +97,62 @@ def _has_seed(wf: dict) -> bool:
     return any("seed" in n["inputs"] or "noise_seed" in n["inputs"] for n in wf.values())
 
 
+def _sink_problems(wf_id: str, entry: dict, wf: dict) -> list[str]:
+    """What is wrong with a workflow's output nodes, for its output kind."""
+    problems = []
+    if output_kinds.kind_of(entry) == "image":
+        saves = [n for n in wf.values() if n["class_type"] == "SaveImage"]
+        if not saves:
+            problems.append("only SaveImage PNG outputs are compared")
+        if not all(n["inputs"].get("filename_prefix") == wf_id for n in saves):
+            problems.append("every SaveImage is prefixed with the workflow id")
+        # A second sink must not collide with the compared PNGs' file names.
+        others = [n for n in wf.values() if n["class_type"] in OUTPUT_NODES - {"SaveImage"}]
+        if not all(n["inputs"].get("filename_prefix") not in (wf_id, None) for n in others):
+            problems.append("a second sink needs a prefix of its own")
+        return problems
+    # Text: one SaveText named after the workflow writes the compared .txt.
+    sinks = [n for n in wf.values() if n["class_type"] in OUTPUT_NODES]
+    texts = [n for n in sinks if n["class_type"] == "SaveText"]
+    main = [n for n in texts if n["inputs"].get("filename_prefix") == wf_id]
+    if len(main) != 1:
+        problems.append("exactly one SaveText is prefixed with the workflow id")
+    if any(n["inputs"].get("format") != "txt" for n in texts):
+        problems.append("SaveText must write format txt: only .txt files are compared")
+    for n in sinks:
+        # A prefix with a folder publishes a nested file, which the pages do not link.
+        prefix = n["inputs"].get("filename_prefix")
+        if not isinstance(prefix, str) or "/" in prefix or "\\" in prefix:
+            problems.append(f"{n['class_type']} needs a flat filename_prefix, not {prefix!r}")
+        elif prefix != wf_id and not prefix.startswith(wf_id + "_"):
+            problems.append(f"a second sink is prefixed '{wf_id}_...', not {prefix!r}")
+    return problems
+
+
+def _text_generation_problems(wf: dict) -> list[str]:
+    """Settings that make generated text differ from run to run. A text
+    workflow passes on an exact match, so it decodes greedily and without the
+    multi-token-prediction head, whose `auto` mode adapts to measured timings."""
+    problems = []
+    for nid, n in wf.items():
+        if not n["class_type"].startswith("TextGenerate"):
+            continue
+        if n["inputs"].get("sampling_mode") != "off":
+            problems.append(f"{nid}: sampling_mode must be 'off' (greedy decoding)")
+        if n["inputs"].get("mtp") in (None, "auto"):
+            problems.append(f"{nid}: mtp must be set, and not to 'auto'")
+    return problems
+
+
+def _literal_dynamic_inputs(wf: dict) -> list[str]:
+    """Literal `name.sub` inputs (the sub-inputs of a dynamic combo). The
+    worker's validate_workflow knows only the top-level input names of
+    /object_info and strips these before the prompt is queued."""
+    return sorted(f"{nid}:{n['class_type']}.{name}" for nid, n in wf.items()
+                  for name, value in n["inputs"].items()
+                  if "." in name and not isinstance(value, list))
+
+
 def test_model_folders_parsed():
     assert {"checkpoints", "diffusion_models", "text_encoders", "vae", "loras",
             "ultralytics", "ultralytics_bbox"} <= _model_folders()
@@ -112,6 +171,10 @@ def test_entry_shape(wf_id):
     assert entry.get("lanes") is None or (isinstance(entry["lanes"], list) and entry["lanes"])
     timeout = entry["timeout_s"] or MANIFEST["defaults"]["timeout_s"]
     assert 0 < timeout < ENDPOINT_EXEC_TIMEOUT_S, "leave room for checkout and server start"
+    if output_kinds.kind_of(entry) == "text":  # kind_of refuses an unknown kind
+        limits = entry["thresholds"] or {}
+        assert set(limits) <= {"min_text_similarity"}, "a text workflow has one limit"
+        assert all(isinstance(v, (int, float)) and 0 < v <= 1 for v in limits.values())
 
 
 @pytest.mark.parametrize("wf_id", sorted(WORKFLOWS))
@@ -136,14 +199,22 @@ def test_every_node_feeds_an_output(wf_id):
 
 
 @pytest.mark.parametrize("wf_id", sorted(WORKFLOWS))
-def test_saves_png_under_its_own_prefix(wf_id):
-    wf = _load_workflow(WORKFLOWS[wf_id])
-    saves = [n for n in wf.values() if n["class_type"] == "SaveImage"]
-    assert saves, "only SaveImage PNG outputs are compared"
-    assert all(n["inputs"].get("filename_prefix") == wf_id for n in saves)
-    # A second sink must not collide with the compared PNGs' file names.
-    others = [n for n in wf.values() if n["class_type"] in OUTPUT_NODES - {"SaveImage"}]
-    assert all(n["inputs"].get("filename_prefix") not in (wf_id, None) for n in others)
+def test_saves_its_compared_output_under_its_own_prefix(wf_id):
+    entry = WORKFLOWS[wf_id]
+    assert _sink_problems(wf_id, entry, _load_workflow(entry)) == []
+
+
+@pytest.mark.parametrize("wf_id", sorted(WORKFLOWS))
+def test_no_input_the_worker_would_strip(wf_id):
+    assert _literal_dynamic_inputs(_load_workflow(WORKFLOWS[wf_id])) == []
+
+
+# The key itself, not kind_of(): an unknown kind is a failure of test_entry_shape
+# for that entry, not an error that stops every test of this file from running.
+@pytest.mark.parametrize("wf_id", sorted(w for w, e in WORKFLOWS.items()
+                                          if e.get("output_kind") == "text"))
+def test_text_workflows_generate_the_same_text_every_run(wf_id):
+    assert _text_generation_problems(_load_workflow(WORKFLOWS[wf_id])) == []
 
 
 @pytest.mark.parametrize("wf_id", sorted(WORKFLOWS))
@@ -284,3 +355,87 @@ def test_output_ancestors_helper():
         "6": {"class_type": "VHS_VideoCombine", "inputs": {"images": ["5", 0], "filename_prefix": "y"}},
     }
     assert _output_ancestors(wf) == {"1", "3", "5", "6"}
+
+
+def _sink(class_type, **inputs):
+    return {"class_type": class_type, "inputs": inputs}
+
+
+def test_sink_rules_by_output_kind():
+    image = {"1": _sink("SaveImage", filename_prefix="wf", images=["9", 0])}
+    assert _sink_problems("wf", {}, image) == []
+    assert _sink_problems("wf", {}, {}) == ["only SaveImage PNG outputs are compared"]
+    # A text sink in an image workflow is a second sink: it needs its own prefix.
+    both = {**image, "2": _sink("SaveText", filename_prefix="wf", text=["9", 0])}
+    assert _sink_problems("wf", {}, both) == ["a second sink needs a prefix of its own"]
+
+    text = {"1": _sink("SaveText", filename_prefix="wf", format="txt", text=["9", 0])}
+    kind = {"output_kind": "text"}
+    one_save, txt_only = ("exactly one SaveText is prefixed with the workflow id",
+                          "SaveText must write format txt: only .txt files are compared")
+    assert _sink_problems("wf", kind, text) == []
+    assert _sink_problems("wf", kind, image) == [one_save]
+    # The format is written out: a default the worker fills in is not what the file says.
+    for fmt in ("md", "json", None):
+        other = {"1": _sink("SaveText", filename_prefix="wf", format=fmt)}
+        assert _sink_problems("wf", kind, other) == [txt_only]
+    assert _sink_problems("wf", kind, {"1": _sink("SaveText", filename_prefix="wf")}) == [txt_only]
+    # A second text (the model's reasoning, say) is compared too, under a name of its own.
+    second = {**text, "2": _sink("SaveText", filename_prefix="wf_thinking", format="txt")}
+    assert _sink_problems("wf", kind, second) == []
+    assert _sink_problems("wf", kind, {**text, "2": text["1"]}) == [one_save]
+    for prefix, said in (("text/wf", "flat filename_prefix"), ("other", "prefixed 'wf_...'"),
+                         (None, "flat filename_prefix"), ("wf\\x", "flat filename_prefix")):
+        bad = {**text, "2": _sink("SaveImage", filename_prefix=prefix)}
+        assert said in _sink_problems("wf", kind, bad)[0]
+    # The id as a folder, as SaveText would write it without the lint.
+    nested = {"1": _sink("SaveText", filename_prefix="text/wf", format="txt")}
+    assert _sink_problems("wf", kind, nested) == [
+        one_save, "SaveText needs a flat filename_prefix, not 'text/wf'"]
+    with pytest.raises(ValueError, match="unknown output_kind"):
+        _sink_problems("wf", {"output_kind": "audio"}, text)
+
+
+def test_text_generation_and_dynamic_input_rules():
+    greedy = {"1": {"class_type": "TextGenerateV2",
+                    "inputs": {"sampling_mode": "off", "mtp": "off", "prompt": "x"}}}
+    assert _text_generation_problems(greedy) == []
+    sampled = {"1": {"class_type": "TextGenerateV2",
+                     "inputs": {"sampling_mode": "on", "sampling_mode.seed": 1}}}
+    assert _text_generation_problems(sampled) == [
+        "1: sampling_mode must be 'off' (greedy decoding)", "1: mtp must be set, and not to 'auto'"]
+    assert _literal_dynamic_inputs(sampled) == ["1:TextGenerateV2.sampling_mode.seed"]
+    # A linked sub-input is not a literal: the worker keeps links.
+    linked = {"1": {"class_type": "TextEncodeQwenImage21", "inputs": {"images.image_1": ["2", 0]}}}
+    assert _literal_dynamic_inputs(linked) == []
+    # `auto` follows measured timings; a fixed depth and the older node are held to the same.
+    for mtp, said in (("auto", ["1: mtp must be set, and not to 'auto'"]), ("off", []), ("2", [])):
+        node = {"class_type": "TextGenerate", "inputs": {"sampling_mode": "off", "mtp": mtp}}
+        assert _text_generation_problems({"1": node}) == said
+    assert _text_generation_problems({"1": {"class_type": "CLIPLoader", "inputs": {}}}) == []
+
+
+def test_the_text_workflows_are_declared_as_text_and_write_their_own_text_file():
+    """What the two staged workflows rely on, so an edit cannot drop it quietly.
+    Another text workflow is held to the rules above only: it may set a
+    similarity limit, save a second text or use a fixed mtp depth."""
+    text = {w: e for w, e in WORKFLOWS.items() if output_kinds.kind_of(e) == "text"}
+    assert {"llm_qwen38_27b_t2t", "llm_qwen3vl_4b_it2t"} <= set(text)
+    for wf_id in ("llm_qwen38_27b_t2t", "llm_qwen3vl_4b_it2t"):
+        entry = text[wf_id]
+        wf = _load_workflow(entry)
+        assert entry["thresholds"] is None, "exact match: no similarity limit to start with"
+        assert entry["seed_overrides"] == {}, "greedy decoding has no seed"
+        (save_id,) = [nid for nid, n in wf.items() if n["class_type"] == "SaveText"]
+        (gen_id,) = [nid for nid, n in wf.items() if n["class_type"].startswith("TextGenerate")]
+        save, gen = wf[save_id]["inputs"], wf[gen_id]["inputs"]
+        assert (save["filename_prefix"], save["format"]) == (wf_id, "txt")
+        assert save["text"] == [gen_id, 0], "output 0 is the generated text"
+        assert (gen["sampling_mode"], gen["mtp"], gen["thinking"]) == ("off", "off", False)
+        assert gen["use_default_template"] is True and 0 < gen["max_length"] <= 512
+        assert not [n for n in wf.values() if n["class_type"].startswith("Preview")]
+    # The 27B model loads 17 GB before it writes a token.
+    assert WORKFLOWS["llm_qwen38_27b_t2t"]["timeout_s"] == 900
+    assert WORKFLOWS["llm_qwen3vl_4b_it2t"]["timeout_s"] is None
+    # An image entry never names its kind: absent means image.
+    assert not [w for w, e in WORKFLOWS.items() if e.get("output_kind") == "image"]

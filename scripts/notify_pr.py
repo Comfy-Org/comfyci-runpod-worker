@@ -40,6 +40,7 @@ import requests
 
 import commit_meta
 import index_builder
+import output_kinds
 
 GITHUB_API = "https://api.github.com"
 REPO = "Comfy-Org/ComfyUI"
@@ -177,6 +178,33 @@ def _row(wf_id: str, wr: dict) -> str:
     return "| " + " | ".join(cells) + " |"
 
 
+def text_notes(wfs: dict, kinds: dict, cap: int = 3) -> list[str]:
+    """One line per text workflow whose change is new here: how far its text is
+    from the golden, in numbers only. The text itself is model output and never
+    enters a comment: it could carry mentions or links, and the comment is
+    posted from a person's account."""
+    notes = []
+    for wf_id in sorted(wfs):
+        vg = wfs[wf_id].get("vs_golden") or {}
+        if (kinds.get(wf_id) != "new_drift" or not isinstance(vg, dict)
+                or vg.get("kind") != "text" or vg.get("error")):
+            continue
+        sim, diff = vg.get("similarity"), vg.get("first_diff")
+        bits = []
+        if vg.get("files_compared") == 0:  # no pair of files, so no similarity to give
+            bits.append("its text file has another name than the golden's")
+        elif isinstance(sim, (int, float)) and not isinstance(sim, bool) and 0 <= sim <= 1:
+            bits.append(f"{output_kinds.percent(sim)}% similar to the golden"
+                        f"{output_kinds.basis_note(vg)}")
+        line, col = (diff.get(k) if isinstance(diff, dict) else None for k in ("line", "col"))
+        if all(isinstance(x, int) and not isinstance(x, bool) and 0 < x < 10 ** 9
+               for x in (line, col)):
+            bits.append(f"first difference at line {line}, column {col}")
+        if bits:
+            notes.append(f"- Text `{wf_id}`: " + ", ".join(bits))
+    return notes[:cap]
+
+
 def lane_line(summary: dict, lanes: dict | None) -> str:
     lane = ((lanes or {}).get("lanes") or {}).get(summary.get("lane")) or {}
     first = next(iter((summary.get("workflows") or {}).values()), {})
@@ -225,7 +253,8 @@ def render_changed(summary: dict, lanes: dict | None, max_len: int = MAX_BODY) -
     head = [f"**(PULSE)** {headline} · `{sha7}`", ""]
     table = ["| Workflow | Verdict | New / inherited | PSNR dB | Mean MSE | Pixels changed "
              "| Exec s | Peak VRAM |", "|---|---|---|---|---|---|---|---|"]
-    tail = [""]
+    notes = text_notes(wfs, kinds)
+    tail = ["", *notes, ""] if notes else [""]
     lane = lane_line(summary, lanes)
     if lane:
         tail.append(f"Lane: {lane}")

@@ -29,15 +29,17 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
-import compare
 import index_builder
 import lanes as lanes_mod
+import output_kinds
 import packs
 import storage
-from run_regression import apply_seed_overrides, entry_value, first_output_sha, load_manifest
+from run_regression import (COMPARATORS, apply_seed_overrides, comparator_for, entry_value,
+                            load_manifest)
 from submit_and_poll import RunPodClient, run_workflow_job
 
 HERE = Path(__file__).resolve().parent
@@ -76,10 +78,14 @@ def cuda_of(torch_version: str | None) -> str | None:
 
 
 def blessed_record(tag: str, commit: str, run: dict, lane: str, source: str,
-                   generated_by: str, reason: str | None, previous_tag: str | None) -> dict:
+                   generated_by: str, reason: str | None, previous_tag: str | None,
+                   comparator: output_kinds.Comparator | None = None) -> dict:
     """Environment identity of a golden. driver_version and image_sha are
-    filled in once the worker reports them (null until then)."""
-    return {
+    filled in once the worker reports them (null until then). `comparator` is
+    the one of the workflow's output kind (default: image); a golden of another
+    kind than image names its kind in `output_kind`."""
+    cmp_ = comparator or COMPARATORS[output_kinds.DEFAULT_KIND]
+    record = {
         "schema_version": 2,
         "tag": tag, "commit": commit, "source": source, "lane": lane,
         "gpu_name": run.get("gpu_name"),
@@ -88,13 +94,16 @@ def blessed_record(tag: str, commit: str, run: dict, lane: str, source: str,
         "cuda": cuda_of(run.get("torch_version")),
         "driver_version": run.get("driver_version"),
         "image_sha": (run.get("env") or {}).get("image_sha"),
-        "output_sha256": first_output_sha(run),
+        "output_sha256": cmp_.primary_sha(run),
         # The custom-node packs (sha, import status) the golden was generated with.
         "custom_nodes": run.get("custom_nodes"),
         "reason": reason,
         "previous_tag": previous_tag,
         "generated_by": generated_by, "generated_ts": int(time.time()),
     }
+    if cmp_.kind != output_kinds.DEFAULT_KIND:
+        record["output_kind"] = cmp_.kind
+    return record
 
 
 def golden_exists(store: storage.Storage, wf_id: str, tag: str) -> bool:
@@ -124,11 +133,32 @@ def bless(store: storage.Storage, wf_id: str, tag: str, blessed_by: str,
     return current
 
 
+def left_in_golden(store: storage.Storage, wf_id: str, tag: str, outputs: Path,
+                   comparator: output_kinds.Comparator) -> str | None:
+    """Why `outputs` must not be written over golden `tag`; None when they may.
+    The store adds files to a directory and removes none (--force). A compared
+    file that only the earlier golden has would stay in the reference, and
+    every run would then fail on the file count."""
+    if not comparator.bless_gate:
+        return None  # an image golden is written as it always was
+    with tempfile.TemporaryDirectory() as old:
+        store.fetch_golden_outputs(wf_id, tag, Path(old))
+        stale = comparator.left_behind(Path(old), outputs)
+    if not stale:
+        return None
+    return (f"golden {tag} holds {', '.join(stale[:5])}, which the new outputs do not have, and "
+            f"writing over a golden removes no file. Remove it from golden/{wf_id}/{tag}/outputs "
+            "on the results branch, or use another ref")
+
+
 def promote_run(store: storage.Storage, branch: str, commit: str, wf_id: str, tag: str,
-                lane: str, generated_by: str, reason: str | None, workdir: Path) -> bool:
+                lane: str, generated_by: str, reason: str | None, workdir: Path,
+                comparator: output_kinds.Comparator | None = None) -> bool:
     """Make an existing run's outputs the golden candidate for `tag` without a
     GPU run. The noise floor is inherited from the previous golden (same-env
-    determinism has been bit-exact so far) and marked as such."""
+    determinism has been bit-exact so far) and marked as such. `comparator` is
+    the one of the workflow's output kind (default: image)."""
+    cmp_ = comparator or COMPARATORS[output_kinds.DEFAULT_KIND]
     prefix = store.prefix
     run = store.download_json(f"{prefix}/runs/{branch}/{commit}/{wf_id}/run.json")
     outputs = workdir / wf_id / "outputs"
@@ -136,14 +166,36 @@ def promote_run(store: storage.Storage, branch: str, commit: str, wf_id: str, ta
     if not run or not n:
         print(f"::error::[{wf_id}] no published outputs for {branch}/{commit}")
         return False
+    # An inherited floor describes the earlier reference. What the bless gate
+    # asks about the output itself is read from the outputs that are promoted.
+    own = cmp_.describe(outputs) if cmp_.bless_gate else {}
+    # A compared file that the run listed and did not send is not among them:
+    # the reference would lack it, and no later run could pass.
+    lost = cmp_.transfer_error(run) or own.get("error")
+    if lost:
+        print(f"::error::[{wf_id}] {branch}/{commit} cannot be a reference: {lost}")
+        return False
     previous = store.download_json(f"{prefix}/golden/{wf_id}/current.json") or {}
     floor = None
     if previous.get("tag"):
         floor = store.noise_floor(wf_id, previous["tag"])
+        if floor and output_kinds.metrics_kind(floor) != cmp_.kind:
+            floor = None  # the earlier reference was of another output kind
     if not floor:
-        floor = {"identical": True, "mean_mse": 0.0, "mean_psnr_db": None, "min_psnr_db": None,
-                 "max_abs_diff": 0, "mean_pct_pixels_changed": 0.0}
-    floor = {**floor, "inherited_from": previous.get("tag"), "measured": False}
+        floor = cmp_.zero_floor()
+    floor = {**floor, **own, "inherited_from": previous.get("tag"), "measured": False}
+    # A floor that was not measured is held to no limit of the entry, so none is passed.
+    why = cmp_.blessable(floor, {}) if cmp_.bless_gate and previous.get("tag") == tag else None
+    if why:
+        # As for a generated golden: current.json points at this directory, and
+        # what may not be blessed must not replace the reference in it.
+        print(f"::error::[{wf_id}] golden {tag} is not blessed: {why}. It is the current "
+              "reference, so its files are left as they are")
+        return False
+    why = left_in_golden(store, wf_id, tag, outputs, cmp_)
+    if why:
+        print(f"::error::[{wf_id}] {why}")
+        return False
 
     base = f"{prefix}/golden/{wf_id}/{tag}"
     store.upload_dir(f"{base}/outputs", outputs)
@@ -151,7 +203,7 @@ def promote_run(store: storage.Storage, branch: str, commit: str, wf_id: str, ta
     store.upload_json(f"{base}/noise_floor.json", floor)
     store.upload_json(f"{base}/blessed.json",
                       blessed_record(tag, commit, run, lane, "from_run", generated_by, reason,
-                                     previous.get("tag")))
+                                     previous.get("tag"), cmp_))
     print(f"[{wf_id}] promoted {branch}/{commit[:8]} outputs to golden {tag}")
     return True
 
@@ -208,6 +260,11 @@ def main():
         del selected[wf_id]
     if not selected:
         raise SystemExit(f"no workflows selected for lane {lane}")
+    for wf_id, e in selected.items():
+        try:
+            comparator_for(e)
+        except ValueError as err:
+            raise SystemExit(f"[{wf_id}] {err}; see manifest/workflows.json")
 
     from_branch = from_commit = None
     if args.from_run:
@@ -224,10 +281,18 @@ def main():
 
     blessed: list[str] = []
 
-    def plan_bless(wf_id: str):
+    def plan_bless(wf_id: str) -> bool:
+        """Approve golden `tag` of a workflow, unless its kind says it must not be."""
+        cmp_ = comparator_for(selected[wf_id])
+        why = (cmp_.blessable(store.noise_floor(wf_id, tag), selected[wf_id])
+               if cmp_.bless_gate else None)
+        if why:
+            print(f"::error::[{wf_id}] golden {tag} is not blessed: {why}")
+            return False
         store.register_derived(lambda st, w=wf_id: bless(st, w, tag, args.blessed_by, args.reason))
         blessed.append(wf_id)
         print(f"[{wf_id}] blessing golden {tag}")
+        return True
 
     def finish(message: str, failed: list[str]) -> int:
         if blessed:
@@ -241,9 +306,8 @@ def main():
         if missing:
             print(f"::error::no generated golden {tag} for: {', '.join(missing)}; nothing blessed")
             return 1
-        for wf_id in selected:
-            plan_bless(wf_id)
-        return finish(f"bless golden {tag} ({', '.join(sorted(selected))})", [])
+        refused = [wf_id for wf_id in selected if not plan_bless(wf_id)]
+        return finish(f"bless golden {tag} ({', '.join(sorted(selected))})", refused)
 
     failed: list[str] = []
     if args.from_run:
@@ -253,9 +317,9 @@ def main():
                 failed.append(wf_id)
                 continue
             if promote_run(store, from_branch, from_commit, wf_id, tag, lane, args.blessed_by,
-                           args.reason, Path(args.workdir)):
-                if args.bless:
-                    plan_bless(wf_id)
+                           args.reason, Path(args.workdir), comparator_for(selected[wf_id])):
+                if args.bless and not plan_bless(wf_id):
+                    failed.append(wf_id)
             else:
                 failed.append(wf_id)
         return finish(f"golden {tag} from {args.from_run[:20]} ({', '.join(sorted(selected))})",
@@ -302,13 +366,32 @@ def main():
             failed.append(wf_id)
             continue
 
-        noise_floor = compare.compare_dirs(Path(runs[1]["outputs_dir"]),
-                                           Path(runs[2]["outputs_dir"]))
-        print(f"[{wf_id}] noise floor: "
-              f"{'identical' if noise_floor.get('identical') else json.dumps(noise_floor)[:200]}")
+        cmp_ = comparator_for(entry)
+        # A compared file that a run listed and did not send is in neither
+        # directory: the files that are left would compare as identical.
+        lost = cmp_.transfer_error(runs[1]) or cmp_.transfer_error(runs[2])
+        noise_floor = ({"kind": cmp_.kind, "error": lost} if lost else
+                       cmp_.compare(Path(runs[1]["outputs_dir"]), Path(runs[2]["outputs_dir"])))
+        # Numbers only: the two lines of a text difference are model output.
+        shown = json.dumps(output_kinds.loggable(noise_floor))[:200]
+        print(f"[{wf_id}] noise floor: {'identical' if noise_floor.get('identical') else shown}")
 
         previous = store.download_json(f"{args.prefix}/golden/{wf_id}/current.json") or {}
         base = f"{args.prefix}/golden/{wf_id}/{tag}"
+        why = (cmp_.blessable({**noise_floor, "measured": True}, entry)
+               if cmp_.bless_gate and previous.get("tag") == tag else None)
+        if why:
+            # current.json points at this directory: a golden that may not be
+            # blessed must not replace the reference every run is compared with.
+            print(f"::error::[{wf_id}] golden {tag} is not blessed: {why}. It is the current "
+                  "reference, so its files are left as they are")
+            failed.append(wf_id)
+            continue
+        why = left_in_golden(store, wf_id, tag, Path(runs[1]["outputs_dir"]), cmp_)
+        if why:
+            print(f"::error::[{wf_id}] {why}")
+            failed.append(wf_id)
+            continue
         store.upload_dir(f"{base}/outputs", Path(runs[1]["outputs_dir"]))
         store.upload_json(f"{base}/run_r1.json",
                           {k: v for k, v in runs[1].items() if k != "outputs_dir"})
@@ -317,10 +400,10 @@ def main():
         store.upload_json(f"{base}/noise_floor.json", {**noise_floor, "measured": True})
         store.upload_json(f"{base}/blessed.json",
                           blessed_record(tag, commit, runs[1], lane, "golden_run",
-                                         args.blessed_by, args.reason, previous.get("tag")))
+                                         args.blessed_by, args.reason, previous.get("tag"), cmp_))
         print(f"[{wf_id}] golden uploaded to {base}/")
-        if args.bless:
-            plan_bless(wf_id)
+        if args.bless and not plan_bless(wf_id):
+            failed.append(wf_id)
 
     return finish(f"golden {tag} ({', '.join(sorted(selected))})", failed)
 
