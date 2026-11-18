@@ -1,0 +1,172 @@
+{
+  "t2i_unet": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "z_image_turbo_bf16.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "t2i_clip": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen_3_4b.safetensors",
+      "type": "lumina2",
+      "device": "default"
+    }
+  },
+  "t2i_vae": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    }
+  },
+  "t2i_shift": {
+    "class_type": "ModelSamplingAuraFlow",
+    "inputs": {
+      "shift": 3,
+      "sampling": "flow",
+      "model": ["t2i_unet", 0]
+    }
+  },
+  "t2i_prompt": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": ["t2i_clip", 0],
+      "text": "A vintage tin toy robot standing upright, full body, centered, single object, isolated on a plain white background, soft even studio lighting, product photo."
+    }
+  },
+  "t2i_negative": {
+    "class_type": "ConditioningZeroOut",
+    "inputs": {
+      "conditioning": ["t2i_prompt", 0]
+    }
+  },
+  "t2i_latent": {
+    "class_type": "EmptySD3LatentImage",
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    }
+  },
+  "t2i_sampler": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 20261116,
+      "steps": 8,
+      "cfg": 1,
+      "sampler_name": "res_multistep",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": ["t2i_shift", 0],
+      "positive": ["t2i_prompt", 0],
+      "negative": ["t2i_negative", 0],
+      "latent_image": ["t2i_latent", 0]
+    }
+  },
+  "t2i_decode": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["t2i_sampler", 0],
+      "vae": ["t2i_vae", 0]
+    }
+  },
+  "hy_ckpt": {
+    "class_type": "ImageOnlyCheckpointLoader",
+    "inputs": {
+      "ckpt_name": "hunyuan_3d_v2.1.safetensors"
+    }
+  },
+  "hy_vision": {
+    "class_type": "CLIPVisionEncode",
+    "inputs": {
+      "crop": "center",
+      "clip_vision": ["hy_ckpt", 1],
+      "image": ["t2i_decode", 0]
+    }
+  },
+  "hy_cond": {
+    "class_type": "Hunyuan3Dv2Conditioning",
+    "inputs": {
+      "clip_vision_output": ["hy_vision", 0]
+    }
+  },
+  "hy_shift": {
+    "class_type": "ModelSamplingAuraFlow",
+    "inputs": {
+      "shift": 1,
+      "sampling": "flow",
+      "model": ["hy_ckpt", 0]
+    }
+  },
+  "hy_latent": {
+    "class_type": "EmptyLatentHunyuan3Dv2",
+    "inputs": {
+      "resolution": 4096,
+      "batch_size": 1
+    }
+  },
+  "hy_sampler": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 952805179515179,
+      "steps": 30,
+      "cfg": 5,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1,
+      "model": ["hy_shift", 0],
+      "positive": ["hy_cond", 0],
+      "negative": ["hy_cond", 1],
+      "latent_image": ["hy_latent", 0]
+    }
+  },
+  "hy_decode": {
+    "class_type": "VAEDecodeHunyuan3D",
+    "inputs": {
+      "num_chunks": 8000,
+      "octree_resolution": 128,
+      "samples": ["hy_sampler", 0],
+      "vae": ["hy_ckpt", 2]
+    }
+  },
+  "hy_mesh": {
+    "class_type": "VoxelToMesh",
+    "inputs": {
+      "algorithm": "surface net",
+      "threshold": 0.6,
+      "voxel": ["hy_decode", 0]
+    }
+  },
+  "render": {
+    "class_type": "RenderMesh",
+    "inputs": {
+      "mesh": ["hy_mesh", 0],
+      "mode": "normal",
+      "width": 1024,
+      "height": 1024,
+      "background": "#000000"
+    }
+  },
+  "frames": {
+    "class_type": "ImageBatch",
+    "inputs": {
+      "image1": ["render", 0],
+      "image2": ["t2i_decode", 0]
+    }
+  },
+  "save_png": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "hunyuan3d_2_1_t23d",
+      "images": ["frames", 0]
+    }
+  },
+  "save_glb": {
+    "class_type": "SaveGLB",
+    "inputs": {
+      "filename_prefix": "hunyuan3d_2_1_t23d_mesh",
+      "mesh": ["hy_mesh", 0]
+    }
+  }
+}

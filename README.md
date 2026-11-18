@@ -177,6 +177,33 @@ this repo per template.
    - Input images are listed under `models` with `"directory": "input"`, as
      for any workflow.
 
+   **A 3D workflow** (a model that makes a mesh, like the
+   `hunyuan3d_2_1_t23d` entry) is written by hand too: the importer stops on
+   a template that saves no picture ("expected exactly one SaveImage
+   output"). Convert the template with `scripts/template_api_export.py`,
+   then make sure of this:
+
+   - The entry names no `output_kind`: the main output is a picture.
+   - `RenderMesh` makes that picture from the mesh, and a `SaveImage` with
+     `filename_prefix` equal to the workflow id saves it. Without a camera
+     the node frames the mesh by itself. The picture is the run's thumbnail,
+     and what a reference would compare.
+   - `SaveGLB` saves the same mesh with `filename_prefix` `<id>_mesh`. A
+     template's own prefix has a folder (`3d/ComfyUI`), which the lint
+     refuses. A template that ends in `Save3DAdvanced` asks for the state of
+     the frontend's 3D viewer, which a run does not have: save the mesh with
+     `SaveGLB` there too.
+   - The picture then sorts before the mesh by name: `<id>_00001_.png`,
+     `<id>_mesh_00001_.glb`. The worker sends a run's files in name order,
+     15 MiB in all, and only lists the rest. So a large mesh never holds the
+     picture back.
+   - Keep the files small. The two Hunyuan3D workflows decode at
+     `octree_resolution` 128 where their templates say 256, for a mesh file
+     of a quarter the size.
+   - Start at smoke level. Whether a mesh comes out the same on every run
+     is known only once it has run on the workers: `smoke.files` in each
+     run's cell has the sha256 of every file.
+
 3. Check it. `python -m pytest scripts/tests -q` lints the manifest against
    every workflow it references (loaded files and `models` match both ways,
    every node feeds an output node, seed override targets, model folders,
@@ -819,8 +846,21 @@ once a week. **GPU regression (nightly and weekly)**
 `python scripts/lanes.py cadence nightly` prints the plan. With no such lane
 the plan is `[]`, it says why each lane of the cadence is left out, and the
 run ends after its plan job. So a lane can be declared before its endpoint
-exists, which is the state of both lanes today: no workflow has either
-cadence yet, and neither lane has an endpoint.
+exists, which is the state of both lanes today: neither has an endpoint. The
+nightly lane has its first workflows, and no workflow has the weekly cadence
+yet.
+
+The nightly lane's workflows, all at smoke level:
+
+| Workflow | What it runs | Files of a run | New on the volume |
+|---|---|---|---|
+| `hunyuan3d_2_1_t23d` | text to 3D: a picture from Z-Image Turbo (8 steps), then Hunyuan3D 2.1 (30 steps) and a mesh at octree resolution 128 | `hunyuan3d_2_1_t23d_00001_.png` (the mesh, rendered), `hunyuan3d_2_1_t23d_00002_.png` (the picture it was made from), `hunyuan3d_2_1_t23d_mesh_00001_.glb` | `hunyuan_3d_v2.1.safetensors`, 7.37 GB. The three Z-Image files are there for `z_image_turbo_t2i` |
+| `hunyuan3d_2_mv_turbo_mv23d` | multiview to 3D: four views of one object, Hunyuan3D 2 MV Turbo (20 steps), a mesh at octree resolution 128 | `hunyuan3d_2_mv_turbo_mv23d_00001_.png` (the mesh, rendered), `hunyuan3d_2_mv_turbo_mv23d_mesh_00001_.glb` | `hunyuan3d-dit-v2-mv-turbo_fp16.safetensors`, 4.93 GB, and the four views, 3.9 MB |
+
+None of them has run on a worker yet: the lane has no endpoint. The model
+sync does not wait for one. A nightly workflow's models are counted against
+the volume and downloaded to it on the merge, like those of a per-commit
+workflow (`lanes.volume_workflows`).
 
 - **One lane per cadence.** Everything the suite stores about a commit on a
   lane assumes that one run wrote it: the summary, the start marker, the

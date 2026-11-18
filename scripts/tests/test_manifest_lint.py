@@ -855,3 +855,85 @@ def test_the_text_workflows_are_declared_as_text_and_write_their_own_text_file()
     assert WORKFLOWS["llm_qwen3vl_4b_it2t"]["timeout_s"] is None
     # An image entry never names its kind: absent means image.
     assert not [w for w, e in WORKFLOWS.items() if e.get("output_kind") == "image"]
+
+
+NIGHTLY_LANE = "py313-torch2.14.1-cu130-nightly"
+THREE_D = ("hunyuan3d_2_1_t23d", "hunyuan3d_2_mv_turbo_mv23d")
+
+
+def _missing_files(wf_id: str, names: list[str]) -> list[str]:
+    """What the smoke checks say about a run of a manifest workflow that
+    listed these files and sent none of them. A file that was not sent passes
+    on its size, so what is left is the save nodes that have no file."""
+    entry = WORKFLOWS[wf_id]
+    record = {"outputs": [{"filename": name, "bytes": 4096, "truncated": True}
+                          for name in names]}
+    found = smoke.check_outputs(None, record, _load_workflow(entry),
+                                lanes_mod.expect_of(entry), "ok")
+    return [problem["text"] for problem in found["problems"]]
+
+
+def test_the_3d_workflows_run_nightly_at_smoke_level_and_save_a_picture_and_a_mesh():
+    """What the two Hunyuan3D workflows rely on, so an edit cannot drop it
+    quietly. A 3D workflow is an image workflow: the picture of its mesh is
+    the main output, and the GLB is a second file."""
+    for wf_id in THREE_D:
+        entry = WORKFLOWS[wf_id]
+        wf = _load_workflow(entry)
+        assert entry["enabled"] is True, "a smoke-level workflow needs no second pull request"
+        assert (lanes_mod.level_of(entry), lanes_mod.cadence_of(entry)) == ("smoke", "nightly")
+        assert output_kinds.kind_of(entry) == "image"
+        # The cadence finds the lane. A `lanes` list would tie the entry to one lane id.
+        assert entry.get("lanes") is None
+        assert lanes_mod.lanes_for_workflow(entry, LANES) == [NIGHTLY_LANE]
+        # The save nodes, as the smoke checks read them: the picture under the
+        # workflow id, the mesh under `<id>_mesh`.
+        assert [(s["node"], s["class"], s["prefix"]) for s in smoke.expected_outputs(wf)] == [
+            ("save_png", "SaveImage", wf_id), ("save_glb", "SaveGLB", f"{wf_id}_mesh")]
+        # The names ComfyUI gives the two files. Each must be there. The
+        # picture sorts first: the worker sends files in name order up to its
+        # size limit, so a large mesh never holds the picture back.
+        png, glb = f"{wf_id}_00001_.png", f"{wf_id}_mesh_00001_.glb"
+        assert png < glb
+        assert _missing_files(wf_id, [png, glb]) == []
+        assert _missing_files(wf_id, [png]) == [
+            f"SaveGLB wrote no 3D file with the prefix {wf_id}_mesh"]
+        assert _missing_files(wf_id, [glb]) == [
+            f"SaveImage wrote no .png file with the prefix {wf_id}"]
+        # The picture and the GLB are of the same mesh.
+        (render,) = [n for n in wf.values() if n["class_type"] == "RenderMesh"]
+        assert render["inputs"]["mesh"] == wf["save_glb"]["inputs"]["mesh"]
+        assert (render["inputs"]["width"], render["inputs"]["height"]) == (1024, 1024)
+        # Reduced for this suite: the templates decode at 256, a mesh file four times the size.
+        (decode,) = [n for n in wf.values() if n["class_type"] == "VAEDecodeHunyuan3D"]
+        assert decode["inputs"]["octree_resolution"] == 128
+    # The nightly lane reads its models from the volume. So the model sync
+    # fetches these on the merge, before the lane has an endpoint.
+    assert set(THREE_D) <= set(lanes_mod.volume_workflows(MANIFEST, LANES))
+
+    # Text to 3D starts with the stage of the per-commit Z-Image workflow: the
+    # same three files, which the volume holds already.
+    chain_id, views_id = THREE_D
+    chain, wf = WORKFLOWS[chain_id], _load_workflow(WORKFLOWS[chain_id])
+    shared = {(m["directory"], m["name"]) for m in WORKFLOWS["z_image_turbo_t2i"]["models"]}
+    own = {(m["directory"], m["name"]) for m in chain["models"]} - shared
+    assert len(shared) == 3 and own == {("checkpoints", "hunyuan_3d_v2.1.safetensors")}
+    # One node saves two pictures: the render first, then the picture the mesh
+    # was made from. The first by name is the thumbnail and the output sha.
+    assert wf["save_png"]["inputs"]["images"] == ["frames", 0]
+    assert list(wf["frames"]["inputs"].values()) == [["render", 0], ["t2i_decode", 0]]
+    assert _missing_files(chain_id, [f"{chain_id}_00001_.png", f"{chain_id}_00002_.png",
+                                     f"{chain_id}_mesh_00001_.glb"]) == []
+    assert set(chain["seed_overrides"]) == {"t2i_sampler", "hy_sampler"}
+    # Two models load, one after the other.
+    assert chain["timeout_s"] == 1200
+
+    # Multiview to 3D reads its four views from the volume's input folder.
+    views, wf = WORKFLOWS[views_id], _load_workflow(WORKFLOWS[views_id])
+    (cond,) = [n for n in wf.values() if n["class_type"] == "Hunyuan3Dv2ConditioningMultiView"]
+    assert sorted(cond["inputs"]) == ["back", "front", "left", "right"]
+    loaded = sorted(n["inputs"]["image"] for n in wf.values() if n["class_type"] == "LoadImage")
+    assert loaded == sorted(m["name"] for m in views["models"] if m["directory"] == "input")
+    assert len(loaded) == 4
+    assert wf["save_png"]["inputs"]["images"] == ["render", 0]
+    assert views["timeout_s"] == 900
