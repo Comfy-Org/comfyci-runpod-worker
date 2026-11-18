@@ -747,8 +747,11 @@ empty, they resolve to the lane that owns the bare `regression` prefix
 scripts/runpod_endpoints.py status` prints the endpoint of every provisioned
 lane, and each setting that differs from `lanes.json`: the largest number of
 workers (the lane's `workers_max`, else `endpoint_defaults.workers.max`), the
-idle timeout (`idle_timeout_s`, else `endpoint_defaults.workers.idleTimeout`)
-and the disk (`disk_gb`, else `endpoint_defaults.disk_gb`). A retired lane's
+idle timeout (`idle_timeout_s`, else `endpoint_defaults.workers.idleTimeout`),
+the disk (`disk_gb`, else `endpoint_defaults.disk_gb`), and the GPU pools, the
+data centers and the network volumes (the lane's `gpu_pools`,
+`data_center_ids` and `network_volumes`, else the lists of
+`endpoint_defaults`; the order of a list does not count). A retired lane's
 endpoint is held to 0 workers and nothing else. `--strict` exits 1 when
 something differs. Without another flag the command only reads.
 
@@ -795,8 +798,9 @@ cadence yet, and neither lane has an endpoint.
   `"endpoint_name": "comfyci-cu130-nightly-weekly"`, so a nightly or weekly
   run never takes a worker from a per-commit run. Lanes that share an
   endpoint (the same `endpoint_name` or the same `endpoint_id`) must say the
-  same `image`, `endpoint_name`, `workers_max`, `disk_gb`, `idle_timeout_s`
-  and `env`, and one name cannot stand for two ids: `validate` checks it.
+  same `image`, `endpoint_name`, `workers_max`, `disk_gb`, `idle_timeout_s`,
+  `env`, `gpu_pools`, `data_center_ids` and `network_volumes`, and one name
+  cannot stand for two ids: `validate` checks it.
   `runpod_endpoints.py set-image` sends such an endpoint one PATCH, and
   `create` refuses to make it twice.
 - **Each lane job** runs the steps of the per-commit lane job (a test holds
@@ -910,6 +914,9 @@ type:
 | `disk_gb` | `runpod_endpoints.py create`, `status` | container disk of the endpoint's workers (default `endpoint_defaults.disk_gb`, 40) |
 | `idle_timeout_s` | `runpod_endpoints.py create`, `status` | how long a worker stays up after a job (default `endpoint_defaults.workers.idleTimeout`, 20) |
 | `env` | `runpod_endpoints.py create` | environment variables of the endpoint, on top of `endpoint_defaults.env` |
+| `gpu_pools` | `runpod_endpoints.py create`, `status` | the RunPod GPU pools the endpoint's workers run on, at least one (default `endpoint_defaults.gpu_pools`: `ADA_24`, the RTX 4090). The lane's `gpu` stays the label people read and selects nothing |
+| `data_center_ids` | `runpod_endpoints.py create`, `status` | the data centers the workers may run in, at least one (default `endpoint_defaults.data_center_ids`: `EU-RO-1`) |
+| `network_volumes` | `runpod_endpoints.py create`, `status`, `validate`, the manifest lint | the network volumes the workers mount (default `endpoint_defaults.network_volumes`: the model volume). `[]` means no volume: the lane must then say `"model_storage": "job"`, and a workflow that runs only on such lanes does not count against the volume's size |
 | `timeout_minutes` | `lanes.py cadence`, `nightly-weekly.yml`, `run_regression.py` | the time limit of the lane's job (default 360, GitHub's own). On a nightly or weekly lane the run's own deadline is this minus 25 |
 | `max_in_flight` | `run_regression.py` | how many jobs a run has on the endpoint at once (default: all of them, as on the per-commit lanes). `--max-in-flight` overrides it |
 | `model_storage` | the manifest lint | `"job"`: the lane's models are not on the network volume, so they do not count against its size. Nothing fetches models for a job yet, so such a lane cannot run. Default `"volume"` |
@@ -971,8 +978,10 @@ The cu132 lane is the worked example.
    The request comes from `endpoint_defaults` in `lanes.json` (pool, workers,
    volume, data center, registry credential, timeouts) plus the lane's CUDA
    floor and the endpoint keys the lane names (`endpoint_name`,
-   `workers_max`, `disk_gb`, `idle_timeout_s`, `env`, see
-   [Nightly and weekly lanes](#nightly-and-weekly-lanes)); `--dry-run` prints
+   `workers_max`, `disk_gb`, `idle_timeout_s`, `env`, `gpu_pools`,
+   `data_center_ids`, `network_volumes`, see
+   [Nightly and weekly lanes](#nightly-and-weekly-lanes) and
+   [A lane on another card](#a-lane-on-another-card)); `--dry-run` prints
    it, `--write` records the new id as the lane's
    `endpoint_id`. Commit that. The account has a 10-worker quota across all
    endpoints; if the create is refused, give the lane `"workers_max": 2`.
@@ -1026,6 +1035,63 @@ The cu132 lane is the worked example.
 5. Its cron picks the lane up from the first night or Sunday on which it has
    an endpoint and an enabled workflow of its cadence. Until then
    `python scripts/lanes.py cadence <cadence>` prints `[]` and says why.
+
+#### A lane on another card
+
+Every lane gets the GPU pool, the data center and the network volume of
+`endpoint_defaults`: the RTX 4090 pool in EU-RO-1, with the model volume. A
+lane can name its own with `gpu_pools`, `data_center_ids` and
+`network_volumes`. Each replaces the default list whole, and a key the lane
+leaves out keeps the default. A weekly lane for models that need more than
+24 GB, on the 96 GB pool, in three data centers, without the model volume:
+
+```json
+"py313-torch2.14.1-cu130-weekly-96gb": {
+  "label": "weekly · py3.13 / torch 2.14.1 / cu130 / RTX PRO 6000",
+  "python": "3.13", "torch": "2.14.1", "cuda": "13.0", "gpu": "RTX PRO 6000",
+  "cadence": "weekly", "blocking": false, "role": "lane", "layout": 2,
+  "prefix": "regression/lanes/py313-torch2.14.1-cu130-weekly-96gb",
+  "image": "cu130-t2141", "endpoint_id": null, "min_cuda_driver": "13.0",
+  "endpoint_name": "comfyci-cu130-weekly-96gb",
+  "gpu_pools": ["BLACKWELL_96"],
+  "data_center_ids": ["US-CA-2", "US-NC-1", "EUR-IS-2"],
+  "network_volumes": [], "model_storage": "job",
+  "workers_max": 1, "disk_gb": 120, "idle_timeout_s": 60,
+  "env": {"HF_TOKEN": "{{ RUNPOD_SECRET_hf_token }}"},
+  "max_in_flight": 1, "timeout_minutes": 350}
+```
+
+- **The pool.** `GET https://api.runpod.io/v2/catalog/gpus` (with the API
+  key) lists every card with its `pool`: `ADA_24` is the RTX 4090,
+  `ADA_48_PRO` the 48 GB cards (L40S, RTX 6000 Ada), `BLACKWELL_96` the RTX
+  PRO 6000 with 96 GB. With `?include=AVAILABILITY&product=SERVERLESS` it
+  also names the data centers that have each card now, and the CUDA versions
+  of their hosts (`min_cuda_driver` is the floor).
+- **`gpu` is the label.** It is published with the lane, and people read it
+  on the dashboard and in a PR comment. It selects nothing, so write the card
+  the pool gives.
+- **No volume.** A network volume lives in one data center, and only workers
+  there mount it. The model volume is in EU-RO-1, so a lane in other data
+  centers runs without it: `"network_volumes": []`. `validate` then asks for
+  `"model_storage": "job"`, and the lint does not count a workflow that runs
+  only on such lanes against the volume. Nothing fetches models for a job
+  yet, so such a lane cannot run until that exists.
+- **Another volume.** A lane may name a volume in its own data center
+  instead. The model sync fills only the volume of the primary lane's
+  endpoint, so the models have to be copied there by hand, and the lint
+  counts the lane's model files against `endpoint_defaults.volume_gb` like
+  those of any other lane.
+- **Its own endpoint.** Give the lane an `endpoint_name`. Lanes that share an
+  endpoint must name the same three lists.
+- **Its workflows.** A weekly workflow without a `lanes` list runs on every
+  weekly lane. So name this lane in the `lanes` list of each workflow that
+  needs the card, and the other weekly lane in the lists of the rest.
+- **Workers.** Count them before the create: the account's quota of 10 is
+  over all its endpoints.
+
+The steps are those of any lane: create the endpoint (step 3 above,
+`--dry-run` shows the pool, the data centers and the volumes it will ask
+for), then the references. `status` holds the endpoint to the lane's lists.
 
 ### Changing the primary lane
 

@@ -3,7 +3,8 @@
   status [--lane ID] [--strict] [--restore-workers]
       image, workers, GPU pool and CUDA floor of each provisioned lane's endpoint,
       and every setting that differs from the manifest: the largest number of
-      workers, the idle timeout and the disk (a retired lane: 0 workers).
+      workers, the idle timeout, the disk, the GPU pools, the data centers and
+      the network volumes (a retired lane: 0 workers).
       --strict exits 1 when one differs. --restore-workers first raises the
       largest number of workers to the manifest's when RunPod lowered it (it
       does that to an endpoint nobody used for some days), with one PATCH.
@@ -16,8 +17,9 @@
   create --lane ID --tag TAG [--dry-run] [--write]
       create the lane's endpoint from `endpoint_defaults` in lanes.json plus the
       lane's own settings (GPU and CUDA, and when it names them `endpoint_name`,
-      `workers_max`, `disk_gb`, `idle_timeout_s` and `env`), print its id, and
-      with --write record it as the lane's endpoint_id. Billable once workers
+      `workers_max`, `disk_gb`, `idle_timeout_s`, `env`, `gpu_pools`,
+      `data_center_ids` and `network_volumes`), print its id, and with --write
+      record it as the lane's endpoint_id. Billable once workers
       run (nothing while idle at workers.min 0); run it by hand, once per
       endpoint. A lane that shares the endpoint gets the id by hand.
 
@@ -105,7 +107,10 @@ def endpoint_name(cfg: dict) -> str:
 
 
 def endpoint_body(lanes: dict, lane_id: str, tag: str) -> dict:
-    """The REST v2 CreateEndpointRequest for a lane, from endpoint_defaults + the lane."""
+    """The REST v2 CreateEndpointRequest for a lane, from endpoint_defaults + the lane.
+    The lane's own `gpu_pools`, `data_center_ids` and `network_volumes` replace
+    the lists of endpoint_defaults, and an empty `network_volumes` asks for an
+    endpoint without a volume."""
     cfg = lane_config(lanes, lane_id)
     if not cfg:
         raise SystemExit(f"unknown lane {lane_id!r}")
@@ -123,24 +128,31 @@ def endpoint_body(lanes: dict, lane_id: str, tag: str) -> dict:
     image_id = cfg.get("image") or ""
     check_tag(image_id, tag)
     d = lanes.get("endpoint_defaults") or {}
-    missing = [k for k in ("gpu_pools", "network_volumes", "data_center_ids", "registry") if not d.get(k)]
+    # GPU pools, data centers and network volumes: the lane's own list first.
+    place = {key: lanes_mod.placement_of(lanes, cfg, key) for key in lanes_mod.PLACEMENT_KEYS}
+    # An empty list of volumes is a choice: no volume. Nothing else may be empty.
+    missing = [key for key, ids in place.items()
+               if ids is None or (not ids and key != "network_volumes")]
     if missing:
-        raise SystemExit(f"endpoint_defaults is missing {', '.join(missing)}")
+        raise SystemExit(f"lane {lane_id!r} has no {', '.join(missing)}: neither the lane nor "
+                         "endpoint_defaults names one")
+    if not d.get("registry"):
+        raise SystemExit("endpoint_defaults is missing registry")
     workers, disk = endpoint_settings(lanes, cfg)
     return {
         "name": endpoint_name(cfg),
         "type": "QUEUE",
         "image": image_ref(tag),
         "registry": d["registry"],
-        "gpu": {"pools": list(d["gpu_pools"]), "count": int(d.get("gpu_count", 1)),
+        "gpu": {"pools": list(place["gpu_pools"]), "count": int(d.get("gpu_count", 1)),
                 # The lane's CUDA channel is the floor the host driver must meet.
                 "minCudaVersion": str(cfg.get("min_cuda_driver") or cfg.get("cuda"))},
         "workers": workers,
         "scaling": dict(d.get("scaling") or {"type": "QUEUE_DELAY", "queueDelay": 4}),
         "timeout": int(d.get("timeout_ms", 3600000)),
         "flashboot": d.get("flashboot", "FLASHBOOT"),
-        "networkVolumes": list(d["network_volumes"]),
-        "dataCenterIds": list(d["data_center_ids"]),
+        "networkVolumes": list(place["network_volumes"]),
+        "dataCenterIds": list(place["data_center_ids"]),
         "disk": disk,
         # The lane's own variables on top of the defaults.
         "env": {**(d.get("env") or {}), **(cfg.get("env") or {})},
@@ -221,10 +233,21 @@ def set_image(lanes: dict, tag: str, lane_id: str | None, image_id: str | None,
     return 0
 
 
+def _ids(value):
+    """A list of ids as `status` compares it: sorted, because RunPod gives the
+    order no meaning. A list RunPod leaves out is an empty one."""
+    if value is None:
+        return []
+    return sorted(value, key=str) if isinstance(value, list) else value
+
+
 def differences(lanes: dict, lane_id: str, ep: dict) -> list[str]:
     """Where a lane's live endpoint `ep` is not what the manifest says, as
-    sentences. A retired lane runs nothing: only its largest number of workers
-    is held, to 0, so it takes no share of the account's worker quota."""
+    sentences. The GPU pools, data centers and network volumes are held to the
+    lane's own lists, else to the ones of endpoint_defaults (a list neither
+    names is held to nothing). A retired lane runs nothing: only its largest
+    number of workers is held, to 0, so it takes no share of the account's
+    worker quota."""
     cfg = lane_config(lanes, lane_id)
     live = ep.get("workers") or {}
     if lanes_mod.is_retired(cfg):
@@ -234,6 +257,13 @@ def differences(lanes: dict, lane_id: str, ep: dict) -> list[str]:
         pairs, why = [("workers.max", live.get("max"), workers.get("max")),
                       ("workers.idleTimeout", live.get("idleTimeout"), workers.get("idleTimeout")),
                       ("disk", ep.get("disk"), disk)], ""
+        placed = {"gpu_pools": ("gpu.pools", (ep.get("gpu") or {}).get("pools")),
+                  "data_center_ids": ("dataCenterIds", ep.get("dataCenterIds")),
+                  "network_volumes": ("networkVolumes", ep.get("networkVolumes"))}
+        for key, (name, have) in placed.items():
+            want = lanes_mod.placement_of(lanes, cfg, key)
+            if want is not None:
+                pairs.append((name, _ids(have), _ids(want)))
     return [f"{name} is {have!r} on RunPod, the manifest says {want!r}{why}"
             for name, have, want in pairs if have != want]
 

@@ -208,10 +208,13 @@ def _volume_files(manifest: dict, lanes: dict) -> dict[str, int]:
     and input files of every workflow, enabled or not (the sync fetches both),
     that runs on a lane whose models are on the volume. Each file counts once.
     A workflow runs on the lanes of its own cadence, so one that only the
-    weekly lane runs, whose models each job fetches, takes no room here."""
+    weekly lane runs, whose models each job fetches, takes no room here. Nor
+    does one that runs only on lanes without the volume (an empty
+    `network_volumes`)."""
     files: dict[str, int] = {}
     for lane_id, lane in lanes["lanes"].items():
-        if lanes_mod.is_retired(lane) or lane.get("model_storage") == "job":
+        if (lanes_mod.is_retired(lane) or lane.get("model_storage") == "job"
+                or lanes_mod.without_volume(lanes, lane)):
             continue
         for wf_id in lanes_mod.workflows_for_lane(manifest, lane_id, enabled_only=False,
                                                   lane=lane):
@@ -455,6 +458,40 @@ def test_the_volume_rule_counts_each_file_once_and_stops_at_90_percent():
         said = _volume_problems(manifest, {**lanes, "endpoint_defaults": {"volume_gb": size}})
         assert len(said) == 1 and "volume_gb" in said[0], size
     assert "volume_gb" in _volume_problems(manifest, {"lanes": {}})[0]
+
+
+def test_a_workflow_only_on_lanes_without_the_volume_does_not_count_against_it():
+    """A lane on another card, in other data centers, mounts no volume
+    (`"network_volumes": []`), so its workflows take no room on one."""
+    def model(name, size):
+        return {"name": name, "url": "https://x/" + name, "directory": "vae", "bytes": size}
+
+    def lanes(**big):
+        return {"endpoint_defaults": {"volume_gb": 10, "network_volumes": ["vol"]}, "lanes": {
+            "volume": {"cadence": "per-commit"}, "big": {"cadence": "weekly", **big}}}
+
+    manifest = {"workflows": {
+        "a": {"enabled": True, "models": [model("a", 2 * 10**9)]},
+        "huge": {"enabled": True, "cadence": "weekly", "models": [model("huge", 60 * 10**9)]}}}
+    apart = lanes(network_volumes=[])
+    assert _volume_files(manifest, apart) == {"vae/a": 2 * 10**9}
+    assert _volume_problems(manifest, apart) == []
+    # The same lane with the default volume, or with a volume it names: the
+    # file counts. The lint knows one size, whatever the volume.
+    for own in ({}, {"network_volumes": None}, {"network_volumes": ["vol2"]}):
+        files = _volume_files(manifest, lanes(**own))
+        assert files == {"vae/a": 2 * 10**9, "vae/huge": 60 * 10**9}, own
+        assert len(_volume_problems(manifest, lanes(**own))) == 1, own
+    # A workflow that a lane with the volume runs too still counts.
+    two = lanes(network_volumes=[])
+    two["lanes"]["week"] = {"cadence": "weekly"}
+    assert "vae/huge" in _volume_files(manifest, two)
+    manifest["workflows"]["huge"]["lanes"] = ["big"]
+    assert _volume_files(manifest, two) == {"vae/a": 2 * 10**9}
+    # Defaults without a volume: only a lane that names one counts.
+    none = lanes(network_volumes=["vol"])
+    none["endpoint_defaults"]["network_volumes"] = []
+    assert _volume_files(manifest, none) == {"vae/huge": 60 * 10**9}
 
 
 def test_builtin_loader_values_need_no_model_entry():

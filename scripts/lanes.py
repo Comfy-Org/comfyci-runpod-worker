@@ -26,6 +26,11 @@ smoke), its `cadence` and its `expect`.
 Lanes can share one RunPod endpoint (the nightly and the weekly lane do).
 `validate` holds such lanes to the same image and endpoint settings.
 
+A lane may name its own GPU pools, data centers and network volumes
+(`gpu_pools`, `data_center_ids`, `network_volumes`). Each replaces the list of
+`endpoint_defaults` (`placement_of`), and an empty list of volumes means no
+volume (`without_volume`).
+
   python scripts/lanes.py images [--only a,b]      JSON list of images to build
                           [--since REV]            only the images changed after commit REV
   python scripts/lanes.py per-commit [--only a,b]  JSON list of provisioned per-commit lanes
@@ -86,8 +91,12 @@ EXPECT_KEYS = ("width", "height", "frames", "seconds", "min_chars")
 LANE_COUNTS = ("workers_max", "disk_gb", "idle_timeout_s", "max_in_flight", "timeout_minutes")
 # Where a lane's models are: on the network volume, or fetched for each job.
 MODEL_STORAGE = ("volume", "job")
+# Lists a lane may name in place of the ones `endpoint_defaults` has: the GPU
+# pools its workers run on, their data centers and their network volumes.
+PLACEMENT_KEYS = ("gpu_pools", "data_center_ids", "network_volumes")
 # What lanes on one endpoint must say alike: an endpoint has one of each.
-ENDPOINT_KEYS = ("image", "endpoint_name", "workers_max", "disk_gb", "idle_timeout_s", "env")
+ENDPOINT_KEYS = ("image", "endpoint_name", "workers_max", "disk_gb", "idle_timeout_s", "env",
+                 *PLACEMENT_KEYS)
 # The time limit of a nightly or weekly job whose lane names none: GitHub's own
 # limit for a job on a hosted runner.
 DEFAULT_TIMEOUT_MINUTES = 360
@@ -96,6 +105,20 @@ DEFAULT_TIMEOUT_MINUTES = 360
 def is_long_cadence(lane: dict | None) -> bool:
     """A lane that runs once a night or once a week, not on every commit."""
     return (lane or {}).get("cadence") in LONG_CADENCES
+
+
+def placement_of(lanes: dict, lane: dict | None, key: str) -> list | None:
+    """A lane's GPU pools, data centers or network volumes (`key`, one of
+    PLACEMENT_KEYS): its own list when it names one, else the list of
+    `endpoint_defaults`. None when neither names one."""
+    own = (lane or {}).get(key)
+    return own if own is not None else (lanes.get("endpoint_defaults") or {}).get(key)
+
+
+def without_volume(lanes: dict, lane: dict | None) -> bool:
+    """Whether a lane's workers mount no network volume: its list of volumes
+    (`placement_of`) is empty. Such a lane cannot read models from a volume."""
+    return placement_of(lanes, lane, "network_volumes") == []
 
 
 def _choice(entry: dict | None, key: str, known: tuple[str, ...]) -> str:
@@ -382,7 +405,8 @@ def lanes_on_image(lanes: dict, image_id: str) -> list[str]:
 
 def _lane_key_problems(lane_id: str, lane: dict) -> list[str]:
     """Problems with the optional keys of one lane: its counts, where its
-    models are, and the name and environment of its endpoint."""
+    models are, the name and environment of its endpoint, and its own GPU
+    pools, data centers and network volumes."""
     problems = []
     for key in LANE_COUNTS:
         value = lane.get(key)
@@ -390,6 +414,15 @@ def _lane_key_problems(lane_id: str, lane: dict) -> list[str]:
                                   or value < 1):
             problems.append(f"lane {lane_id}: {key} must be a whole number above 0, "
                             f"not {value!r}")
+    for key in PLACEMENT_KEYS:
+        value = lane.get(key)
+        ids = isinstance(value, list) and all(isinstance(v, str) and v for v in value)
+        # Only the volumes may be an empty list: it means no volume.
+        if value is None or (ids and (value or key == "network_volumes")):
+            continue
+        wanted = ("a list of volume ids, or [] for no volume" if key == "network_volumes"
+                  else "a list of at least one id")
+        problems.append(f"lane {lane_id}: {key} must be {wanted}, not {value!r}")
     where = lane.get("model_storage")
     if where is not None and not (isinstance(where, str) and where in MODEL_STORAGE):
         problems.append(f"lane {lane_id}: model_storage must be one of "
@@ -437,6 +470,9 @@ def _shared_endpoint_problems(entries: dict) -> list[str]:
 
 def validate(lanes: dict, manifest: dict | None = None, packs: dict | None = None) -> list[str]:
     """Problems with a registry, as messages; an empty list means it is consistent.
+
+    A lane without a network volume, retired lanes aside, must say
+    `"model_storage": "job"`: there is no volume to read its models from.
 
     With the workflows manifest, every `lanes` filter must name declared lanes,
     a workflow with `custom_nodes` must be restricted to lanes whose image
@@ -494,6 +530,11 @@ def validate(lanes: dict, manifest: dict | None = None, packs: dict | None = Non
                 problems.append(f"lane {lane_id}: {field} {lane[field]!r} disagrees with its "
                                 f"image's {image[field]!r}")
         problems += _lane_key_problems(lane_id, lane)
+        # The model sync fills a network volume. A lane without one reads none of it.
+        if (not is_retired(lane) and without_volume(lanes, lane)
+                and lane.get("model_storage") != "job"):
+            problems.append(f"lane {lane_id}: it has no network volume, so model_storage must "
+                            f"be 'job', not {lane.get('model_storage')!r}")
     problems += _shared_endpoint_problems(entries)
     layout1 = [lane_id for lane_id, lane in entries.items() if lane.get("layout") == 1]
     if len(layout1) > 1:

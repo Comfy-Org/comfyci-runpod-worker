@@ -556,7 +556,10 @@ def test_status_compares_workers_idle_time_and_disk_with_what_create_asks_for():
     assert diff(reg, "main", {}) == [
         "workers.max is None on RunPod, the manifest says 3",
         "workers.idleTimeout is None on RunPod, the manifest says 20",
-        "disk is None on RunPod, the manifest says 40"]
+        "disk is None on RunPod, the manifest says 40",
+        "gpu.pools is [] on RunPod, the manifest says ['ADA_24']",
+        "dataCenterIds is [] on RunPod, the manifest says ['EU-RO-1']",
+        "networkVolumes is [] on RunPod, the manifest says ['n0xnkwnogx']"]
     # The lane's own largest number of workers, as `create` reads it.
     reg["lanes"]["main"]["workers_max"] = 2
     assert diff(reg, "main", _live(workers_max=2)) == []
@@ -758,7 +761,7 @@ def test_the_committed_nightly_and_weekly_lanes():
         assert lane["endpoint_id"] != lanes[PRIMARY]["endpoint_id"]
     assert "model_storage" not in lanes[NIGHTLY] and lanes[WEEKLY]["model_storage"] == "job"
     for key in lanes_mod.ENDPOINT_KEYS:
-        assert lanes[NIGHTLY][key] == lanes[WEEKLY][key], key
+        assert lanes[NIGHTLY].get(key) == lanes[WEEKLY].get(key), key
     # More workers than jobs at once: a worker whose host is busy cannot start.
     assert lanes[NIGHTLY]["workers_max"] > lanes[NIGHTLY]["max_in_flight"]
     # Neither is a per-commit lane, whatever endpoint it has.
@@ -1201,3 +1204,258 @@ def test_a_refused_restore_ends_the_step_with_runpods_message(monkeypatch, capsy
         real_client("key", "https://runpod.invalid").patch("ep-1", {"workers": {}})
     assert str(stop.value) == ('update of endpoint ep-1 failed (400): {"error": "max workers '
                                'quota exceeded"}')
+
+
+def _create_request(name, tag, cuda, idle=20, disk=40, env=None):
+    """The create request of one of today's lanes, key by key in the order it
+    is sent: the 24 GB pool, the one data center and the model volume."""
+    return {"name": name, "type": "QUEUE",
+            "image": f"ghcr.io/comfy-org/comfyci-runpod-worker:{tag}",
+            "registry": "cmszcugyp001tfk7ooe7rtp4d",
+            "gpu": {"pools": ["ADA_24"], "count": 1, "minCudaVersion": cuda},
+            "workers": {"min": 0, "max": 3, "idleTimeout": idle},
+            "scaling": {"type": "QUEUE_DELAY", "queueDelay": 4},
+            "timeout": 3600000, "flashboot": "FLASHBOOT",
+            "networkVolumes": ["n0xnkwnogx"], "dataCenterIds": ["EU-RO-1"], "disk": disk,
+            "env": {"RUNPOD_INIT_TIMEOUT": "800", **(env or {})}}
+
+
+def test_the_create_requests_of_todays_lanes_are_what_they_were():
+    """No lane of today names GPU pools, data centers or volumes of its own,
+    so each request is the one it was before a lane could. The text is
+    compared, so the order of the keys counts too."""
+    blank = copy.deepcopy(REGISTRY)
+    for lane in blank["lanes"].values():
+        lane["endpoint_id"] = None
+    shared = _create_request("comfyci-cu130-nightly-weekly", "cu130-t2141-abc", "13.0", idle=60,
+                             disk=120, env={"HF_TOKEN": "{{ RUNPOD_SECRET_hf_token }}"})
+    wanted = {PRIMARY: _create_request("comfyci-cu130-t2141", "cu130-t2141-abc", "13.0"),
+              NEW: _create_request("comfyci-cu132-t2150", "cu132-t2150-abc", "13.2"),
+              NIGHTLY: shared, WEEKLY: shared}
+    for lane_id, want in wanted.items():
+        tag = f"{REGISTRY['lanes'][lane_id]['image']}-abc"
+        body = runpod_endpoints.endpoint_body(blank, lane_id, tag)
+        assert json.dumps(body, indent=2) == json.dumps(want, indent=2), lane_id
+
+
+# A weekly lane for models that need more than 24 GB: the 96 GB pool, in the
+# data centers that have it, and no model volume.
+OTHER_CARD = {"gpu": "RTX PRO 6000", "gpu_pools": ["BLACKWELL_96"],
+              "data_center_ids": ["US-NC-1", "US-CA-2"], "network_volumes": [],
+              "model_storage": "job"}
+
+
+def test_a_lane_may_name_its_own_gpu_pools_data_centers_and_volumes():
+    plain = runpod_endpoints.endpoint_body(PENDING, NEW, "cu132-t2150-abc")
+    reg = copy.deepcopy(PENDING)
+    reg["lanes"][NEW].update(OTHER_CARD)
+    assert lanes_mod.validate(reg, MANIFEST, PACKS) == []
+    body = runpod_endpoints.endpoint_body(reg, NEW, "cu132-t2150-abc")
+    assert body["gpu"] == {"pools": ["BLACKWELL_96"], "count": 1, "minCudaVersion": "13.2"}
+    assert body["dataCenterIds"] == ["US-NC-1", "US-CA-2"]
+    assert body["networkVolumes"] == []  # an empty list: an endpoint without a volume
+    # Nothing else of the request changes, and the defaults stay as they were.
+    assert list(body) == list(plain)
+    assert {k for k in body if body[k] != plain[k]} == {"gpu", "dataCenterIds", "networkVolumes"}
+    assert reg["endpoint_defaults"] == REGISTRY["endpoint_defaults"]
+    # The `gpu` key is the label people read. It selects nothing.
+    reg["lanes"][NEW]["gpu"] = "RTX 4090"
+    assert runpod_endpoints.endpoint_body(reg, NEW, "cu132-t2150-abc") == body
+    # Each key replaces its own default and no other, with a list of its own.
+    for key, value, sent in (("gpu_pools", ["ADA_48_PRO", "AMPERE_48"], "gpu"),
+                             ("data_center_ids", ["US-IL-1"], "dataCenterIds"),
+                             ("network_volumes", ["vol2"], "networkVolumes")):
+        one = copy.deepcopy(PENDING)
+        one["lanes"][NEW][key] = value
+        assert lanes_mod.placement_of(one, one["lanes"][NEW], key) == value
+        assert lanes_mod.placement_of(one, one["lanes"][PRIMARY], key) == (
+            REGISTRY["endpoint_defaults"][key])
+        body = runpod_endpoints.endpoint_body(one, NEW, "cu132-t2150-abc")
+        assert {k for k in body if body[k] != plain[k]} == {sent}, key
+        got = body["gpu"]["pools"] if key == "gpu_pools" else body[sent]
+        assert got == value and got is not value
+        # null is the same as absent: the default.
+        one["lanes"][NEW][key] = None
+        assert runpod_endpoints.endpoint_body(one, NEW, "cu132-t2150-abc") == plain
+    assert lanes_mod.placement_of({}, None, "gpu_pools") is None
+    # A list that neither the lane nor the defaults name is refused.
+    bare = copy.deepcopy(PENDING)
+    del bare["endpoint_defaults"]["gpu_pools"], bare["endpoint_defaults"]["network_volumes"]
+    with pytest.raises(SystemExit) as stop:
+        runpod_endpoints.endpoint_body(bare, NEW, "cu132-t2150-abc")
+    assert str(stop.value) == (f"lane {NEW!r} has no gpu_pools, network_volumes: neither the "
+                               "lane nor endpoint_defaults names one")
+    bare["lanes"][NEW].update({"gpu_pools": ["ADA_24"], "network_volumes": []})
+    assert runpod_endpoints.endpoint_body(bare, NEW, "cu132-t2150-abc")["networkVolumes"] == []
+    # No pool or no data center is not a choice, as no volume is.
+    for key in ("gpu_pools", "data_center_ids"):
+        empty = copy.deepcopy(PENDING)
+        empty["lanes"][NEW][key] = []
+        with pytest.raises(SystemExit, match=f"has no {key}: neither the lane"):
+            runpod_endpoints.endpoint_body(empty, NEW, "cu132-t2150-abc")
+    # The registry credential has no lane key.
+    no_registry = copy.deepcopy(reg)
+    del no_registry["endpoint_defaults"]["registry"]
+    with pytest.raises(SystemExit, match="^endpoint_defaults is missing registry$"):
+        runpod_endpoints.endpoint_body(no_registry, NEW, "cu132-t2150-abc")
+
+
+def test_the_readme_lane_on_another_card_is_a_lane_the_registry_takes():
+    """The example under "A lane on another card" is checked as a lane would
+    be, so it cannot fall behind the rules."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    block = readme.split("#### A lane on another card", 1)[1].split("```json", 1)[1]
+    ((lane_id, lane),) = json.loads("{" + block.split("```", 1)[0] + "}").items()
+    reg = copy.deepcopy(REGISTRY)
+    reg["lanes"][lane_id] = lane
+    assert lanes_mod.validate(reg, MANIFEST, PACKS) == []
+    # Another pool, other data centers and no volume: each list is the lane's own.
+    assert all(lane[key] != REGISTRY["endpoint_defaults"][key]
+               for key in lanes_mod.PLACEMENT_KEYS)
+    assert lanes_mod.without_volume(reg, lane) and lane["model_storage"] == "job"
+    assert lanes_mod.is_long_cadence(lane) and lane["label"].startswith(lane["cadence"])
+    assert lane["gpu"] in lane["label"]
+    body = runpod_endpoints.endpoint_body(reg, lane_id, f"{lane['image']}-abc")
+    assert body["name"] == lane["endpoint_name"]
+    assert body["gpu"]["pools"] == lane["gpu_pools"]
+    assert body["dataCenterIds"] == lane["data_center_ids"] and body["networkVolumes"] == []
+    # It runs an image that exists and shares no endpoint: nothing is built or repointed.
+    assert lanes_mod.image_matrix(reg) == lanes_mod.image_matrix(REGISTRY)
+    assert lane["endpoint_name"] not in {runpod_endpoints.endpoint_name(other)
+                                         for other in REGISTRY["lanes"].values()}
+
+
+def test_status_holds_an_endpoint_to_the_pools_data_centers_and_volumes_of_its_lane(capsys):
+    diff = runpod_endpoints.differences
+    reg = _status_registry()
+    # A lane that names none is held to the defaults. The order of a list does not count.
+    assert diff(reg, "main", _live()) == []
+    reg["endpoint_defaults"]["data_center_ids"] = ["EU-SE-1", "EU-RO-1"]
+    assert diff(reg, "main", {**_live(), "dataCenterIds": ["EU-RO-1", "EU-SE-1"]}) == []
+    assert diff(reg, "main", _live()) == [
+        "dataCenterIds is ['EU-RO-1'] on RunPod, the manifest says ['EU-RO-1', 'EU-SE-1']"]
+    # A lane that names its own is held to those.
+    reg = _status_registry()
+    reg["lanes"]["main"].update(OTHER_CARD)
+    assert diff(reg, "main", _live()) == [
+        "gpu.pools is ['ADA_24'] on RunPod, the manifest says ['BLACKWELL_96']",
+        "dataCenterIds is ['EU-RO-1'] on RunPod, the manifest says ['US-CA-2', 'US-NC-1']",
+        "networkVolumes is ['n0xnkwnogx'] on RunPod, the manifest says []"]
+    other = {**_live(), "gpu": {"pools": ["BLACKWELL_96"], "count": 1, "minCudaVersion": "13.0"},
+             "dataCenterIds": ["US-CA-2", "US-NC-1"], "networkVolumes": []}
+    assert diff(reg, "main", other) == []
+    # An endpoint without a volume: an empty list, or none at all.
+    assert diff(reg, "main", {k: v for k, v in other.items() if k != "networkVolumes"}) == []
+    assert diff(reg, "main", {**other, "networkVolumes": None, "gpu": None}) == [
+        "gpu.pools is [] on RunPod, the manifest says ['BLACKWELL_96']"]
+    # Something that is no list is printed as it is.
+    assert diff(reg, "main", {**other, "dataCenterIds": "US-CA-2"}) == [
+        "dataCenterIds is 'US-CA-2' on RunPod, the manifest says ['US-CA-2', 'US-NC-1']"]
+    # A retired lane is held to 0 workers and nothing else, whatever it names.
+    reg["lanes"]["old"].update(OTHER_CARD)
+    assert diff(reg, "old", _live(workers_max=0)) == []
+    # `status` prints them and counts them.
+    client = FakeEndpoints({"ep-main": _live(), "ep-old": _live(workers_max=0)})
+    assert runpod_endpoints.status(reg, client, None, strict=True) == 1
+    out = capsys.readouterr().out
+    assert ("main: differs: gpu.pools is ['ADA_24'] on RunPod, the manifest says "
+            "['BLACKWELL_96']\n") in out
+    assert "3 of the settings above differ from manifest/lanes.json" in out
+    client = FakeEndpoints({"ep-main": other, "ep-old": _live(workers_max=0)})
+    assert runpod_endpoints.status(reg, client, None, strict=True) == 0
+    # A registry that names no such list holds the endpoint to none of them.
+    del reg["endpoint_defaults"], reg["lanes"]["main"]["gpu_pools"]
+    assert diff(reg, "main", _live()) == [
+        "dataCenterIds is ['EU-RO-1'] on RunPod, the manifest says ['US-CA-2', 'US-NC-1']",
+        "networkVolumes is ['n0xnkwnogx'] on RunPod, the manifest says []"]
+
+
+def test_validate_checks_the_pools_data_centers_and_volumes_a_lane_names():
+    ok = _registry(old=RETIRED_LANE, main={
+        "role": "primary", "gpu_pools": ["ADA_48_PRO", "AMPERE_48"],
+        "data_center_ids": ["US-IL-1"], "network_volumes": ["vol2"]})
+    assert lanes_mod.validate(ok) == []
+    assert lanes_mod.PLACEMENT_KEYS == ("gpu_pools", "data_center_ids", "network_volumes")
+
+    def problems(key, value):
+        bad = copy.deepcopy(ok)
+        bad["lanes"]["main"][key] = value
+        return lanes_mod.validate(bad)
+
+    for key in ("gpu_pools", "data_center_ids"):
+        assert problems(key, None) == []
+        for value in ([], "ADA_24", ["ADA_24", 3], [""], [None], {"ADA_24": 1}, 24, True):
+            assert problems(key, value) == [
+                f"lane main: {key} must be a list of at least one id, not {value!r}"], (key, value)
+    assert problems("network_volumes", None) == []
+    for value in ("vol2", ["vol2", 3], [""], {"vol2": 1}, 0, False):
+        assert problems("network_volumes", value) == [
+            "lane main: network_volumes must be a list of volume ids, or [] for no volume, "
+            f"not {value!r}"], value
+    # The types are checked for a retired lane too.
+    bad = copy.deepcopy(ok)
+    bad["lanes"]["old"]["gpu_pools"] = "ADA_24"
+    assert lanes_mod.validate(bad) == [
+        "lane old: gpu_pools must be a list of at least one id, not 'ADA_24'"]
+
+
+def test_validate_refuses_a_lane_without_a_volume_that_keeps_its_models_on_one():
+    """The model sync fills the network volume. A lane without a volume reads
+    none of it, so its models are fetched for each job."""
+    ok = _registry(old=RETIRED_LANE, main={"role": "primary"},
+                   big={"cadence": "weekly", **OTHER_CARD})
+    assert lanes_mod.validate(ok) == []
+    assert lanes_mod.without_volume(ok, ok["lanes"]["big"])
+    assert not lanes_mod.without_volume(ok, ok["lanes"]["main"])
+    assert not lanes_mod.without_volume(ok, None)
+    said = "lane big: it has no network volume, so model_storage must be 'job', not {!r}"
+    for value in (None, "volume"):
+        bad = copy.deepcopy(ok)
+        bad["lanes"]["big"]["model_storage"] = value
+        assert lanes_mod.validate(bad) == [said.format(value)]
+    bad = copy.deepcopy(ok)
+    del bad["lanes"]["big"]["model_storage"]
+    assert lanes_mod.validate(bad) == [said.format(None)]
+    # With a volume, its own or the default one, both ways of storing are fine.
+    for volumes in (["vol2"], None):
+        for where in ("volume", "job", None):
+            fine = copy.deepcopy(ok)
+            fine["lanes"]["big"].update({"network_volumes": volumes, "model_storage": where})
+            assert lanes_mod.validate(fine) == [], (volumes, where)
+    # The list in effect counts: defaults without a volume leave every lane
+    # without one, unless the lane names one.
+    none = copy.deepcopy(ok)
+    none["endpoint_defaults"] = {"network_volumes": []}
+    assert lanes_mod.validate(none) == [
+        "lane main: it has no network volume, so model_storage must be 'job', not None"]
+    none["lanes"]["main"]["network_volumes"] = ["vol2"]
+    assert lanes_mod.validate(none) == []
+    assert not lanes_mod.without_volume(none, none["lanes"]["main"])
+    # A retired lane runs nothing, so it reads no model.
+    retired = copy.deepcopy(ok)
+    retired["lanes"]["old"]["network_volumes"] = []
+    assert lanes_mod.validate(retired) == []
+
+
+def test_lanes_that_share_an_endpoint_name_the_same_pools_data_centers_and_volumes():
+    """An endpoint has one list of each, whatever number of lanes use it."""
+    assert lanes_mod.ENDPOINT_KEYS == ("image", "endpoint_name", "workers_max", "disk_gb",
+                                       "idle_timeout_s", "env", *lanes_mod.PLACEMENT_KEYS)
+    ok = _shared_registry()
+    for key, value in (("gpu_pools", ["ADA_48_PRO"]), ("data_center_ids", ["US-IL-1"]),
+                       ("network_volumes", ["vol2"])):
+        bad = copy.deepcopy(ok)
+        bad["lanes"]["week"][key] = value
+        assert lanes_mod.validate(bad) == [
+            f"lane week: {key} is {value!r}, but night, which shares its endpoint, says None"], key
+        bad["lanes"]["night"][key] = value
+        assert lanes_mod.validate(bad) == []
+    # Without the volume, both of them fetch their models for each job.
+    both = copy.deepcopy(ok)
+    for lane_id in ("night", "week"):
+        both["lanes"][lane_id].update({k: OTHER_CARD[k] for k in lanes_mod.PLACEMENT_KEYS})
+    both["lanes"]["week"]["model_storage"] = "job"
+    assert lanes_mod.validate(both) == [
+        "lane night: it has no network volume, so model_storage must be 'job', not None"]
+    both["lanes"]["night"]["model_storage"] = "job"
+    assert lanes_mod.validate(both) == []
