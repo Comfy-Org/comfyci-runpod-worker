@@ -94,7 +94,10 @@ all there is.
    nodes (id, class, literal inputs), the entry and the result of the prompt
    check, and writes nothing. That is where the ids 94 and 98 of the example
    come from, and where one sees that two inputs hold the length. A refusal
-   prints the same list. Make the run small with `--set`: 30 seconds of audio,
+   prints the same list. What the lint would refuse in the new entry is
+   refused here too (see the list below). A rule that adds up the whole
+   manifest, like the room on the volume, is the lint's alone, and the lint
+   runs after the write. Make the run small with `--set`: 30 seconds of audio,
    25 frames, a mesh at a lower resolution. The worker sends a run's files in
    the job's answer, and a file over its size limit is only listed.
 2. **Run the command.** It
@@ -108,8 +111,11 @@ all there is.
      and interrupts it, so nothing is generated on that machine;
    - writes the workflow file, adds the entry at the end of `workflows` with
      `"level": "smoke"` and `"enabled": true`, and runs the whole manifest
-     lint. No other line of the manifest changes. When the lint fails, the
-     command ends with an error and says what to take back.
+     lint. No other line of the manifest changes, and both files keep the
+     manifest's line ends. It writes over no workflow file: one that is
+     already there stops it before it writes, and so does an id that differs
+     from another by case only. When the lint fails, the command ends with an
+     error and says what to take back.
 3. **Open the pull request.** **Script tests** runs the lint again.
 4. **A first look, before the merge**, when the lane has its endpoint.
    Someone with write access dispatches the one workflow from the pull
@@ -224,13 +230,24 @@ synced. Then:
   (name, URL, folder), with the `sha256` and the size Hugging Face publishes.
   A loader that lists nothing falls back to the links in the template's
   notes. A file whose host publishes no sha256 is downloaded once and hashed.
-  `HF_TOKEN` from the environment is sent to huggingface.co: a gated
-  repository answers nothing without it.
+  `HF_TOKEN` from the environment is sent to huggingface.co, over https
+  only: a gated repository answers nothing without it. A gated file is the
+  only one written without its sha256, with a note. A host that is busy, a
+  file that is not there and a download that is a web page stop the import.
+- **A file the manifest already lists.** The volume holds one file per folder
+  and name, and the lint wants one URL and one sha256 for it. The gallery
+  serves the same file from several repositories. When the sha256 says it is
+  the same file (the size, where the manifest has no sha256), the entry gets
+  the model as the manifest has it, and the command prints a note. Another
+  file under the same name is refused.
 - **Input files.** A file name on `LoadImage`, `LoadAudio` or `LoadVideo`
   becomes a `models` entry with `"directory": "input"`, the URL of the file
   in the templates repository at the pinned commit, its sha256 and its size,
   and the entry gets `"comfy_flags": ["--input-directory",
   "/runpod-volume/models/input"]`.
+- **Seeds.** Every literal `seed` and `noise_seed` gets a seed override with
+  the template's value. A seed that another node feeds is pinned on that
+  node: the `value` of a `PrimitiveInt`.
 
 It refuses and does not guess. What it refuses today:
 
@@ -242,15 +259,26 @@ It refuses and does not guess. What it refuses today:
 - **A workflow with a literal sub-input of a dynamic combo**, like
   `format.codec` of `SaveVideo` or `sampling_mode.temperature` of a sampled
   text generation. The worker drops such an input before it queues the
-  prompt. The command asks the worker's own check (`validate_workflow` in
-  `src/comfy_runner.py`), so it takes these workflows as soon as the worker
-  keeps the input. Until then a template that saves a clip is refused, and
+  prompt, and the lint refuses a workflow that has one until the image that
+  runs keeps it. The command holds the lint's rule, and a test holds the two
+  together. Until the rule goes a template that saves a clip is refused, and
   so is `--keep-sampling`.
+- **An input the node of this ComfyUI does not have**: the template was made
+  for another version of the node, and the run would go on without the value.
 - **A save node no check reads** (`SaveWEBM`), and a template that saves
   nothing.
 - **A loader whose models/ folder it does not know** and that lists no file
   itself: add the `(class_type, input name)` pair to
   `DIRECTORY_BY_LOADER_INPUT`.
+- **A model folder the worker does not search**: one that
+  `docker/extra_model_paths.yaml` does not map.
+- **A download link that is not https.**
+- **A file input the entry cannot list**: a file of ComfyUI's temp or output
+  folder, which only the machine the template was made on has, and a file
+  on any node but `LoadImage`, `LoadAudio` and `LoadVideo` (the mask of a
+  `Painter`).
+- **A seed whose number it cannot find**: one fed by a node that has no
+  whole number of its own, or several.
 
 `scripts/tests/test_template_api_export.py` documents which conversion rules
 are covered.

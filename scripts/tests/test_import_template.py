@@ -6,7 +6,9 @@ or of a model host is answered by a small HTTP server on this machine.
 import copy
 import hashlib
 import json
+import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -643,8 +645,31 @@ def test_every_seed_input_is_pinned_at_the_value_the_template_ships():
         "3": {"class_type": "UNETLoader", "inputs": {"unet_name": "u.safetensors"}},
     }
     assert seed_overrides(prompt) == {"1": {"seed": 42}, "2": {"noise_seed": 7}}
-    # A seed driven by a link is not pinned as a literal.
-    assert seed_overrides({"1": n("KSampler", seed=["2", 0])}) == {}
+
+
+def test_a_seed_that_a_link_feeds_is_pinned_where_its_number_is():
+    """audio_ace_step1_5_xl_turbo feeds both seeds from one PrimitiveInt. The
+    lint asks every workflow with a seed input for an override, so the entry
+    without one was written and then failed the lint."""
+    prompt = {
+        "109": n("PrimitiveInt", value=0),
+        "3": n("KSampler", seed=["109", 0], steps=8),
+        "94": n("TextEncodeAceStepAudio1.5", seed=["109", 0], bpm=120),
+        "5": n("RandomNoise", noise_seed=["6", 0]),
+        "6": n("SeedSource", number=31, label="x", fixed=True),
+    }
+    assert seed_overrides(prompt) == {"109": {"value": 0}, "6": {"number": 31}}
+    # The override hits an input that is there, which is what the lint asks.
+    assert all(name in prompt[node_id]["inputs"]
+               for node_id, patch in seed_overrides(prompt).items() for name in patch)
+    # A node with two numbers, or with none: the importer does not guess.
+    for source in (n("Add", a=1, b=2), n("Seeder", seed=["7", 0]), n("Seeder")):
+        with pytest.raises(ConversionError) as refusal:
+            seed_overrides({"1": n("KSampler", seed=["2", 0]), "2": source})
+        assert str(refusal.value) == (
+            f"node 1 (KSampler) gets its seed from node 2 ({source['class_type']}), and the "
+            "importer cannot tell which input of that node holds the number. The lint asks "
+            "every workflow with a seed for a seed override: write the entry by hand")
 
 
 def loads_inputs():
@@ -785,6 +810,46 @@ def test_one_request_gives_the_sha_and_the_size_of_an_lfs_file(monkeypatch):
     assert downloads == [RAW, GATED, "https://h.test/away"]
 
 
+def test_a_host_that_is_busy_or_lacks_the_file_stops_the_import(monkeypatch, capsys):
+    """Every answer without a sha256 was read as "the host publishes none". A
+    host that answered 503 to each request ended in an entry without its
+    sha256, with exit code 0 and a note that blamed a gated repository."""
+    url = "https://huggingface.co/Comfy-Org/x/resolve/main/vae/ae.safetensors"
+    raw = "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/0f0f/input/cat.png"
+    answer = {}
+    monkeypatch.setattr(import_template, "_head", lambda u, follow: answer["head"])
+    monkeypatch.setattr(import_template, "listed_bytes", lambda u: 335304388)
+    monkeypatch.setattr(import_template, "hash_download", lambda u: answer.get("download"))
+    for status, said in ((503, "huggingface.co did not answer for {url} (503): try again"),
+                         (500, "huggingface.co did not answer for {url} (500): try again"),
+                         (429, "huggingface.co did not answer for {url} (429): try again"),
+                         (None, "huggingface.co did not answer for {url} (no answer): try again"),
+                         (404, "{url} is not there: the host answers 404"),
+                         (200, "{url} could not be downloaded to hash it: try again")):
+        answer["head"] = (status, {})
+        with pytest.raises(ConversionError) as refusal:
+            import_template.file_facts(url)
+        assert str(refusal.value) == said.format(url=url), status
+    # An input file that is not at the pinned commit says what to do about it.
+    answer["head"] = (404, {})
+    with pytest.raises(ConversionError) as refusal:
+        import_template.file_facts(raw)
+    assert str(refusal.value) == (
+        f"{raw} is not there: the host answers 404. The templates repository has no such "
+        "file at that commit: name a commit that is on GitHub with --templates-ref")
+    # Only a gated file comes back without its sha256: its download fails too.
+    for status in (401, 403):
+        answer["head"] = (status, {})
+        assert import_template.file_facts(url) == (None, 335304388)
+    # A host that refuses the HEAD request and sends the file is hashed, as before.
+    capsys.readouterr()
+    for status in (403, 405, 200):
+        answer.update(head=(status, {}), download=("ab" * 32, 9))
+        assert import_template.file_facts(url) == ("ab" * 32, 9)
+    assert capsys.readouterr().err == (
+        f"{url} publishes no sha256: downloading it once to hash it\n" * 3)
+
+
 def test_the_listing_is_asked_for_the_files_own_folder(monkeypatch):
     class Answer:
         def __init__(self, rows):
@@ -876,9 +941,10 @@ def test_the_token_goes_to_hugging_face_and_to_no_other_host(server, monkeypatch
     assert import_template.hash_download(f"{server.url}/org/new/resolve/main/a.bin") == (
         hashlib.sha256(data).hexdigest(), 7000)
     assert server.seen[-1][3].get("Authorization") is None
-    # Hugging Face: the token goes with the request and with a redirect that
-    # stays there (a renamed repository).
+    # Hugging Face, played by the server on this machine: the token goes with
+    # the request and with a redirect that stays there (a renamed repository).
     monkeypatch.setattr(import_template, "HF_HOST", "127.0.0.1")
+    monkeypatch.setattr(import_template, "HF_SCHEME", "http")
     server.seen.clear()
     assert import_template.hash_download(f"{server.url}/org/old/resolve/main/a.bin")[1] == 7000
     assert import_template._head(f"{server.url}/org/new/resolve/main/a.bin", follow=False)[0] \
@@ -901,6 +967,52 @@ def test_the_token_goes_to_hugging_face_and_to_no_other_host(server, monkeypatch
     monkeypatch.delenv("HF_TOKEN")
     assert import_template.hash_download(f"{server.url}/gone") is None
     assert server.seen[-1][3].get("Authorization") is None
+
+
+def test_the_token_never_goes_out_over_plain_http(monkeypatch):
+    """A template may name `http://huggingface.co/...`, on a loader or in a
+    note. The host matched, so the token went out unencrypted, for anyone on
+    the way to read. No request leaves this test: the opener only records."""
+    sent = []
+
+    class Recorder:
+        def open(self, request, timeout=None):
+            sent.append((request.full_url, request.get_header("Authorization")))
+            raise OSError("not sent")
+
+    monkeypatch.setenv("HF_TOKEN", "hf_secret")
+    monkeypatch.setattr(import_template.urllib.request, "build_opener", lambda *a: Recorder())
+    path = "/a/b/resolve/main/x.safetensors"
+    urls = [f"https://huggingface.co{path}", f"http://huggingface.co{path}",
+            f"https://HuggingFace.co:443{path}", f"https://huggingface.co.example.org{path}",
+            f"https://huggingface.co@example.org{path}", "https://cdn-lfs.huggingface.co/x",
+            "https://civitai.com/api/download/models/1"]
+    for url in urls:
+        assert import_template._head(url, follow=False) == (None, {})
+        assert import_template.hash_download(url) is None
+    assert [url for url, token in sent if token] == [urls[0]] * 2 + [urls[2]] * 2
+    assert all(token == "Bearer hf_secret" for _, token in sent if token)
+    # A redirect to the same host over http takes the token off too.
+    request = import_template.urllib.request.Request(
+        urls[0], headers={"Authorization": "Bearer hf_secret"})
+    follow = import_template._TokenStaysHome().redirect_request
+
+    def token_after(target):
+        return follow(request, None, 302, "Found", {}, target).headers.get("Authorization")
+
+    assert token_after("http://huggingface.co/a/b/resolve/main/y") is None
+    assert token_after("https://huggingface.co/a/b/resolve/main/y") == "Bearer hf_secret"
+    # A link that is not https is refused before any request. The lint takes
+    # https only, so such an entry failed it after the files were written.
+    for where in ("loader", "note"):
+        link = "http://huggingface.co/a/b/resolve/main/u.safetensors"
+        listed = [{"name": "u.safetensors", "url": link, "directory": "diffusion_models"}]
+        template = {"nodes": [
+            ui(1, "UNETLoader", ["u.safetensors"], models=listed if where == "loader" else None),
+            {"id": 5, "type": "Note", "widgets_values": [f"[u.safetensors]({link})"]}]}
+        with pytest.raises(ConversionError) as refusal:
+            model_files({"1": n("UNETLoader", unet_name="u.safetensors")}, template)
+        assert str(refusal.value) == f"the download link of u.safetensors is not https: {link}"
 
 
 def _sized_manifest():
@@ -1141,16 +1253,31 @@ def test_the_lint_is_run_whole_and_a_missing_pytest_is_said(monkeypatch, capsys)
     assert "pytest is not installed. Install pytest (pip install pytest)" in capsys.readouterr().err
 
 
-def test_the_worker_is_asked_what_it_would_strip():
-    """The importer's refusal follows the worker's own check, in src/."""
-    info = {"KSampler": spec({"seed": ["INT", {"default": 0}], "steps": ["INT", {"default": 20}]})}
-    prompt = {"3": n("KSampler", seed=5, bogus="x", model=["4", 0]), "8": n("Unknown", a=1)}
+def test_the_inputs_the_worker_would_drop_are_named_by_the_lints_rule():
+    """The importer asked `src/comfy_runner.py` what the worker drops. That
+    says what the next image does, not the one that runs: once `src/` keeps
+    dotted inputs, a clip passed the dry run and failed the lint after the
+    write. Now the rule is the lint's, and `src/` is not read."""
+    info = {"KSampler": spec({"seed": ["INT", {"default": 0}], "steps": ["INT", {"default": 20}]}),
+            "SaveVideo": spec({"video": ["VIDEO"], **PREFIX,
+                               "format": ["COMFY_DYNAMICCOMBO_V3", {"options": []}]})}
+    prompt = {"3": n("KSampler", seed=5, bogus="x", model=["4", 0]),
+              "8": n("Unknown", a=1),
+              "9": n("SaveVideo", format="mp4", video=["3", 0],
+                     **{"format.codec": "h264", "format.frames": ["3", 1], "old.sub": 1})}
     before = copy.deepcopy(prompt)
-    assert import_template.worker_strips(prompt, info) == ["KSampler.bogus='x'"]
-    assert prompt == before, "the prompt itself is not changed"
-    assert import_template.worker_strips({"3": n("KSampler", seed=5)}, info) == []
-    import comfy_runner
-    assert comfy_runner.http_get_json.__name__ == "http_get_json", "the worker's own is back"
+    # A literal sub-input of a dynamic combo. A linked one is kept by the worker.
+    assert import_template.dotted_literals(prompt) == ["9:SaveVideo.format.codec",
+                                                       "9:SaveVideo.old.sub"]
+    # An input the node of this ComfyUI does not have. A sub-input is known
+    # when its combo is, and a class nobody knows is the converter's to refuse.
+    assert import_template.unknown_literals(prompt, info) == ["3:KSampler.bogus",
+                                                              "9:SaveVideo.old.sub"]
+    assert import_template.unknown_literals({"3": n("KSampler", seed=5)}, info) == []
+    assert prompt == before
+    # Script tests does not run for a change under src/ alone.
+    source = Path(import_template.__file__).read_text(encoding="utf-8")
+    assert "comfy_runner" not in source and '"src"' not in source
 
 
 # --------------------------------------------------------------------------- #
@@ -1212,6 +1339,8 @@ def repo(tmp_path, monkeypatch):
     counts the calls. No host is asked for a file."""
     (tmp_path / "manifest" / "workflows").mkdir(parents=True)
     (tmp_path / "templates").mkdir()
+    (tmp_path / "docker").mkdir()
+    shutil.copy(ROOT / "docker" / "extra_model_paths.yaml", tmp_path / "docker")
     (tmp_path / "manifest" / "workflows.json").write_text(
         json.dumps(MANIFEST, indent=2) + "\n", encoding="utf-8")
     (tmp_path / "manifest" / "lanes.json").write_text(
@@ -1410,6 +1539,486 @@ def write_template(repo, template):
     (repo.root / "templates" / "small.json").write_text(json.dumps(template), encoding="utf-8")
 
 
+# --------------------------------------------------------------------------- #
+# what is written, when, and over what
+# --------------------------------------------------------------------------- #
+
+
+def test_a_file_or_an_id_that_is_taken_is_found_before_anything_is_written(repo, capsys):
+    """Each of these was found after the workflow file was written, or not at
+    all: a workflow file that is already there was written over, and so was
+    the file of an id that differs by case only, on Windows."""
+    workflows = repo.root / "manifest" / "workflows"
+
+    def refused(*more, base=None):
+        files = {name: (repo.root / name).read_bytes() for name in repo.files()}
+        assert import_template.main([*(base or repo.base), *repo.offline, *more]) == 1
+        assert {name: (repo.root / name).read_bytes() for name in repo.files()} == files
+        assert repo.lint == []
+        return capsys.readouterr().err
+
+    # A file no entry names. This repository has one: ltxv_t2v_api.json.
+    (workflows / "small_i2i_api.json").write_text('{"mine": true}\n', encoding="utf-8")
+    said = ("error: manifest/workflows/small_i2i_api.json is already there, and the command "
+            "writes over no workflow file: choose another --id, or delete the file first\n")
+    assert refused() == said and refused("--dry-run") == said
+    # --print writes the file of its own id, as it did.
+    assert import_template.main([*repo.base, *repo.offline, "--print", "--skip-sha"]) == 0
+    capsys.readouterr()
+    (workflows / "small_i2i_api.json").unlink()
+    # The same id in another case is the same file on Windows and macOS.
+    other_case = ["small", "--id", "OLD_WF", *repo.base[3:]]
+    assert refused(base=other_case) == (
+        "error: old_wf is in manifest/workflows.json, and OLD_WF differs from it by case "
+        "only: on Windows and macOS both would be one workflow file. Choose another --id\n")
+    assert refused("--print", base=other_case).startswith("error: old_wf is in manifest/")
+    (workflows / "Small_I2I_api.json").write_text("{}\n", encoding="utf-8")
+    for more in ([], ["--print"]):
+        assert refused(*more).startswith(
+            "error: manifest/workflows/Small_I2I_api.json is already there")
+    (workflows / "Small_I2I_api.json").unlink()
+    # A manifest in another layout: the command would not rewrite it.
+    path = repo.root / "manifest" / "workflows.json"
+    path.write_text(json.dumps(MANIFEST), encoding="utf-8")
+    assert refused() == (
+        f"error: {path} is not laid out the way this command writes it (2 spaces, one key a "
+        "line): rewriting it would change more than the lines this command adds\n")
+    # --print leaves the manifest alone, so its layout is not asked about.
+    assert import_template.main([*repo.base, *repo.offline, "--print", "--skip-sha"]) == 0
+
+
+@pytest.mark.parametrize("line_end", [b"\n", b"\r\n"])
+def test_the_files_keep_the_line_ends_the_manifest_has(repo, line_end):
+    """On Windows a manifest with LF line ends came back with CRLF: every line
+    of it was in the diff. The workflow file gets the manifest's line ends."""
+    def laid_out(manifest):
+        return (json.dumps(manifest, indent=2) + "\n").encode().replace(b"\n", line_end)
+
+    def held(data):
+        return data.count(line_end) == data.count(b"\n") > 5 and (
+            line_end == b"\r\n" or b"\r" not in data)
+
+    path = repo.root / "manifest" / "workflows.json"
+    path.write_bytes(laid_out(MANIFEST))
+    before = path.read_bytes()
+    assert import_template.main([*repo.base, *repo.offline]) == 0
+    after = path.read_bytes()
+    assert held(after) and held((repo.root / "manifest" / "workflows"
+                                 / "small_i2i_api.json").read_bytes())
+    # No line that was there changed, but the one that got its comma.
+    assert after.startswith(before[:before.rindex(b"}" + line_end + b"  }")])
+    assert "small_i2i" in json.loads(after)["workflows"]
+    # --fill-bytes rewrites a manifest the same way.
+    sized = repo.root / "sized.json"
+    sized.write_bytes(laid_out(_sized_manifest()))
+    assert import_template.fill_bytes(sized, lambda url: 5) == []
+    assert held(sized.read_bytes()) and b'"bytes": 5' in sized.read_bytes()
+
+
+def test_a_write_that_fails_leaves_the_manifest_whole_and_no_file_behind(
+        repo, monkeypatch, capsys):
+    """The manifest was rewritten in place. On a full disk the write ended
+    in the middle: 64 KiB of a file that was no longer JSON."""
+    replace = import_template.os.replace
+
+    def full_disk(source, target):
+        if Path(target).name == "workflows.json":
+            raise OSError(28, "No space left on device")
+        replace(source, target)
+
+    monkeypatch.setattr(import_template.os, "replace", full_disk)
+    files, manifest = repo.files(), repo.manifest()
+    assert import_template.main([*repo.base, *repo.offline]) == 1
+    # The workflow file went in first and is taken back, and no part file stays.
+    assert repo.files() == files and repo.manifest() == manifest and repo.lint == []
+    assert capsys.readouterr().err.splitlines()[-1] == (
+        "error: nothing was written: [Errno 28] No space left on device")
+    monkeypatch.undo()
+    # The text goes to a file next to the manifest, which then takes its place.
+    path = repo.root / "manifest" / "workflows.json"
+    seen = []
+    monkeypatch.setattr(import_template.os, "replace", lambda source, target: seen.append(
+        (Path(source).name, Path(target).name, Path(source).read_text(encoding="utf-8"))))
+    insert_entry(path, "wf_one", {"enabled": True})
+    assert [(source, target) for source, target, _ in seen] == [
+        ("workflows.json.part", "workflows.json")]
+    assert list(json.loads(seen[0][2])["workflows"]) == ["old_wf", "wf_one"]
+    assert repo.manifest() == manifest and repo.files() == files
+
+
+def test_a_manifest_that_changed_while_the_command_ran_is_left_alone(
+        repo, monkeypatch, capsys):
+    """Two imports at once: the second had read the manifest before the first
+    wrote its entry, and wrote back what it had read. The first entry was gone."""
+    path = repo.root / "manifest" / "workflows.json"
+
+    def meanwhile(url):
+        if "other_wf" not in json.loads(repo.manifest())["workflows"]:
+            insert_entry(path, "other_wf", {"enabled": True, "models": []})
+        return FACTS[url]
+
+    monkeypatch.setattr(import_template, "file_facts", meanwhile)
+    files = repo.files()
+    assert import_template.main([*repo.base, *repo.offline]) == 1
+    assert list(json.loads(repo.manifest())["workflows"]) == ["old_wf", "other_wf"]
+    assert repo.files() == files and repo.lint == []
+    assert capsys.readouterr().err.splitlines()[-1] == (
+        "error: nothing was written: workflows.json changed while this command ran, so it "
+        "was left as it is: run the command again")
+    # Run again, the entry goes in after the other one.
+    assert import_template.main([*repo.base, *repo.offline]) == 0
+    assert list(json.loads(repo.manifest())["workflows"]) == ["old_wf", "other_wf", "small_i2i"]
+
+
+@pytest.mark.parametrize("flag, value, said", [
+    ("--expect", "seconds=Infinity", "error: --expect seconds=Infinity: write <key>=<number>"),
+    ("--expect", "seconds=1e999", "error: --expect seconds=1e999: write <key>=<number>"),
+    ("--set", "3.steps=NaN", "error: --set 3.steps=NaN: the value is not JSON."),
+    ("--set", "3.steps=-Infinity", "error: --set 3.steps=-Infinity: the value is not JSON."),
+    ("--set", "3.steps=[1, 1e999]", "error: --set 3.steps=[1, 1e999]: the value is not JSON."),
+])
+def test_a_number_that_is_not_json_is_refused(repo, capsys, flag, value, said):
+    """Python reads NaN and Infinity and writes them back: `"seconds": Infinity`
+    went into the manifest with exit code 0, and nothing but Python reads that."""
+    files = repo.files()
+    assert import_template.main([*repo.base, *repo.offline, flag, value]) == 1
+    assert capsys.readouterr().err.startswith(said)
+    assert repo.files() == files
+    # A template can hold one too.
+    template = small_template()
+    template["nodes"][2]["widgets_values"] = [7, "fixed", float("nan")]
+    write_template(repo, template)
+    assert import_template.main([*repo.base, *repo.offline, "--dry-run"]) == 1
+    assert capsys.readouterr().err.startswith(
+        "error: 3.steps is nan, a number JSON cannot hold\nnodes (4):\n")
+
+
+# --------------------------------------------------------------------------- #
+# what the lint would say of the entry, said before the write
+# --------------------------------------------------------------------------- #
+
+OTHER_URL = "https://huggingface.co/first/home/resolve/main/sd.safetensors"
+OLD_CAT = "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/0f0f0f0/input/cat.png"
+
+
+def test_a_file_the_manifest_already_has_is_written_as_the_manifest_has_it(repo, capsys):
+    """One folder and name is one file on the volume, and the lint wants one
+    URL and one sha256 for it. The gallery serves the same file from several
+    repositories, and an input file is pinned to another commit on each
+    import: 66 of the 159 templates the dry run took ended in a red lint,
+    after their files were written."""
+    run = [*repo.base, *repo.offline]
+    written = repo.root / "manifest" / "workflows" / "small_i2i_api.json"
+
+    def manifest_has(**model):
+        manifest = copy.deepcopy(MANIFEST)
+        manifest["workflows"]["old_wf"]["models"] = [
+            {"name": "sd.safetensors", "url": OTHER_URL, "directory": "checkpoints", **model},
+            {"name": "cat.png", "url": OLD_CAT, "directory": "input", "sha256": "22" * 32,
+             "bytes": 300}]
+        (repo.root / "manifest" / "workflows.json").write_text(
+            json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        written.unlink(missing_ok=True)
+        capsys.readouterr()
+        return manifest["workflows"]["old_wf"]["models"]
+
+    def refused(*more):
+        files, manifest = repo.files(), repo.manifest()
+        assert import_template.main([*run, *more]) == 1
+        assert repo.files() == files and repo.manifest() == manifest
+        return capsys.readouterr().err.splitlines()[0]
+
+    # The same file from another repository, and the picture at another commit.
+    theirs = manifest_has(sha256="11" * 32, bytes=2000)
+    assert import_template.main([*run, "--dry-run"]) == 0
+    notes = [line for line in capsys.readouterr().out.splitlines() if line.startswith("note: ")]
+    assert notes[:2] == [
+        "note: checkpoints/sd.safetensors is in the manifest for old_wf, and it is the same "
+        f"file by its sha256: the entry takes the URL it has there, {OTHER_URL}",
+        "note: input/cat.png is in the manifest for old_wf, and it is the same file by its "
+        f"sha256: the entry takes the URL it has there, {OLD_CAT}"]
+    assert import_template.main(run) == 0
+    assert json.loads(repo.manifest())["workflows"]["small_i2i"]["models"] == theirs
+    # Another file under the same name: the volume cannot hold both.
+    manifest_has(sha256="33" * 32, bytes=2000)
+    assert refused() == refused("--dry-run") == (
+        "error: checkpoints/sd.safetensors is another file in the manifest, for old_wf, by "
+        "its sha256: a volume holds one file per name. The manifest has "
+        f"{OTHER_URL}, the template {MODEL_URL}")
+    # Where the manifest has no sha256, the size decides.
+    theirs = manifest_has(bytes=2000)
+    assert import_template.main(run) == 0
+    said = capsys.readouterr().err
+    # The entry has no sha256 because the manifest has none: no lookup failed.
+    assert "is the same file by its size" in said and "no sha256 found" not in said
+    assert json.loads(repo.manifest())["workflows"]["small_i2i"]["models"] == theirs
+    manifest_has(bytes=1999)
+    assert "is another file in the manifest, for old_wf, by its size" in refused()
+    # The manifest's own URL, and the file there is no longer the one it lists.
+    manifest_has(url=MODEL_URL, sha256="33" * 32, bytes=2000)
+    assert refused() == (
+        "error: checkpoints/sd.safetensors is in the manifest for old_wf with another "
+        f"sha256: the file at {MODEL_URL} changed since. Correct the manifest first")
+    # Without lookups nothing can be said, and that is said.
+    manifest_has(sha256="33" * 32, bytes=2000)
+    assert import_template.main([*run, "--dry-run", "--skip-sha"]) == 0
+    assert ("note: checkpoints/sd.safetensors is in the manifest for old_wf from another URL, "
+            "and --skip-sha looked nothing up to say whether it is the same file\n"
+            ) in capsys.readouterr().out
+    # --print for an id the manifest has: its own old entry is not in the way.
+    again = ["small", "--id", "old_wf", *repo.base[3:], *repo.offline, "--print"]
+    assert import_template.main(again) == 0
+    assert json.loads(capsys.readouterr().out)["old_wf"]["models"][0]["url"] == MODEL_URL
+
+
+def test_a_model_folder_the_worker_does_not_search_is_refused(repo, capsys):
+    """11 templates name background_removal, geometry_estimation and four more
+    folders. The lint refuses a folder that docker/extra_model_paths.yaml does
+    not map, and the importer said nothing before it wrote."""
+    assert import_template.model_folders() >= {"checkpoints", "vae", "text_encoders", "loras"}
+    assert "base_path" not in import_template.model_folders()
+    # A folder no yaml maps, so the test holds whatever folders the yaml gains.
+    template = small_template()
+    template["nodes"][0]["properties"]["models"][0]["directory"] = "holograms"
+    write_template(repo, template)
+    files = repo.files()
+    for more in ([], ["--dry-run"], ["--print"], ["--dry-run", "--skip-sha"]):
+        assert import_template.main([*repo.base, *repo.offline, *more]) == 1
+        printed = capsys.readouterr()
+        assert printed.out == "" and printed.err.startswith(
+            "error: the worker does not search holograms/ (sd.safetensors): "
+            "docker/extra_model_paths.yaml names the models/ folders it does\nnodes (4):\n")
+    assert repo.files() == files
+    # The yaml of the checkout decides: a folder it gains is taken.
+    yaml = repo.root / "docker" / "extra_model_paths.yaml"
+    yaml.write_text(yaml.read_text(encoding="utf-8") + "    holograms: holograms\n",
+                    encoding="utf-8")
+    assert import_template.main([*repo.base, *repo.offline, "--dry-run"]) == 0
+
+
+def test_an_imported_seed_that_a_link_feeds_has_its_override(repo, capsys):
+    info = {**SERVER_INFO, "PrimitiveInt": spec(
+        {"value": ["INT", {"default": 0, "control_after_generate": True}]}, output=["INT"])}
+    template = small_template()
+    template["nodes"][2]["inputs"].append(
+        {"name": "seed", "type": "INT", "link": 5, "widget": {"name": "seed"}})
+    template["nodes"].append(ui(20, "PrimitiveInt", [31, "fixed"], [5]))
+    template["links"].append([5, 20, 0, 3, 2, "INT"])
+    write_template(repo, template)
+    (repo.root / "object_info.json").write_text(json.dumps(info), encoding="utf-8")
+    assert import_template.main([*repo.base, *repo.offline]) == 0
+    written = repo.root / "manifest" / "workflows" / "small_i2i_api.json"
+    prompt = json.loads(written.read_text(encoding="utf-8"))
+    assert prompt["3"]["inputs"]["seed"] == ["20", 0] and prompt["20"]["inputs"] == {"value": 31}
+    entry = json.loads(repo.manifest())["workflows"]["small_i2i"]
+    assert entry["seed_overrides"] == {"20": {"value": 31}}
+
+
+def test_a_file_input_the_entry_cannot_list_is_refused(repo, capsys):
+    """image_anima_lllite_image_inpainting paints its mask in the browser:
+    Painter.mask names a file of the temp folder of one session. The dry run
+    said nothing, and the run would have ended where Painter opens the file."""
+    info = {"Painter": spec({"mask": ["STRING", {"image_upload": True, "default": ""}]},
+                            {"image": ["IMAGE"]}),
+            "LoadImage": LOADERS["LoadImage"], "LoadVideo": LOADERS["LoadVideo"],
+            "CLIPTextEncode": INFO["CLIPTextEncode"]}
+    fine = {"1": n("LoadImage", image="cat.png [input]"), "2": n("LoadVideo", file="clip.mp4"),
+            "3": n("Painter", mask="", image=["1", 0]),
+            "4": n("CLIPTextEncode", text="a note [temp]"), "5": n("Unknown", image="x [temp]")}
+    import_template.refuse_stray_files(fine, info)
+    for node, said in (
+        (n("Painter", mask="painter/p-694.png [temp]"),
+         "node 3 (Painter) reads painter/p-694.png [temp]: a file of the temp folder of the "
+         "machine the template was made on, which no run has"),
+        (n("LoadImage", image="ComfyUI_00001_.png [output]"),
+         "node 3 (LoadImage) reads ComfyUI_00001_.png [output]: a file of the output folder "
+         "of the machine the template was made on, which no run has"),
+        (n("Painter", mask="mask.png"),
+         "node 3 (Painter) reads the file mask.png through mask, and the importer lists the "
+         "input files of LoadImage, LoadAudio, LoadVideo only: write the workflow by hand"),
+    ):
+        with pytest.raises(ConversionError) as refusal:
+            import_template.refuse_stray_files({**fine, "3": node}, info)
+        assert str(refusal.value) == said
+    # The command says it before it writes, and --set can name a file that is there.
+    template = small_template()
+    template["nodes"][1]["widgets_values"] = ["clipspace/cat.png [temp]", "image"]
+    write_template(repo, template)
+    files = repo.files()
+    assert import_template.main([*repo.base, *repo.offline, "--dry-run"]) == 1
+    assert capsys.readouterr().err.startswith(
+        "error: node 10 (LoadImage) reads clipspace/cat.png [temp]: a file of the temp "
+        "folder of the machine the template was made on, which no run has\nnodes (4):\n")
+    assert import_template.main([*repo.base, *repo.offline, "--set", '10.image="cat.png"']) == 0
+    assert sorted(set(repo.files()) - set(files)) == ["manifest/workflows/small_i2i_api.json"]
+
+
+# --------------------------------------------------------------------------- #
+# files and answers that are not what they should be
+# --------------------------------------------------------------------------- #
+
+
+def test_a_web_page_is_not_hashed_as_the_file(server):
+    """A host that answers a download with its sign-in page sends 200 and
+    HTML. Its sha256 went into the entry, and the model sync would have
+    fetched the same page and found the sha256 right."""
+    page = b"<!doctype html><html><body>Sign in to download</body></html>"
+    html = {"Content-Type": "text/html; charset=utf-8"}
+    server.answer("HEAD", "/api/download/models/1", page, **html)
+    server.answer("GET", "/api/download/models/1", page, **html)
+    url = f"{server.url}/api/download/models/1"
+    for ask in (import_template.hash_download, import_template.file_facts):
+        with pytest.raises(ConversionError) as refusal:
+            ask(url)
+        assert str(refusal.value) == (
+            f"{url} answers with a web page, not with the file: a sign-in page, or the page "
+            "of the file where its download link belongs")
+    # Anything else a 200 sends is the file.
+    data = b"weights" * 10
+    for method in ("HEAD", "GET"):
+        server.answer(method, "/x.safetensors", data, **{"Content-Type": "binary/octet-stream"})
+    assert import_template.file_facts(f"{server.url}/x.safetensors") == (
+        hashlib.sha256(data).hexdigest(), 70)
+
+
+def test_a_prompt_that_stays_in_the_queue_is_not_called_removed(server, monkeypatch):
+    """The answers to /queue and /interrupt were not read: a server that took
+    the prompt and refused both was said to have had it taken out."""
+    server.answer("POST", "/prompt", {"prompt_id": "abc-1", "node_errors": {}})
+    server.answer("POST", "/queue", b"no", status=500)
+    server.answer("POST", "/interrupt", b"no", status=403)
+    start = "prompt check: the server accepted the prompt as abc-1, and taking it out of the "
+    assert check_prompt(server.url, CHECKED, FILES, set()) == (True, [
+        start + "queue failed (/queue answered 500, /interrupt answered 403): cancel it by hand"])
+    # Both are asked, whatever the first one answers.
+    assert [path for _, path, _ in server.sent()] == ["/prompt", "/queue", "/interrupt"]
+    server.answer("POST", "/queue")
+    assert check_prompt(server.url, CHECKED, FILES, set()) == (True, [
+        start + "queue failed (/interrupt answered 403): cancel it by hand"])
+    post = import_template._post
+    monkeypatch.setattr(import_template, "_post", lambda url, body: post(url, body) if url.endswith(
+        "/prompt") else (_ for _ in ()).throw(ConnectionResetError("gone")))
+    assert check_prompt(server.url, CHECKED, FILES, set()) == (True, [
+        start + "queue failed (/queue: gone, /interrupt: gone): cancel it by hand"])
+
+
+@pytest.mark.parametrize("answer, said", [
+    ({"node_errors": ["x"]}, "  node_errors: ['x']"),
+    ({"node_errors": {"3": "boom"}}, "  node 3: 'boom'"),
+    ({"node_errors": {"3": {"errors": "boom"}}}, "  node 3: {'errors': 'boom'}"),
+    ({"node_errors": {"3": {"errors": ["boom"]}}}, "  node 3 (KSampler): 'boom'"),
+    ({"node_errors": {"4": {"errors": [{"type": "value_not_in_list", "message": "Value not in "
+                                        "list", "extra_info": "ckpt_name"}]}}},
+     "  node 4 (CheckpointLoaderSimple): Value not in list: None"),
+    ({"node_errors": {"4": {"errors": [{"type": "value_not_in_list", "message": "odd",
+                                        "extra_info": {"input_name": ["ckpt_name"]}}]}}},
+     "  node 4 (CheckpointLoaderSimple): odd: None"),
+])
+def test_an_answer_that_is_not_what_comfyui_sends_is_a_failed_check(server, answer, said):
+    """Each of these ended the command in a traceback."""
+    server.answer("POST", "/prompt", answer, status=400)
+    assert check_prompt(server.url, CHECKED, FILES, set()) == (
+        False, ["prompt check: ComfyUI refuses the prompt", said])
+
+
+def test_a_prompt_id_that_is_no_text_cannot_be_taken_out(server):
+    server.answer("POST", "/prompt", {"prompt_id": {"a": 1}, "node_errors": {}})
+    passed, lines = check_prompt(server.url, CHECKED, FILES, set())
+    assert not passed and lines == ["prompt check: ComfyUI refuses the prompt", (
+        f"  {server.url}/prompt answered 200 with a prompt id that is no text ({{'a': 1}}): "
+        "if the server queued it, cancel it by hand")]
+    assert [path for _, path, _ in server.sent()] == ["/prompt"]
+
+
+@pytest.fixture
+def raw_server():
+    """A server that answers every request with the same bytes and hangs up."""
+    sockets = []
+
+    def serve(payload):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(5)
+        sockets.append(sock)
+
+        def answer():
+            while True:
+                try:
+                    conn, _ = sock.accept()
+                except OSError:
+                    return
+                conn.settimeout(2)
+                try:
+                    conn.recv(65536)
+                    conn.sendall(payload)
+                except OSError:
+                    pass
+                conn.close()
+
+        threading.Thread(target=answer, daemon=True).start()
+        return f"http://127.0.0.1:{sock.getsockname()[1]}"
+
+    yield serve
+    for sock in sockets:
+        sock.close()
+
+
+CUT_SHORT = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+             b"Content-Length: 500\r\n\r\n{\"a\":")
+NOT_HTTP = b"\x00\x01garbage\r\n\r\n"
+
+
+@pytest.mark.parametrize("payload", [CUT_SHORT, NOT_HTTP], ids=["cut short", "not http"])
+def test_an_answer_that_is_no_http_is_an_error_line(repo, raw_server, capsys, payload):
+    """http.client has errors of its own that are no OSError: an answer that
+    is cut short, a TLS port asked over http."""
+    url = raw_server(payload)
+    passed, lines = check_prompt(url, CHECKED, FILES, set())
+    assert not passed and len(lines) == 1
+    assert lines[0].startswith(f"prompt check: no answer from {url}/prompt (")
+    assert import_template.main([*repo.base, "--server", url, "--dry-run"]) == 1
+    assert capsys.readouterr().err.startswith(
+        f"error: could not read the node definitions from {url}/object_info: ")
+    assert import_template.hash_download(f"{url}/x") is None
+    if payload is NOT_HTTP:
+        assert import_template._head(f"{url}/x", follow=False) == (None, {})
+
+
+@pytest.mark.parametrize("text", ["[]", '"text"', "7", "null", '{"Sampler": 5}',
+                                  '{"Sampler": {"input": [1]}}', '{"Sampler": {"input": 5}}',
+                                  '{"Sampler": {"input": {"required": [1]}}}'])
+def test_a_file_that_is_no_object_info_is_an_error_line(repo, capsys, text):
+    """The templates' own index.json is a list, and is JSON."""
+    path = repo.root / "object_info.json"
+    path.write_text(text, encoding="utf-8")
+    assert import_template.main([*repo.base, *repo.offline, "--dry-run"]) == 1
+    assert capsys.readouterr().err == (
+        f"error: {path} holds no node definitions: /object_info is an object with one entry "
+        "for each node class\n")
+
+
+@pytest.mark.parametrize("text", ['{"nodes": [{}]}', '{"nodes": [1]}', '{"nodes": [null]}',
+                                  '{"nodes": [{"id": 1, "type": "SaveImage", "inputs": 5}]}',
+                                  '{"nodes": [{"id": 1, "type": "SaveImage"}], "links": [[1]]}'])
+def test_a_template_that_is_json_and_no_workflow_is_refused_with_a_reason(repo, capsys, text):
+    (repo.root / "templates" / "small.json").write_text(text, encoding="utf-8")
+    files = repo.files()
+    assert import_template.main([*repo.base, *repo.offline]) == 1
+    printed = capsys.readouterr()
+    assert printed.out == "" and "Traceback" not in printed.err
+    assert printed.err.startswith("error: ") and repo.files() == files
+    if "the converter can read" in printed.err:
+        assert re.match(r"error: the template is not a workflow the converter can read "
+                        r"\((Attribute|Index|Key|Type|Value)Error: .+\)\n", printed.err)
+
+
+def test_a_ref_github_answers_with_no_text_is_an_error_line(monkeypatch):
+    monkeypatch.setattr(import_template, "_get", lambda url, accept=None: b"\xff\xfe\x00junk")
+    with pytest.raises(ConversionError, match="could not resolve main in Comfy-Org/workflow_"
+                                              "templates .*: pass a full commit sha"):
+        import_template.resolve_ref("main")
+
+
 def test_a_refusal_names_its_reason_prints_the_nodes_and_writes_nothing(repo, capsys):
     files, manifest = repo.files(), repo.manifest()
 
@@ -1480,29 +2089,30 @@ def test_a_text_template_is_imported_greedy(repo, capsys):
     assert "comfy_flags" not in entry and "expect" not in entry
 
 
-def test_keep_sampling_is_refused_while_the_worker_strips_what_sampling_needs(
+def test_keep_sampling_is_refused_while_the_lint_refuses_what_sampling_needs(
         repo, monkeypatch, capsys):
-    """True today: the worker of this checkout drops `sampling_mode.temperature`.
-    The importer asks the worker's own code, so the flag works by itself once
-    the worker keeps the sub-inputs of a dynamic combo."""
+    """True today: a sampled text generation has `sampling_mode.temperature`, a
+    literal sub-input, and the manifest lint refuses one while the image that
+    runs drops it. The importer holds the lint's rule, so the flag is refused
+    before anything is written, and works on the day the rule goes."""
     write_template(repo, text_template("PreviewAny"))
-    asked = []
-    monkeypatch.setattr(import_template, "worker_strips", lambda prompt, info: asked.append(
-        prompt["5"]["inputs"]) or ["TextGenerate.sampling_mode.temperature=0.7"])
-    assert import_template.main([*repo.base, *repo.offline, "--keep-sampling", "--dry-run"]) == 1
-    assert asked == [{"prompt": "hi", "sampling_mode": "on", "sampling_mode.temperature": 0.7,
-                      "mtp": "auto"}]
-    assert capsys.readouterr().err.startswith(
-        "error: the worker drops these inputs before it queues the prompt, so the workflow "
-        "cannot run as the template has it yet: TextGenerate.sampling_mode.temperature=0.7. "
-        "They are sub-inputs of a dynamic combo, which the worker keeps once its image is "
-        "rebuilt with the fix. Without --keep-sampling the text generation is made greedy and "
-        "needs none of them\nnodes (2):\n")
-    # A worker that keeps them: the workflow is written as the template has it.
-    monkeypatch.setattr(import_template, "worker_strips", lambda prompt, info: [])
+    files = repo.files()
+    for more in (["--dry-run"], []):
+        assert import_template.main([*repo.base, *repo.offline, "--keep-sampling", *more]) == 1
+        assert capsys.readouterr().err.startswith(
+            "error: the worker drops these inputs before it queues the prompt, so the "
+            "workflow cannot run as the template has it yet: "
+            "5:TextGenerate.sampling_mode.temperature. They are sub-inputs of a dynamic "
+            "combo, which the worker keeps once its image is rebuilt with the fix. The "
+            "manifest lint refuses them until then. Without --keep-sampling the text "
+            "generation is made greedy and needs none of them\nnodes (2):\n")
+    assert repo.files() == files and repo.lint == []
+    # Without the rule the workflow is written as the template has it.
+    monkeypatch.setattr(import_template, "dotted_literals", lambda prompt: [])
     assert import_template.main([*repo.base, *repo.offline, "--keep-sampling"]) == 0
     written = repo.root / "manifest" / "workflows" / "small_i2i_api.json"
-    assert json.loads(written.read_text(encoding="utf-8"))["5"]["inputs"] == asked[0]
+    assert json.loads(written.read_text(encoding="utf-8"))["5"]["inputs"] == {
+        "prompt": "hi", "sampling_mode": "on", "sampling_mode.temperature": 0.7, "mtp": "auto"}
 
 
 def test_audio_has_no_reference_level_yet(repo, capsys):

@@ -39,6 +39,13 @@ workflow_templates checkout, or from GitHub at ``--templates-ref``.
 It refuses and does not guess. A template whose widget layout lives on the
 node instance (``CustomCombo``), one that needs nodes the server does not
 have, or one that saves a file no check can read, is refused with the reason.
+
+What the manifest lint would refuse in the new entry is refused before
+anything is written, and a dry run says it too: a literal sub-input of a
+dynamic combo, a model folder the worker does not search, a file the manifest
+lists as another file, a seed nothing pins. A file the manifest already lists
+is written the way the manifest has it. A rule that adds up the whole
+manifest, like the room on the volume, is the lint's alone.
 """
 
 from __future__ import annotations
@@ -46,8 +53,10 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import http.client
 import importlib.util
 import json
+import math
 import os
 import re
 import subprocess
@@ -72,8 +81,6 @@ from template_api_export import (  # noqa: E402
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-# The worker's own code, which says what it would drop from a prompt.
-WORKER_SRC = Path(__file__).resolve().parents[1] / "src"
 
 SAVE_IMAGE = "SaveImage"
 IMAGE_SAVES = ("SaveImage", "SaveImageAdvanced")
@@ -88,12 +95,21 @@ MODEL_SUFFIXES = (".safetensors", ".sft", ".ckpt", ".pt", ".pth", ".bin", ".gguf
 MARKDOWN_LINK = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
 # A file of a Hugging Face model repository: repository, revision, path.
 HF_FILE = re.compile(r"https://huggingface\.co/([^/]+/[^/]+)/resolve/([^/]+)/(.+)")
+# The token of the environment goes to this host over this scheme, and
+# nowhere else: over plain http anyone on the way reads it.
 HF_HOST = "huggingface.co"
+HF_SCHEME = "https"
 TEMPLATES_REPO = "Comfy-Org/workflow_templates"
 RAW = "https://raw.githubusercontent.com"
 LEVELS = ("smoke", "reference")
 RENDER_PX = 1024
 HASH_CHUNK = 1024 * 1024
+SEED_NAMES = ("seed", "noise_seed")
+# What a request can end in besides an answer: no connection, or an answer
+# that is cut short or is no HTTP.
+NET_ERRORS = (OSError, http.client.HTTPException)
+# A file name with the folder ComfyUI is told to read it from.
+ANNOTATED = re.compile(r" \[(input|output|temp)\]$")
 
 # ComfyUI's models/ subdirectory for each loader input, for a loader node that
 # does not list its files in `properties.models`. Keyed by loader *and* input
@@ -504,6 +520,32 @@ def describe(prompt: dict[str, dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _finite(value: Any) -> bool:
+    """Whether a value holds no number that JSON cannot write."""
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, dict):
+        return all(_finite(v) for v in value.values())
+    if isinstance(value, list):
+        return all(_finite(v) for v in value)
+    return True
+
+
+def _json_value(raw: str) -> Any:
+    """A value written as JSON. ValueError for anything else.
+
+    Python reads ``NaN`` and ``Infinity`` and writes them back. They are not
+    JSON, and a file that holds one is read by nothing else.
+    """
+    def refuse(word: str) -> None:
+        raise ValueError(f"{word} is not JSON")
+
+    value = json.loads(raw, parse_constant=refuse)
+    if not _finite(value):
+        raise ValueError("a number too large for JSON")
+    return value
+
+
 def apply_sets(prompt: dict[str, dict[str, Any]], object_info: dict[str, Any],
                sets: list[str]) -> None:
     """Apply the ``--set <node>.<input>=<value>`` overrides. Values are JSON.
@@ -517,7 +559,7 @@ def apply_sets(prompt: dict[str, dict[str, Any]], object_info: dict[str, Any],
         if not (equals and dot and node_id and name):
             raise ConversionError(f"--set {text}: write <node>.<input>=<value>")
         try:
-            value = json.loads(raw)
+            value = _json_value(raw)
         except ValueError:
             raise ConversionError(
                 f"--set {text}: the value is not JSON. A number is written 30, a "
@@ -540,25 +582,70 @@ def apply_sets(prompt: dict[str, dict[str, Any]], object_info: dict[str, Any],
         node["inputs"][name] = value
 
 
-def worker_strips(prompt: dict[str, dict[str, Any]], object_info: dict[str, Any]) -> list[str]:
-    """The literal inputs the worker would drop before it queues the prompt.
+def _node_inputs(object_info: dict[str, Any], class_type: str) -> dict[str, Any]:
+    """The inputs a node class has in this ComfyUI, by name."""
+    spec = (object_info.get(class_type) or {}).get("input") or {}
+    return {**(spec.get("required") or {}), **(spec.get("optional") or {})}
 
-    Asked of the worker's own check, ``validate_workflow`` in
-    ``src/comfy_runner.py`` of this checkout, with the definitions the
-    conversion used. So the answer follows the worker: when it learns to keep
-    the sub-inputs of a dynamic combo (``format.codec``), nothing is listed.
+
+def dotted_literals(prompt: dict[str, dict[str, Any]]) -> list[str]:
+    """The literal ``name.sub`` inputs: the sub-inputs of a dynamic combo.
+
+    The manifest lint refuses a workflow that has one
+    (``test_no_input_the_worker_would_strip``), because the worker's image
+    drops such an input before it queues the prompt. This is the lint's own
+    rule, and a test holds the two together: the rule goes there first, on
+    the day the image that runs keeps these inputs.
     """
-    if str(WORKER_SRC) not in sys.path:
-        sys.path.insert(0, str(WORKER_SRC))
-    import comfy_runner
+    return sorted(f"{node_id}:{node['class_type']}.{name}" for node_id, node in prompt.items()
+                  for name, value in node["inputs"].items()
+                  if "." in name and not isinstance(value, list))
 
-    fetch = comfy_runner.http_get_json
-    comfy_runner.http_get_json = lambda url, timeout=0: object_info
-    try:
-        report = comfy_runner.validate_workflow(0, copy.deepcopy(prompt))
-    finally:
-        comfy_runner.http_get_json = fetch
-    return list(report.get("stripped_inputs") or [])
+
+def unknown_literals(prompt: dict[str, dict[str, Any]], object_info: dict[str, Any]) -> list[str]:
+    """The literal inputs a node of this ComfyUI does not have.
+
+    The worker drops such an input before it queues the prompt, and ComfyUI
+    would not read it either: the run would go on without the value the
+    template has. A sub-input is known when its combo is.
+    """
+    return sorted(
+        f"{node_id}:{node['class_type']}.{name}" for node_id, node in prompt.items()
+        if node["class_type"] in object_info
+        for name, value in node["inputs"].items()
+        if not isinstance(value, list)
+        and name.split(".")[0] not in _node_inputs(object_info, node["class_type"]))
+
+
+def refuse_stray_files(prompt: dict[str, dict[str, Any]], object_info: dict[str, Any]) -> None:
+    """Stop on a file input the entry cannot list.
+
+    ``/object_info`` marks an input that takes an uploaded file. The entry
+    lists the files of ``LoadImage``, ``LoadAudio`` and ``LoadVideo``, which
+    the templates repository serves. A file of the temp or the output folder
+    lived on the machine the template was made on, and no run has it.
+    """
+    for node_id, node in prompt.items():
+        class_type = node["class_type"]
+        entries = _node_inputs(object_info, class_type)
+        for name, value in node["inputs"].items():
+            if not isinstance(value, str) or not value.strip():
+                continue
+            if not any(key.endswith("_upload") for key in _entry_opts(entries.get(name))):
+                continue
+            folder = ANNOTATED.search(value)
+            if folder and folder.group(1) != "input":
+                raise ConversionError(
+                    f"node {node_id} ({class_type}) reads {value}: a file of the "
+                    f"{folder.group(1)} folder of the machine the template was made on, "
+                    "which no run has"
+                )
+            if INPUT_FILE_BY_NODE.get(class_type) != name:
+                raise ConversionError(
+                    f"node {node_id} ({class_type}) reads the file {value} through {name}, "
+                    "and the importer lists the input files of "
+                    f"{', '.join(INPUT_FILE_BY_NODE)} only: write the workflow by hand"
+                )
 
 
 def finish_prompt(template: dict[str, Any], object_info: dict[str, Any], workflow_id: str,
@@ -601,15 +688,28 @@ def finish_prompt(template: dict[str, Any], object_info: dict[str, Any], workflo
             f"the template calls a paid service through {', '.join(partner)}: a partner "
             "node needs an account key and credits, and the worker has neither"
         )
-    stripped = worker_strips(prompt, object_info)
-    if stripped:
+    refuse_stray_files(prompt, object_info)
+    for node_id, node in prompt.items():
+        for name, value in node["inputs"].items():
+            if not _finite(value):
+                raise ConversionError(
+                    f"{node_id}.{name} is {value!r}, a number JSON cannot hold")
+    dotted = dotted_literals(prompt)
+    if dotted:
         raise ConversionError(
             "the worker drops these inputs before it queues the prompt, so the workflow "
-            f"cannot run as the template has it yet: {', '.join(stripped)}. They are "
+            f"cannot run as the template has it yet: {', '.join(dotted)}. They are "
             "sub-inputs of a dynamic combo, which the worker keeps once its image is "
-            "rebuilt with the fix"
+            "rebuilt with the fix. The manifest lint refuses them until then"
             + (". Without --keep-sampling the text generation is made greedy and "
                "needs none of them" if keep_sampling else "")
+        )
+    unknown = unknown_literals(prompt, object_info)
+    if unknown:
+        raise ConversionError(
+            "the worker drops these inputs before it queues the prompt, because the node "
+            f"of this ComfyUI does not have them: {', '.join(unknown)}. The template was "
+            "made for another version of the node"
         )
     return prompt, kind, filled, notes
 
@@ -654,6 +754,13 @@ def _file_name(value: str) -> str:
     return value.replace("\\", "/").rsplit("/", 1)[-1]
 
 
+def _download_link(name: str, url: str) -> str:
+    """The URL the entry gets for a model file. The manifest lint takes https only."""
+    if not url.startswith("https://"):
+        raise ConversionError(f"the download link of {name} is not https: {url}")
+    return clean_url(url)
+
+
 def model_files(prompt: dict[str, dict[str, Any]],
                 template: dict[str, Any]) -> list[dict[str, str]]:
     """The model files the workflow loads: name, download URL, models/ folder.
@@ -678,7 +785,7 @@ def model_files(prompt: dict[str, dict[str, Any]],
                 continue
             own = listed.get(value) or listed.get(_file_name(value))
             if own and isinstance(own.get("url"), str) and isinstance(own.get("directory"), str):
-                model = {"name": value, "url": clean_url(own["url"]),
+                model = {"name": value, "url": _download_link(value, own["url"]),
                          "directory": own["directory"]}
             elif value.endswith(MODEL_SUFFIXES):
                 directory = DIRECTORY_BY_LOADER_INPUT.get((class_type, name))
@@ -696,7 +803,8 @@ def model_files(prompt: dict[str, dict[str, Any]],
                         "download link for it, on the loader node or in its notes: add "
                         "the models entry by hand"
                     )
-                model = {"name": value, "url": clean_url(url), "directory": directory}
+                model = {"name": value, "url": _download_link(value, url),
+                         "directory": directory}
             else:
                 continue
             key = f"{model['directory']}/{model['name']}"
@@ -714,7 +822,7 @@ def input_names(prompt: dict[str, dict[str, Any]]) -> list[str]:
     for node in prompt.values():
         value = node["inputs"].get(INPUT_FILE_BY_NODE.get(node["class_type"], ""))
         if isinstance(value, str):
-            name = re.sub(r" \[(input|output|temp)\]$", "", value)
+            name = ANNOTATED.sub("", value)
             if name not in names:
                 names.append(name)
     return names
@@ -737,6 +845,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def _takes_the_token(url: str) -> bool:
+    """Whether a URL is Hugging Face itself, over a connection nobody reads."""
+    parts = urllib.parse.urlsplit(url)
+    return parts.scheme == HF_SCHEME and parts.hostname == HF_HOST
+
+
 class _TokenStaysHome(urllib.request.HTTPRedirectHandler):
     """Follow a redirect, and take the token off when it leaves Hugging Face.
 
@@ -746,17 +860,18 @@ class _TokenStaysHome(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if new is not None and urllib.parse.urlsplit(newurl).hostname != HF_HOST:
+        if new is not None and not _takes_the_token(newurl):
             new.headers.pop("Authorization", None)
         return new
 
 
 def _open(url: str, method: str, follow: bool):
     """Send a request. The Hugging Face token of the environment goes to
-    huggingface.co only: a gated repository answers nothing without it."""
+    huggingface.co only, and only over https: a gated repository answers
+    nothing without it."""
     request = urllib.request.Request(url, method=method)
     token = os.environ.get("HF_TOKEN")
-    if token and urllib.parse.urlsplit(url).hostname == HF_HOST:
+    if token and _takes_the_token(url):
         request.add_header("Authorization", f"Bearer {token}")
     opener = urllib.request.build_opener(_TokenStaysHome if follow else _NoRedirect)
     return opener.open(request, timeout=60)
@@ -769,7 +884,7 @@ def _head(url: str, follow: bool) -> tuple[int | None, Any]:
             return response.status, response.headers
     except urllib.error.HTTPError as error:
         return error.code, error.headers
-    except OSError:
+    except NET_ERRORS:
         return None, {}
 
 
@@ -791,7 +906,7 @@ def listed_bytes(url: str) -> int | None:
     try:
         with urllib.request.urlopen(listing, timeout=60) as response:
             rows = json.load(response)
-    except (OSError, ValueError):
+    except (*NET_ERRORS, ValueError):
         return None
     for row in rows if isinstance(rows, list) else []:
         if isinstance(row, dict) and row.get("path") == path:
@@ -823,16 +938,30 @@ def published_bytes(url: str) -> int | None:
 
 
 def hash_download(url: str) -> tuple[str, int] | None:
-    """(sha256, bytes) of a file, by downloading it once. None when that fails."""
+    """(sha256, bytes) of a file, by downloading it once. None when that fails.
+
+    A host that answers with a web page did not send the file: it sent its
+    sign-in page, or the page of the file where the download link belongs.
+    The model sync would fetch the same page, and its sha256 would match.
+    A download that ends before the length the host named is no file either.
+    """
     digest, size = hashlib.sha256(), 0
     try:
         with _open(url, "GET", follow=True) as response:
+            if response.headers.get_content_type() == "text/html":
+                raise ConversionError(
+                    f"{url} answers with a web page, not with the file: a sign-in page, "
+                    "or the page of the file where its download link belongs"
+                )
+            named = _size(response.headers.get("Content-Length"))
             while chunk := response.read(HASH_CHUNK):
                 digest.update(chunk)
                 size += len(chunk)
-    except OSError:
+    except NET_ERRORS:
         return None
-    return (digest.hexdigest(), size) if size else None
+    if not size or named not in (None, size):
+        return None
+    return digest.hexdigest(), size
 
 
 def _head_on_host(url: str) -> tuple[str, int | None, Any]:
@@ -855,19 +984,41 @@ def _head_on_host(url: str) -> tuple[str, int | None, Any]:
 
 
 def file_facts(url: str) -> tuple[str | None, int | None]:
-    """(sha256, bytes) of a download. Either is None when it cannot be found.
+    """(sha256, bytes) of a download. Either is None when the host keeps it back.
 
     One HEAD request gives both for a file Hugging Face stores as LFS
     (``X-Linked-ETag``, ``X-Linked-Size``), one more for each time its
     repository was renamed. Where the host publishes no sha256 (a file that is
     not stored as LFS, another host), the file is downloaded once and hashed.
+
+    Only a gated file comes back without its sha256: the host answers 401 or
+    403, and the download ends the same way. A file that is not there, and a
+    host that is busy or does not answer, stop the import. Read as "no sha256
+    published", either would end in an entry without one.
     """
     final, status, headers = _head_on_host(url)
     etag = (headers.get("X-Linked-ETag") or "").strip('"')
     if re.fullmatch(r"[0-9a-f]{64}", etag):
         return etag, _bytes_after(final, status, headers)
+    if status == 404:
+        raise ConversionError(
+            f"{url} is not there: the host answers 404"
+            + (". The templates repository has no such file at that commit: name a commit "
+               "that is on GitHub with --templates-ref"
+               if url.startswith(f"{RAW}/{TEMPLATES_REPO}/") else "")
+        )
+    if status is None or status == 429 or status >= 500:
+        raise ConversionError(
+            f"{urllib.parse.urlsplit(url).hostname} did not answer for {url} "
+            f"({'no answer' if status is None else status}): try again"
+        )
     print(f"{url} publishes no sha256: downloading it once to hash it", file=sys.stderr)
-    return hash_download(url) or (None, _bytes_after(final, status, headers))
+    hashed = hash_download(url)
+    if hashed is None and status in (401, 403):
+        return None, _bytes_after(final, status, headers)
+    if hashed is None:
+        raise ConversionError(f"{url} could not be downloaded to hash it: try again")
+    return hashed
 
 
 def fill_bytes(manifest_path: Path, lookup=None) -> list[str]:
@@ -879,7 +1030,7 @@ def fill_bytes(manifest_path: Path, lookup=None) -> list[str]:
     names them.
     """
     lookup = lookup or published_bytes
-    manifest = _read_manifest(manifest_path)
+    _, manifest = _read_manifest(manifest_path)
     sizes: dict[str, int | None] = {}
     for entry in manifest["workflows"].values():
         for model in entry.get("models") or []:
@@ -890,7 +1041,7 @@ def fill_bytes(manifest_path: Path, lookup=None) -> list[str]:
                 sizes[url] = lookup(url)
             if sizes[url] is not None:
                 model["bytes"] = sizes[url]
-    manifest_path.write_text(_dump(manifest), encoding="utf-8")
+    _write(manifest_path, _dump(manifest))
     return sorted(url for url, size in sizes.items() if size is None)
 
 
@@ -899,14 +1050,103 @@ def fill_bytes(manifest_path: Path, lookup=None) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
+def _seed_source(prompt: dict[str, dict[str, Any]], node_id: str, name: str) -> tuple[str, str]:
+    """Where the number of a seed that a link feeds is held: (node id, input).
+
+    A ``PrimitiveInt`` holds it as ``value``. Any other node is taken when it
+    has one whole number among its literal inputs: that one is the seed.
+    """
+    source_id = prompt[node_id]["inputs"][name][0]
+    source = prompt.get(source_id) or {"class_type": "a missing node", "inputs": {}}
+    numbers = [key for key, value in source["inputs"].items()
+               if isinstance(value, int) and not isinstance(value, bool)]
+    held = ["value"] if "value" in numbers else numbers
+    if len(held) != 1:
+        raise ConversionError(
+            f"node {node_id} ({prompt[node_id]['class_type']}) gets its {name} from node "
+            f"{source_id} ({source['class_type']}), and the importer cannot tell which input "
+            "of that node holds the number. The lint asks every workflow with a seed for a "
+            "seed override: write the entry by hand"
+        )
+    return source_id, held[0]
+
+
 def seed_overrides(prompt: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """The seed inputs a run must pin, with the values the template already has."""
+    """The seed inputs a run must pin, with the values the template already has.
+
+    A seed that a link feeds is pinned where its number is (``_seed_source``):
+    the lint asks every workflow that has a seed input for an override.
+    """
     overrides: dict[str, dict[str, Any]] = {}
     for node_id, node in prompt.items():
         for name, value in node["inputs"].items():
-            if name in ("seed", "noise_seed") and isinstance(value, int):
+            if name not in SEED_NAMES:
+                continue
+            if isinstance(value, int):
                 overrides.setdefault(node_id, {})[name] = value
+            elif is_link(value):
+                source_id, held = _seed_source(prompt, node_id, name)
+                overrides.setdefault(source_id, {})[held] = prompt[source_id]["inputs"][held]
     return overrides
+
+
+def model_folders() -> set[str]:
+    """The models/ folders the worker searches on the volume: the keys of
+    ``docker/extra_model_paths.yaml`` (flat ``key: value`` lines)."""
+    text = (ROOT / "docker" / "extra_model_paths.yaml").read_text(encoding="utf-8")
+    keys = set(re.findall(r"^\s+([a-z_]+):\s*\S+", text, flags=re.M))
+    keys.discard("base_path")
+    return keys
+
+
+def manifest_files(manifest: dict[str, Any],
+                   but: str | None = None) -> dict[str, tuple[str, dict[str, Any]]]:
+    """directory/name -> (workflow id, models entry) of each file the manifest
+    lists, the files of the workflow ``but`` left out."""
+    files: dict[str, tuple[str, dict[str, Any]]] = {}
+    for workflow_id, entry in (manifest.get("workflows") or {}).items():
+        for model in (entry.get("models") or []) if workflow_id != but else []:
+            files.setdefault(f"{model['directory']}/{model['name']}", (workflow_id, model))
+    return files
+
+
+def _as_the_manifest_has_it(model: dict[str, Any], owner: str, listed: dict[str, Any],
+                            notes: list[str]) -> dict[str, Any]:
+    """The manifest's own entry for a file it already lists, when it is that file.
+
+    The volume holds one file per folder and name, and the lint wants one URL
+    and one sha256 for it. The gallery serves the same file from several
+    repositories, and an input file is pinned to another commit on each
+    import. The sha256 decides, and the size where the manifest has no sha256.
+    """
+    key = f"{model['directory']}/{model['name']}"
+    if model.get("sha256") and listed.get("sha256"):
+        same, by = model["sha256"] == listed["sha256"], "sha256"
+    elif model.get("bytes") and listed.get("bytes"):
+        same, by = model["bytes"] == listed["bytes"], "size"
+    else:
+        same, by = model["url"] == listed["url"], None
+    if same and model["url"] != listed["url"]:
+        notes.append(f"note: {key} is in the manifest for {owner}, and it is the same file "
+                     f"by its {by}: the entry takes the URL it has there, {listed['url']}")
+    if same:
+        return dict(listed)
+    if by is None:
+        raise ConversionError(
+            f"{key} is in the manifest for {owner} from {listed['url']}, and neither a "
+            f"sha256 nor a size says whether {model['url']} is the same file: a volume "
+            "holds one file per name"
+        )
+    if model["url"] == listed["url"]:
+        raise ConversionError(
+            f"{key} is in the manifest for {owner} with another {by}: the file at "
+            f"{model['url']} changed since. Correct the manifest first"
+        )
+    raise ConversionError(
+        f"{key} is another file in the manifest, for {owner}, by its {by}: a volume holds "
+        f"one file per name. The manifest has {listed['url']}, the template "
+        f"{model['url']}"
+    )
 
 
 def build_entry(
@@ -921,13 +1161,29 @@ def build_entry(
     timeout_s: int | None = None,
     skip_sha: bool = False,
     pinned: Callable[[], str] | None = None,
+    manifest: dict[str, Any] | None = None,
+    notes: list[str] | None = None,
 ) -> dict[str, Any]:
     """The manifest entry of a finished prompt.
 
     ``pinned`` gives the commit of the templates repository the input files
     are read at. It is asked only when the workflow has input files.
+    ``manifest`` is the manifest the entry will join. What the lint would
+    refuse in the new entry is refused here, before anything is written: a
+    model folder the worker does not search, a file the manifest has as
+    another file, a seed nothing pins. ``notes`` gets what the author should
+    know.
     """
+    notes = [] if notes is None else notes
     models = model_files(prompt, template)
+    searched = model_folders()
+    unmapped = [m for m in models if m["directory"] not in searched]
+    if unmapped:
+        raise ConversionError(
+            "the worker does not search "
+            + ", ".join(f"{m['directory']}/ ({m['name']})" for m in unmapped)
+            + ": docker/extra_model_paths.yaml names the models/ folders it does"
+        )
     inputs = input_names(prompt)
     if inputs:
         if pinned is None:
@@ -938,8 +1194,16 @@ def build_entry(
         sha = pinned()
         models += [{"name": name, "url": input_url(name, sha), "directory": "input"}
                    for name in inputs]
-    for model in models:
+    seeds = seed_overrides(prompt)
+    known = manifest_files(manifest or {}, but=workflow_id)
+    for index, model in enumerate(models):
+        key = f"{model['directory']}/{model['name']}"
+        owner, listed = known.get(key, (None, None))
         if skip_sha:
+            if listed and listed["url"] != model["url"]:
+                notes.append(f"note: {key} is in the manifest for {owner} from another URL, "
+                             "and --skip-sha looked nothing up to say whether it is the "
+                             "same file")
             continue
         digest, size = file_facts(model["url"])
         if model["directory"] == "input" and digest is None:
@@ -952,6 +1216,8 @@ def build_entry(
             model["sha256"] = digest
         if size:
             model["bytes"] = size
+        if listed:
+            models[index] = _as_the_manifest_has_it(model, owner, listed, notes)
 
     entry: dict[str, Any] = {"enabled": True, "level": level, "cadence": cadence}
     if kind != "image":
@@ -959,7 +1225,7 @@ def build_entry(
     if expect:
         entry["expect"] = expect
     entry["workflow_path"] = f"manifest/workflows/{workflow_id}_api.json"
-    entry["seed_overrides"] = seed_overrides(prompt)
+    entry["seed_overrides"] = seeds
     entry["models"] = models
     if inputs:
         entry["comfy_flags"] = ["--input-directory", INPUT_DIR]
@@ -982,26 +1248,66 @@ def _dump(obj: Any) -> str:
     return json.dumps(obj, indent=2, ensure_ascii=False) + "\n"
 
 
-def _read_manifest(manifest_path: Path) -> dict[str, Any]:
-    """The manifest, when writing it back changes no line but the new ones."""
+def _line_end(path: Path) -> str:
+    """The line end a file has: a rewrite that changed it would change every line."""
+    with open(path, "rb") as handle:
+        return "\r\n" if handle.readline().endswith(b"\r\n") else "\n"
+
+
+def _write(path: Path, text: str, like: Path | None = None) -> None:
+    """Write a file in one step, with the line ends of ``like`` (default: its own).
+
+    The text goes to a file next to it, which then takes its place. A write
+    that fails, on a full disk say, leaves the old file whole.
+    """
+    part = path.with_name(path.name + ".part")
+    try:
+        with open(part, "w", encoding="utf-8", newline=_line_end(like or path)) as handle:
+            handle.write(text)
+        os.replace(part, path)
+    finally:
+        part.unlink(missing_ok=True)
+
+
+def _layout_problem(manifest_path: Path, text: str, manifest: Any) -> str | None:
+    """Why this command will not rewrite the manifest, if it will not."""
+    if _dump(manifest) == text:
+        return None
+    return (f"{manifest_path} is not laid out the way this command writes it "
+            "(2 spaces, one key a line): rewriting it would change more than the lines "
+            "this command adds")
+
+
+def _read_manifest(manifest_path: Path) -> tuple[str, dict[str, Any]]:
+    """The manifest's text and what it holds, when writing it back changes no
+    line but the new ones."""
     text = manifest_path.read_text(encoding="utf-8")
     manifest = json.loads(text)
-    if _dump(manifest) != text:
+    problem = _layout_problem(manifest_path, text, manifest)
+    if problem:
+        raise SystemExit(problem)
+    return text, manifest
+
+
+def insert_entry(manifest_path: Path, workflow_id: str, entry: dict[str, Any],
+                 seen: str | None = None) -> None:
+    """Add the entry at the end of ``workflows``. No other line changes.
+
+    ``seen`` is the manifest's text as the command read it when it started.
+    The file is read again here. When it changed in between, another import
+    wrote to it, and writing back what this command read would drop that
+    entry: the file is left alone.
+    """
+    text, manifest = _read_manifest(manifest_path)
+    if seen is not None and text != seen:
         raise SystemExit(
-            f"{manifest_path} is not laid out the way this command writes it "
-            "(2 spaces, one key a line): rewriting it would change more than the lines "
-            "this command adds"
+            f"{manifest_path.name} changed while this command ran, so it was left as it "
+            "is: run the command again"
         )
-    return manifest
-
-
-def insert_entry(manifest_path: Path, workflow_id: str, entry: dict[str, Any]) -> None:
-    """Add the entry at the end of ``workflows``. No other line changes."""
-    manifest = _read_manifest(manifest_path)
     if workflow_id in manifest["workflows"]:
         raise SystemExit(f"{workflow_id} is already in {manifest_path.name}")
     manifest["workflows"][workflow_id] = entry
-    manifest_path.write_text(_dump(manifest), encoding="utf-8")
+    _write(manifest_path, _dump(manifest))
 
 
 def run_lint() -> int:
@@ -1052,15 +1358,41 @@ def _missing_file(error: dict[str, Any], node: dict[str, Any], files: set[str],
     ``LoadVideo`` check their file themselves and answer "custom validation
     failed" for the same thing.
     """
-    name = (error.get("extra_info") or {}).get("input_name")
+    info = error.get("extra_info")
+    name = info.get("input_name") if isinstance(info, dict) else None
+    if not isinstance(name, str):
+        return False
     class_type = node["class_type"]
     value = node["inputs"].get(name)
-    named = isinstance(value, str) and re.sub(r" \[(input|output|temp)\]$", "", value) in files
+    named = isinstance(value, str) and ANNOTATED.sub("", value) in files
     if error.get("type") == "value_not_in_list":
         return named or (class_type, name) in filled
     if error.get("type") == "custom_validation_failed":
         return named and INPUT_FILE_BY_NODE.get(class_type) == name
     return False
+
+
+def _take_out(server: str, prompt_id: str) -> str:
+    """Take an accepted prompt out of a server's queue, and say how that went.
+
+    Out of the queue first, then stopped in case it had already started. Both
+    are asked, whatever the first one answers, and each answer is read: a
+    prompt that stays would run on the author's machine.
+    """
+    failed = []
+    for path, body in (("/queue", {"delete": [prompt_id]}),
+                       ("/interrupt", {"prompt_id": prompt_id})):
+        try:
+            status = _post(server + path, body)[0]
+        except NET_ERRORS as error:
+            failed.append(f"{path}: {error}")
+        else:
+            if status != 200:
+                failed.append(f"{path} answered {status}")
+    if failed:
+        return (f"prompt check: the server accepted the prompt as {prompt_id}, and taking "
+                f"it out of the queue failed ({', '.join(failed)}): cancel it by hand")
+    return "prompt check: the server accepted the prompt, and it was taken out of the queue"
 
 
 def check_prompt(server: str, prompt: dict[str, dict[str, Any]], files: set[str],
@@ -1069,22 +1401,33 @@ def check_prompt(server: str, prompt: dict[str, dict[str, Any]], files: set[str]
 
     It passes when ComfyUI names no node error, or only errors that say the
     server does not have a file of the entry. A prompt the server accepts is
-    taken out of its queue at once, so nothing is generated there.
+    taken out of its queue at once, so nothing is generated there. An answer
+    that is not what ComfyUI sends is a failed check, with what was sent.
     """
     server = server.rstrip("/")
     try:
         status, body = _post(f"{server}/prompt", {"prompt": prompt})
         answer = json.loads(body)
-    except (OSError, ValueError) as error:
+    except (*NET_ERRORS, ValueError) as error:
         return False, [f"prompt check: no answer from {server}/prompt ({error})"]
     if not isinstance(answer, dict):
         return False, [f"prompt check: {server}/prompt answered {status} with no object"]
 
     problems, absent = [], []
-    for node_id, record in (answer.get("node_errors") or {}).items():
+    node_errors = answer.get("node_errors") or {}
+    if not isinstance(node_errors, dict):
+        problems.append(f"  node_errors: {node_errors!r}")
+        node_errors = {}
+    for node_id, record in node_errors.items():
+        errors = (record.get("errors") or []) if isinstance(record, dict) else None
+        if not isinstance(errors, list):
+            problems.append(f"  node {node_id}: {record!r}")
+            continue
         node = prompt.get(node_id) or {"class_type": record.get("class_type"), "inputs": {}}
-        for error in record.get("errors") or []:
-            if _missing_file(error, node, files, filled):
+        for error in errors:
+            if not isinstance(error, dict):
+                problems.append(f"  node {node_id} ({node['class_type']}): {error!r}")
+            elif _missing_file(error, node, files, filled):
                 absent.append(str(node["inputs"].get(error["extra_info"]["input_name"])))
             else:
                 problems.append(
@@ -1093,16 +1436,12 @@ def check_prompt(server: str, prompt: dict[str, dict[str, Any]], files: set[str]
                 )
     lines = []
     prompt_id = answer.get("prompt_id")
+    if prompt_id and not isinstance(prompt_id, str):
+        problems.append(f"  {server}/prompt answered {status} with a prompt id that is no "
+                        f"text ({prompt_id!r}): if the server queued it, cancel it by hand")
+        prompt_id = None
     if prompt_id:
-        # Out of the queue first, then stop it in case it had already started.
-        try:
-            _post(f"{server}/queue", {"delete": [prompt_id]})
-            _post(f"{server}/interrupt", {"prompt_id": prompt_id})
-            lines.append("prompt check: the server accepted the prompt, and it was taken out "
-                         "of the queue")
-        except OSError as error:
-            lines.append(f"prompt check: the server accepted the prompt as {prompt_id}, and "
-                         f"taking it out of the queue failed ({error}): cancel it by hand")
+        lines.append(_take_out(server, prompt_id))
     if not prompt_id and not problems and not absent:
         # No node is named: an unknown node class, a prompt without outputs.
         refused = answer.get("error")
@@ -1128,7 +1467,7 @@ def resolve_ref(ref: str) -> str:
     url = f"https://api.github.com/repos/{TEMPLATES_REPO}/commits/{urllib.parse.quote(ref)}"
     try:
         sha = _get(url, accept="application/vnd.github.sha").decode().strip()
-    except OSError as error:
+    except (*NET_ERRORS, ValueError) as error:
         raise ConversionError(
             f"could not resolve {ref} in {TEMPLATES_REPO} ({error}): pass a full commit "
             "sha with --templates-ref"
@@ -1161,21 +1500,41 @@ def load_template(name: str, templates_dir: Path | None, pinned: Callable[[], st
             url = f"{RAW}/{TEMPLATES_REPO}/{pinned()}/templates/{urllib.parse.quote(name)}.json"
             text = _get(url).decode("utf-8")
         template = json.loads(text)
-    except (OSError, ValueError) as error:
+    except (*NET_ERRORS, ValueError) as error:
         raise ConversionError(f"could not read the template {name}: {error}") from None
     if not isinstance(template, dict) or not isinstance(template.get("nodes"), list):
         raise ConversionError(f"{name} is not a workflow template: it has no nodes")
     return template
 
 
+def _defines_nodes(info: Any) -> bool:
+    """Whether a value has the shape of ``/object_info``: an object of node
+    classes, each with its inputs by name."""
+    if not isinstance(info, dict):
+        return False
+    for spec in info.values():
+        inputs = (spec.get("input") or {}) if isinstance(spec, dict) else None
+        if not isinstance(inputs, dict) or not all(
+                isinstance(inputs.get(part) or {}, dict) for part in ("required", "optional")):
+            return False
+    return True
+
+
 def load_object_info(server: str | None, path: Path | None) -> dict[str, Any]:
+    source = f"{server}/object_info" if server else path
     try:
         if server:
-            return json.loads(_get(f"{server.rstrip('/')}/object_info"))
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        source = f"{server}/object_info" if server else path
-        raise ConversionError(f"could not read the node definitions from {source}: {error}")
+            info = json.loads(_get(f"{server.rstrip('/')}/object_info"))
+        else:
+            info = json.loads(path.read_text(encoding="utf-8"))
+    except (*NET_ERRORS, ValueError) as error:
+        raise ConversionError(
+            f"could not read the node definitions from {source}: {error}") from None
+    if not _defines_nodes(info):
+        raise ConversionError(
+            f"{source} holds no node definitions: /object_info is an object with one "
+            "entry for each node class")
+    return info
 
 
 # --------------------------------------------------------------------------- #
@@ -1189,7 +1548,7 @@ def expectations(values: list[str], level: str) -> dict[str, Any]:
     for text in values:
         key, _, raw = text.partition("=")
         try:
-            expect[key] = json.loads(raw)
+            expect[key] = _json_value(raw)
         except ValueError:
             raise ConversionError(f"--expect {text}: write <key>=<number>") from None
     try:
@@ -1301,8 +1660,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def early_refusal(args: argparse.Namespace, workflow_id: str) -> str | None:
-    """What stops an import before a template is read."""
+def early_refusal(args: argparse.Namespace, workflow_id: str, seen: str,
+                  manifest: dict[str, Any]) -> str | None:
+    """What stops an import before a template is read.
+
+    ``seen`` is the text of the manifest and ``manifest`` what it holds. What
+    the command would find only when it writes is found here: a manifest it
+    will not rewrite, and a file or an id that is taken. On Windows and macOS
+    a name that differs by case only is the same file.
+    """
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", workflow_id):
         return (f"the id {workflow_id!r} names the output files, so it is made of letters, "
                 "digits, _ . and -: choose one with --id")
@@ -1314,9 +1680,25 @@ def early_refusal(args: argparse.Namespace, workflow_id: str) -> str | None:
     if args.keep_sampling and args.level != "smoke":
         return ("--keep-sampling is for a smoke-level workflow: a reference-level text is "
                 "compared word for word, so it is generated without sampling")
-    manifest = json.loads((ROOT / "manifest" / "workflows.json").read_text(encoding="utf-8"))
+    if not args.print_entry:
+        problem = _layout_problem(ROOT / "manifest" / "workflows.json", seen, manifest)
+        if problem:
+            return problem
     if workflow_id in manifest["workflows"] and not args.print_entry:
         return f"{workflow_id} is already in manifest/workflows.json: choose another --id"
+    twin = next((other for other in manifest["workflows"]
+                 if other != workflow_id and other.casefold() == workflow_id.casefold()), None)
+    if twin:
+        return (f"{twin} is in manifest/workflows.json, and {workflow_id} differs from it "
+                "by case only: on Windows and macOS both would be one workflow file. "
+                "Choose another --id")
+    name = f"{workflow_id}_api.json"
+    folder = ROOT / "manifest" / "workflows"
+    there = sorted(p.name for p in folder.iterdir()
+                   if p.name.casefold() == name.casefold()) if folder.is_dir() else []
+    if there and (there != [name] or not args.print_entry):
+        return (f"manifest/workflows/{there[0]} is already there, and the command writes "
+                "over no workflow file: choose another --id, or delete the file first")
     if not (args.dry_run or args.print_entry) and importlib.util.find_spec("pytest") is None:
         return ("the manifest lint is run with pytest, which is not installed: "
                 "pip install pytest")
@@ -1340,7 +1722,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if unknown else 0
 
     workflow_id = args.id or args.template
-    refusal = early_refusal(args, workflow_id)
+    manifest_path = ROOT / "manifest" / "workflows.json"
+    seen = manifest_path.read_text(encoding="utf-8")
+    manifest = json.loads(seen)
+    refusal = early_refusal(args, workflow_id, seen, manifest)
     if refusal:
         print(f"error: {refusal}", file=sys.stderr)
         return 1
@@ -1356,7 +1741,9 @@ def main(argv: list[str] | None = None) -> int:
         return shas[0]
 
     # A template this importer cannot turn into a corpus entry is a refusal
-    # with its reason, not a traceback.
+    # with its reason, not a traceback. So is a file that is JSON and no
+    # workflow: the converter reads what the frontend writes, and trips over
+    # anything else.
     shown: list[dict] = []
     try:
         expect = expectations(args.expect, args.level)
@@ -1367,15 +1754,23 @@ def main(argv: list[str] | None = None) -> int:
             shown)
         entry = build_entry(
             workflow_id, prompt, template, cadence=args.cadence, kind=kind, level=args.level,
-            expect=expect, timeout_s=args.timeout_s, skip_sha=args.skip_sha, pinned=pinned)
-    except ConversionError as error:
-        print(f"error: {error}", file=sys.stderr)
+            expect=expect, timeout_s=args.timeout_s, skip_sha=args.skip_sha, pinned=pinned,
+            manifest=manifest, notes=notes)
+    except (ConversionError, AttributeError, IndexError, KeyError, TypeError, ValueError,
+            RecursionError) as error:
+        said = str(error) if isinstance(error, ConversionError) else (
+            "the template is not a workflow the converter can read "
+            f"({type(error).__name__}: {error})")
+        print(f"error: {said}", file=sys.stderr)
         if shown:
             print(f"nodes ({len(shown[0])}):\n{describe(shown[0])}", file=sys.stderr)
         return 1
 
+    listed = manifest_files(manifest, but=workflow_id)
     for model in entry["models"]:
         lacks = [key for key in ("sha256", "bytes") if key not in model]
+        if listed.get(f"{model['directory']}/{model['name']}", ("", None))[1] == model:
+            continue  # written as the manifest has it, with what the manifest knows
         if lacks and not args.skip_sha:
             notes.append(
                 f"note: no {' and no '.join(lacks)} found for {model['url']}"
@@ -1403,12 +1798,21 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     path = ROOT / "manifest" / "workflows" / f"{workflow_id}_api.json"
-    path.write_text(_dump(prompt), encoding="utf-8")
+    try:
+        _write(path, _dump(prompt), like=manifest_path)
+        if not args.print_entry:
+            try:
+                insert_entry(manifest_path, workflow_id, entry, seen)
+            except BaseException:
+                path.unlink(missing_ok=True)  # an entry that did not go in leaves no file
+                raise
+    except (OSError, SystemExit) as error:
+        print(f"error: nothing was written: {error}", file=sys.stderr)
+        return 1
     print(f"wrote {path.relative_to(ROOT).as_posix()} ({len(prompt)} nodes)", file=sys.stderr)
     if args.print_entry:
         print(json.dumps({workflow_id: entry}, indent=2, ensure_ascii=False))
         return 0
-    insert_entry(ROOT / "manifest" / "workflows.json", workflow_id, entry)
     print(f"added {workflow_id} to manifest/workflows.json", file=sys.stderr)
     failed = run_lint()
     if failed:
