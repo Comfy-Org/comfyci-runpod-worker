@@ -608,6 +608,37 @@
       "timeout_s": 900,
       "thresholds": null,
       "golden_tag": null
+    },
+    "ace_step_15_t2a": {
+      "enabled": true,
+      "level": "smoke",
+      "cadence": "nightly",
+      "output_kind": "audio",
+      "expect": {
+        "seconds": 30
+      },
+      "workflow_path": "manifest/workflows/ace_step_15_t2a_api.json",
+      "seed_overrides": {
+        "3": {
+          "seed": 31
+        },
+        "94": {
+          "seed": 31
+        }
+      },
+      "models": [
+        {
+          "name": "ace_step_1.5_turbo_aio.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/ACE-Step-1.5/resolve/main/checkpoints/ace_step_1.5_turbo_aio.safetensors",
+          "directory": "checkpoints",
+          "sha256": "67b0f43aa5c51c840bd0228e6a935d8ff416ec87e5df2fc0637da17a561252bc",
+          "bytes": 10025478736
+        }
+      ],
+      "gpu_type": null,
+      "timeout_s": 900,
+      "thresholds": null,
+      "golden_tag": null
     }
   }
 }

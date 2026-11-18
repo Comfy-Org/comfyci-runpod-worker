@@ -962,7 +962,7 @@ def test_the_nightly_workflows_of_the_manifest_run_on_the_nightly_lane_alone():
     workflows = MANIFEST["workflows"]
     nightly = [wf_id for wf_id, entry in workflows.items()
                if lanes_mod.cadence_of(entry) == "nightly"]
-    assert {"hunyuan3d_2_1_t23d", "hunyuan3d_2_mv_turbo_mv23d"} <= set(nightly)
+    assert {"hunyuan3d_2_1_t23d", "hunyuan3d_2_mv_turbo_mv23d", "ace_step_15_t2a"} <= set(nightly)
     pending, ready = copy.deepcopy(REGISTRY), copy.deepcopy(REGISTRY)
     pending["lanes"][NIGHTLY]["endpoint_id"] = None
     ready["lanes"][NEW]["endpoint_id"] = "abc123"

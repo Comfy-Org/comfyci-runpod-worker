@@ -204,6 +204,23 @@ this repo per template.
      is known only once it has run on the workers: `smoke.files` in each
      run's cell has the sha256 of every file.
 
+   **A sound workflow** (like the `ace_step_15_t2a` entry) is written by
+   hand for the same reason. Make sure of this:
+
+   - The entry says `"output_kind": "audio"` and `"level": "smoke"`.
+   - The graph ends in `SaveAudioAdvanced` with `format` `"flac"` and
+     `filename_prefix` equal to the workflow id. ComfyUI then writes
+     `<id>_00001.flac`, with no underscore before the dot.
+   - Keep it short. The file is sent in the job's answer, and one over the
+     worker's size limit is not sent: it is then checked by its size only.
+     `ace_step_15_t2a` makes 30 seconds where its template says 120. The
+     length is set in two nodes there, the text encoder's `duration` and the
+     latent's `seconds`, and the entry says it once more:
+     `"expect": {"seconds": 30}`.
+   - Every node with a seed is in `seed_overrides`. A sound model can have
+     one outside its sampler: the ACE-Step text encoder samples audio codes
+     from its own.
+
 3. Check it. `python -m pytest scripts/tests -q` lints the manifest against
    every workflow it references (loaded files and `models` match both ways,
    every node feeds an output node, seed override targets, model folders,
@@ -856,6 +873,7 @@ The nightly lane's workflows, all at smoke level:
 |---|---|---|---|
 | `hunyuan3d_2_1_t23d` | text to 3D: a picture from Z-Image Turbo (8 steps), then Hunyuan3D 2.1 (30 steps) and a mesh at octree resolution 128 | `hunyuan3d_2_1_t23d_00001_.png` (the mesh, rendered), `hunyuan3d_2_1_t23d_00002_.png` (the picture it was made from), `hunyuan3d_2_1_t23d_mesh_00001_.glb` | `hunyuan_3d_v2.1.safetensors`, 7.37 GB. The three Z-Image files are there for `z_image_turbo_t2i` |
 | `hunyuan3d_2_mv_turbo_mv23d` | multiview to 3D: four views of one object, Hunyuan3D 2 MV Turbo (20 steps), a mesh at octree resolution 128 | `hunyuan3d_2_mv_turbo_mv23d_00001_.png` (the mesh, rendered), `hunyuan3d_2_mv_turbo_mv23d_mesh_00001_.glb` | `hunyuan3d-dit-v2-mv-turbo_fp16.safetensors`, 4.93 GB, and the four views, 3.9 MB |
+| `ace_step_15_t2a` | text to audio: a song of 30 seconds from ACE-Step 1.5 turbo (8 steps) | `ace_step_15_t2a_00001.flac`, 30 seconds long (`expect`) | `ace_step_1.5_turbo_aio.safetensors`, 10.03 GB |
 
 None of them has run on a worker yet: the lane has no endpoint. The model
 sync does not wait for one. A nightly workflow's models are counted against

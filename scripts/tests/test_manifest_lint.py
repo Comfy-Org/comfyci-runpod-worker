@@ -937,3 +937,44 @@ def test_the_3d_workflows_run_nightly_at_smoke_level_and_save_a_picture_and_a_me
     assert len(loaded) == 4
     assert wf["save_png"]["inputs"]["images"] == ["render", 0]
     assert views["timeout_s"] == 900
+
+
+def test_the_audio_workflow_runs_nightly_at_smoke_level_and_saves_thirty_seconds_of_flac():
+    """What `ace_step_15_t2a` relies on, so an edit cannot drop it quietly.
+    Nothing compares sound yet: an audio workflow is at smoke level, and its
+    file is checked as a FLAC file."""
+    wf_id = "ace_step_15_t2a"
+    entry = WORKFLOWS[wf_id]
+    wf = _load_workflow(entry)
+    assert entry["enabled"] is True, "a smoke-level workflow needs no second pull request"
+    assert (output_kinds.kind_of(entry), lanes_mod.level_of(entry),
+            lanes_mod.cadence_of(entry)) == ("audio", "smoke", "nightly")
+    assert entry.get("lanes") is None
+    assert lanes_mod.lanes_for_workflow(entry, LANES) == [NIGHTLY_LANE]
+    assert wf_id in lanes_mod.volume_workflows(MANIFEST, LANES)
+    # One save node, the one the template has: FLAC under the workflow id.
+    # ComfyUI writes the counter with no underscore after it.
+    assert smoke.expected_outputs(wf) == [
+        {"node": "106", "class": "SaveAudioAdvanced", "prefix": wf_id, "extensions": [".flac"]}]
+    assert wf["106"]["inputs"]["format"] == "flac"
+    assert _missing_files(wf_id, [f"{wf_id}_00001.flac"]) == []
+    assert _missing_files(wf_id, []) == [
+        f"SaveAudioAdvanced wrote no .flac file with the prefix {wf_id}"]
+    # The length is said in three places, and they agree: the text encoder,
+    # the empty latent and the entry's `expect`. The template makes 120 s.
+    seconds = lanes_mod.expect_of(entry)["seconds"]
+    assert wf["94"]["inputs"]["duration"] == wf["98"]["inputs"]["seconds"] == seconds == 30
+    # The latent has 25 frames a second and the VAE makes 1,920 samples of
+    # each, at 48,000 Hz: a whole number of frames, so the file is 30.0 s long.
+    assert round(seconds * 48000 / 1920) * 1920 / 48000 == seconds
+    # The file is sent in the job's answer, as base64. Even sound that FLAC
+    # cannot make smaller (16 bits, two channels) stays under 7 MiB, which is
+    # 9.8 MB as base64: RunPod's payload limit for `/run` is 10 MB.
+    assert seconds * 48000 * 2 * 2 < 7 * 1024 * 1024
+    # Every seed is pinned: the sampler's, and the text encoder's, which
+    # samples the audio codes.
+    assert {nid for nid, n in wf.items() if "seed" in n["inputs"]} == {"3", "94"}
+    assert entry["seed_overrides"] == {"3": {"seed": 31}, "94": {"seed": 31}}
+    # One file holds the model, its text encoder and its VAE.
+    assert [m["name"] for m in entry["models"]] == ["ace_step_1.5_turbo_aio.safetensors"]
+    assert entry["timeout_s"] == 900
