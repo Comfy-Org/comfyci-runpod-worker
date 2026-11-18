@@ -74,6 +74,11 @@ def validate_workflow(port: int, wf: dict) -> dict:
     Unknown primitive inputs are stripped (older commit than the workflow's
     schema), missing required widgets are filled from the server's defaults.
     Every adaptation is recorded; unknown node classes fail validation.
+
+    An input named `a.b` is a sub-input of the input `a`: the codec of a
+    video format, the seed of a sampling mode. /object_info lists only `a`,
+    so such an input stays when `a` is known. ComfyUI rejects the prompt
+    when a sub-input its option needs is not there.
     """
     report = {"missing_nodes": [], "stripped_inputs": [], "filled_defaults": [], "ok": True}
     try:
@@ -91,9 +96,12 @@ def validate_workflow(port: int, wf: dict) -> dict:
         required = spec.get("required", {})
         known = set(required) | set(spec.get("optional", {}))
         for inp in list(node.get("inputs", {})):
-            if inp not in known and not isinstance(node["inputs"][inp], list):
-                report["stripped_inputs"].append(f"{ct}.{inp}={node['inputs'][inp]!r}")
-                del node["inputs"][inp]
+            if inp in known or isinstance(node["inputs"][inp], list):
+                continue
+            if "." in inp and inp.split(".")[0] in known:
+                continue
+            report["stripped_inputs"].append(f"{ct}.{inp}={node['inputs'][inp]!r}")
+            del node["inputs"][inp]
         for name, rspec in required.items():
             if name in node["inputs"]:
                 continue

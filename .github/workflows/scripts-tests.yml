@@ -1,15 +1,18 @@
 # Unit tests for the CPU-side orchestration scripts (no RunPod, no network),
 # the manifest lint that checks every workflow against its model list, and the
-# worker's custom-node pack module (install bookkeeping and log parsing).
+# worker's own code under src/: the custom-node pack module (install
+# bookkeeping and log parsing), the model fetch of a job against a local HTTP
+# server, the handler's answer and the prompt validation. Two tests read the
+# Dockerfile, so a change to it runs them too.
 # The two GPU regression workflow files are on the list because the tests hold
 # the steps they share to the same text: an edit of one alone must run them.
 name: Script tests
 on:
   pull_request:
-    paths: ['scripts/**', 'src/custom_nodes.py', 'manifest/**', 'docker/extra_model_paths.yaml', '.github/workflows/scripts-tests.yml', '.github/workflows/regression.yml', '.github/workflows/nightly-weekly.yml']
+    paths: ['scripts/**', 'src/**', 'Dockerfile', 'manifest/**', 'docker/extra_model_paths.yaml', '.github/workflows/scripts-tests.yml', '.github/workflows/regression.yml', '.github/workflows/nightly-weekly.yml']
   push:
     branches: [main]
-    paths: ['scripts/**', 'src/custom_nodes.py', 'manifest/**', 'docker/extra_model_paths.yaml', '.github/workflows/scripts-tests.yml', '.github/workflows/regression.yml', '.github/workflows/nightly-weekly.yml']
+    paths: ['scripts/**', 'src/**', 'Dockerfile', 'manifest/**', 'docker/extra_model_paths.yaml', '.github/workflows/scripts-tests.yml', '.github/workflows/regression.yml', '.github/workflows/nightly-weekly.yml']
 
 permissions:
   contents: read

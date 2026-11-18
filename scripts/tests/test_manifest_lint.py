@@ -277,7 +277,7 @@ def _off_volume_problems(manifest: dict, lanes: dict) -> list[str]:
 def test_model_folders_parsed():
     assert {"checkpoints", "diffusion_models", "text_encoders", "vae", "loras",
             "ultralytics", "ultralytics_bbox"} <= _model_folders()
-    assert len(_model_folders()) == 15
+    assert len(_model_folders()) == 30
 
 
 @pytest.mark.parametrize("wf_id", sorted(WORKFLOWS))

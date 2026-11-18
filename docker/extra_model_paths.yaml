@@ -15,3 +15,18 @@ comfyci:
     ultralytics: ultralytics
     ultralytics_bbox: ultralytics/bbox
     ultralytics_segm: ultralytics/segm
+    style_models: style_models
+    diffusers: diffusers
+    vae_approx: vae_approx
+    gligen: gligen
+    latent_upscale_models: latent_upscale_models
+    hypernetworks: hypernetworks
+    photomaker: photomaker
+    classifiers: classifiers
+    model_patches: model_patches
+    audio_encoders: audio_encoders
+    background_removal: background_removal
+    frame_interpolation: frame_interpolation
+    geometry_estimation: geometry_estimation
+    optical_flow: optical_flow
+    detection: detection
