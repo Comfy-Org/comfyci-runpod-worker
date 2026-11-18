@@ -1,6 +1,7 @@
 """run_report: the job summary of a GPU regression run, rendered from an
 in-memory results tree (no network), and the git-backed reader against a local
 bare repo."""
+import hashlib
 import json
 import re
 import subprocess
@@ -8,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import output_kinds
 import run_report
 from conftest import git, make_remote, workflow_steps
 
@@ -2242,3 +2244,617 @@ def test_the_composite_action_reports_from_the_checkout_it_pushed_from():
         assert part in report, part
     # The inputs reach the command through the environment, never by expansion into it.
     assert "${{" not in report.split("run: |", 1)[1]
+
+
+# -- text workflows ----------------------------------------------------------------------------
+WF = "llm_qwen_t2t"
+TXT = f"{WF}_00001.txt"
+T_REF = ("A regression test compares what a program produces today with what it produced "
+         "before.\nWhen the two differ, either the program changed on purpose or it broke.\n"
+         "The test cannot tell which: a person has to look.")
+T_NEW = T_REF.replace("either the program changed on purpose or it broke",
+                      "the program either broke or was changed on purpose")
+T_TAG = "v0.45.4"
+T_RUN = f"{P}/runs/master/{SHA}/{WF}/outputs/{TXT}"
+T_GOLDEN = f"{P}/golden/{WF}/{T_TAG}/outputs/{TXT}"
+T_PREV = f"[`{PREV[:7]}`]({COMFY}/commit/{PREV})"
+DIFF_TITLE = ("**Difference from the reference**, with removed text as <code>[-…-]</code> and "
+              "added text as <code>{+…+}</code>")
+DIFF_FOLDED = DIFF_TITLE + ", long lines folded"
+# What a model could write to break out of the report or to run a workflow command.
+T_EVIL = ("@octocat see #9911 <script>alert(1)</script> [x](https://evil.example/) **bold**\n"
+          "::error::not a command\n</pre>\n</details>\n| a | b |\n# heading \x1b[31mred\x1b[0m\x07 "
+          "<img src=x onerror=alert(1)> $a+b$ `tick`")
+
+
+def _sha256(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _text_vs(ref, cand):
+    """vs_golden or vs_previous of a text workflow, as the comparison writes it."""
+    one = output_kinds.compare_texts(output_kinds.normalise_text(ref),
+                                     output_kinds.normalise_text(cand))
+    diff = one.pop("first_diff", None)
+    out = {"kind": "text", "files_compared": 1, "file_count_ref": 1, "file_count_cand": 1, **one}
+    return {**out, "first_diff": {"file": TXT, **diff}} if diff else out
+
+
+def _text_cell(verdict="pass", text=T_REF, ref=T_REF, prev=T_REF, **kw):
+    """The summary cell of a text workflow that generated `text`."""
+    compared = verdict in ("pass", "fail")
+    return _cell(WF, verdict, **{
+        "vs_golden": _text_vs(ref, text) if compared else None,
+        "vs_previous": _text_vs(prev, text) if prev is not None else None,
+        "thresholds_used": None, "golden_tag": T_TAG if compared else None, "thumbnail": None,
+        "output_sha256": _sha256(text), "output_kind": "text", **kw})
+
+
+def _text_run(text, **kw):
+    return _run(WF, outputs=[{"filename": TXT, "bytes": len(text.encode("utf-8")),
+                              "sha256": _sha256(text), **kw}])
+
+
+def _text_files(cell, text=T_REF, ref=T_REF, others=(), first_bad=None, registry=None,
+                extra=None):
+    """What a run with a text workflow leaves on the results branch: the
+    generated text under the run, the reference text under the golden."""
+    cells = [*others, cell]
+    this = {c["workflow_id"]: {"v": c["verdict"], "d": c.get("detail"),
+                               "sha": c.get("output_sha256"), "g": c.get("golden_tag")}
+            for c in cells}
+    head = _head([_entry(SHA, 3, this), _entry(PREV, 2, dict.fromkeys(this, "pass"))], first_bad)
+    files = {T_RUN: text,
+             f"{P}/golden/{WF}/current.json": {"tag": T_TAG, "blessed_by": "dev",
+                                               "blessed_ts": 1792378306},
+             f"{P}/golden/{WF}/{T_TAG}/noise_floor.json": {**_text_vs(T_REF, T_REF),
+                                                          "measured": True}}
+    if ref is not None:
+        files[T_GOLDEN] = ref
+    return _tree(_summary(cells), runs={WF: _text_run(text)}, head=head, registry=registry,
+                 extra={**files, **(extra or {})})
+
+
+def _pre_blocks(out):
+    return re.findall(r"<pre>\n(.*?)\n</pre>", out, flags=re.S)
+
+
+def test_a_passing_text_workflow_shows_its_text_next_to_the_image_workflows():
+    out = _report(_text_files(_text_cell(), others=[_cell("flux_dev_t2i")]))
+    lines = out.split("\n")
+    assert lines[0].startswith("## ✅ ") and "All 2 workflows match their reference." in lines
+    assert "What needs attention" not in out
+    # No thumbnail: a link to the text. "identical text" where an image says "bit-identical".
+    assert (f"| `{WF}` | ✅ pass | [text]({RAW}/{T_RUN}) | identical text | identical to {T_PREV} "
+            f"| `{T_TAG}` | 98.1 | 12.4 | 21.3 | 33.7 | `{_sha256(T_REF)[:12]}` |") in lines
+    assert any(line.startswith('| `flux_dev_t2i` | ✅ pass | <a href="') and "| bit-identical |"
+               in line for line in lines)
+    assert f"{WF}/outputs/thumbs" not in out and f"{WF}/figures" not in out
+    # The text itself, folded, after the tables; the file is linked.
+    section = _section(out, "Generated text")
+    assert section[:5] == ["### Generated text", "", f"`{WF}`, identical to its reference:", "",
+                           "<details><summary>Generated text (208 characters)</summary>"]
+    assert "\n".join(section).count("<pre>") == 1 and _pre_blocks(out) == [T_REF]
+    assert f"[The whole file]({RAW}/{T_RUN})" in section
+    assert lines.index("### Generated text") > lines.index("### All workflows (2)")
+    assert lines.index("### Generated text") < lines.index("### Recent commits on this lane")
+    assert f"| `{WF}` | [llm\\_qwen\\_t2t\\_00001.txt]({RAW}/{T_RUN}) | 208 B |" in out
+    # A reference that is identical is the same text: it is not read or shown again.
+    assert "Reference text" not in out and "Difference from the reference" not in out
+    # A run of image workflows alone has no such section.
+    assert "Generated text" not in _report(_tree(_summary([_cell("flux_dev_t2i")])))
+
+
+def test_a_changed_text_shows_where_it_differs_both_texts_and_how_to_accept():
+    cell = _text_cell("fail", T_NEW, detail="new_drift")
+    out = _report(_text_files(cell, T_NEW, others=[_cell("flux_dev_t2i")]))
+    lines = out.split("\n")
+    assert lines[0].startswith("## ❌ ")
+    assert "1 of 2 workflows failed, new at this commit." in lines
+    assert f"#### ❌ `{WF}`: output changed (new at this commit)" in lines
+    # A text has no limits to cross: it matches or it differs.
+    assert ("The generated text differs from the reference, and it differs from the previous "
+            f"tested commit {T_PREV}: the change is new at this commit.") in lines
+    assert ("| Compared with | Result | Similarity | First difference | Characters | Lines |"
+            in lines)
+    assert (f"| Reference `{T_TAG}` | **differs** | 86.5 % | line 2, column 22 | 209 here, 208 in "
+            "the reference | 3 |") in lines
+    # Bold marks what fails: the run is judged against the reference only.
+    assert (f"| Previous tested commit {T_PREV} | differs | 86.5 % | line 2, column 22 | "
+            "209 here, 208 in the previous run | 3 |") in lines
+    assert "| Noise floor (the reference generated twice) | identical |  |  | 208 | 3 |" in lines
+    assert f"Reference: `{T_TAG}`, approved 2026-10-19 02:51 UTC by dev" in lines
+
+    # The difference, readable, then the two texts behind folds, each with its file.
+    # The marks make its second line longer than 100 columns, and the title says so:
+    # "line 2, column 22" counts in the file.
+    at = lines.index(DIFF_FOLDED + ":")
+    assert lines[at + 1:at + 3] == ["", "<pre>"]
+    diff, generated, reference = _pre_blocks(out)
+    assert diff.split("\n")[1:3] == [
+        "When the two differ, [-either -]the program{+ either broke or was+} changed on [-purpose "
+        "or it", "broke.-]{+purpose.+}"]
+    assert (generated, reference) == (T_NEW, T_REF)
+    assert "<details><summary>Generated text (209 characters)</summary>" in lines
+    assert "<details><summary>Reference text (208 characters)</summary>" in lines
+    assert lines.index(f"[The whole file]({RAW}/{T_RUN})") < lines.index(
+        f"[The whole file]({RAW}/{T_GOLDEN})")
+    base = ("gh workflow run golden-baseline.yml --repo Comfy-Org/comfyci-runpod-worker "
+            f"-f ref={SHA} -f workflows={WF} -f lane={LANE}")
+    assert f"{base} -f bless=false" in lines and f"{base} -f bless_only=true" in lines
+    assert lines.index(f"{base} -f bless=false") > lines.index("</details>")
+
+    assert (f"| `{WF}` | ❌ output changed (new at this commit) | [text]({RAW}/{T_RUN}) | 86.5 % "
+            f"similar · differs from line 2 | changed from {T_PREV} | `{T_TAG}` | 98.1 | 12.4 | "
+            f"21.3 | 33.7 | `{_sha256(T_NEW)[:12]}` |") in lines
+    # Nothing an image failure shows: no figures, no "limits", and no section for a pass.
+    assert "<img" not in "\n".join(_section(out, "What needs attention"))
+    assert "beyond its limits" not in out and "figures" not in out.lower()
+    assert "### Generated text" not in out
+    # The model's words stay inside <pre>, the lines of the first difference included.
+    assert "program" not in _outside_pre(out)
+
+
+def test_an_inherited_text_failure_shows_its_own_texts():
+    cell = _text_cell("fail", T_NEW, prev=T_NEW, detail="inherited", previous_verdict="fail")
+    chain = {WF: {"commit": FIRST, "run_ts": 1794600000, "kind": "fail", "prev_good": None,
+                  "pr": 17700, "author": "dev", "golden": T_TAG, "runs": 3}}
+    out = _report(_text_files(cell, T_NEW, first_bad=chain))
+    lines = out.split("\n")
+    assert f"#### ❌ `{WF}`: output changed (inherited)" in lines
+    assert ("The generated text differs from the reference. It is identical to the previous "
+            f"tested commit {T_PREV}, which already failed: the change is inherited from an "
+            "earlier commit.") in lines
+    assert any(line.startswith("Failing since ") and "3 runs" in line for line in lines)
+    assert f"| Previous tested commit {T_PREV} | identical |  |  | 209 | 3 |" in lines
+    # Texts cost nothing to show again: no pointer to the commit where the change started.
+    assert DIFF_FOLDED + ":" in lines and len(_pre_blocks(out)) == 3
+    assert "has no figures of its own" not in out
+    assert (f"| `{WF}` | ❌ output changed (inherited) | [text]({RAW}/{T_RUN}) | 86.5 % similar · "
+            f"differs from line 2 | identical to {T_PREV} |") in out
+
+
+def test_a_text_workflow_without_a_reference_shows_what_it_generated():
+    cell = _text_cell("no_baseline", prev=None)
+    out = _report(_text_files(cell, ref=None))
+    lines = out.split("\n")
+    assert f"#### ⚪ `{WF}`: no reference yet" in lines
+    assert ("To make one, generate it from a release tag, look at the output, then approve it "
+            "with the second command:") in lines
+    base = ("gh workflow run golden-baseline.yml --repo Comfy-Org/comfyci-runpod-worker "
+            f"-f ref=RELEASE_TAG -f workflows={WF} -f lane={LANE}")
+    assert f"{base} -f bless=false" in lines and f"{base} -f bless_only=true" in lines
+    # The text to look at before approving, after the commands.
+    at = lines.index("<details><summary>Generated text (208 characters)</summary>")
+    assert at > lines.index(f"{base} -f bless_only=true") and _pre_blocks(out) == [T_REF]
+    assert f"| `{WF}` | ⚪ no reference yet | [text]({RAW}/{T_RUN}) |  |  |  | 98.1 |" in out
+    assert "Reference text" not in out and "Difference" not in out
+    # An image workflow keeps its own wording.
+    image = _report(_tree(_summary([_cell("flux_dev_t2i", "no_baseline")])))
+    assert "To make one, render it from a release tag, look at the output" in image
+
+
+def test_a_reference_text_that_cannot_be_read_leaves_the_numbers_and_the_generated_text():
+    cell = _text_cell("fail", T_NEW, detail="new_drift")
+    # The golden's file is not on the branch: the comparison's own numbers still say where.
+    out = _report(_text_files(cell, T_NEW, ref=None))
+    lines = out.split("\n")
+    assert (f"| Reference `{T_TAG}` | **differs** | 86.5 % | line 2, column 22 | 209 here, 208 in "
+            "the reference | 3 |") in lines
+    assert "The reference text could not be read, so the difference is not shown." in lines
+    assert "Difference from the reference" not in out and "Reference text" not in out
+    assert _pre_blocks(out) == [T_NEW]
+    assert "<details><summary>Generated text (209 characters)</summary>" in lines
+
+
+def test_hostile_generated_text_stays_inside_pre_blocks():
+    """Generated text is model output. It must not mention anyone, link
+    anywhere, close the block it is in or start a workflow command."""
+    cell = _text_cell("fail", T_EVIL, ref=T_EVIL.upper(), prev=T_EVIL.lower(), detail="new_drift")
+    out = _report(_text_files(cell, T_EVIL, ref=T_EVIL.upper()))
+    diff, generated, reference = _pre_blocks(out)
+    for block in (diff, generated, reference):
+        assert "<" not in block and ">" not in block  # every tag is text
+        assert "\x1b" not in block and "\x07" not in block
+    assert generated.split("\n") == [
+        "@octocat see #9911 &lt;script&gt;alert(1)&lt;/script&gt; [x](https://evil.example/) "
+        "**bold**", "&#58;:error::not a command", "&lt;/pre&gt;", "&lt;/details&gt;", "| a | b |",
+        "# heading red &lt;img src=x onerror=alert(1)&gt; $a+b$ `tick`"]
+    assert "&#58;:ERROR::NOT A COMMAND" in reference
+    outside = _outside_pre(out).lower()
+    for word in ("octocat", "9911", "script", "evil.example", "bold", "heading", "onerror",
+                 "not a command", "a+b", "tick"):
+        assert word not in outside, word
+    # No workflow command, and the blocks are closed only by the report.
+    assert not [line for line in out.split("\n") if line.strip().startswith("::")]
+    assert out.count("<pre>") == out.count("</pre>") == 3
+    assert out.count("<details>") == out.count("</details>")
+    # The lines at the first difference are model output too: the table names the place only.
+    row = next(line for line in out.split("\n") if line.startswith(f"| Reference `{T_TAG}`"))
+    assert row == f"| Reference `{T_TAG}` | **differs** | 20.8 % | line 1, column 2 | 197 | 6 |"
+    # A file name that is no plain name is not read, linked or shown.
+    files = _text_files(cell, T_EVIL, ref=T_EVIL.upper())
+    files[f"{P}/runs/master/{SHA}/{WF}/run.json"]["outputs"][0]["filename"] = "../../x.txt"
+    out = _report(files)
+    assert _pre_blocks(out) == [] and "[text](" not in out and "x.txt](" not in out
+
+
+def test_no_line_of_a_pre_block_can_be_read_as_a_workflow_command():
+    """The runner trims a line before it looks for "::", so blanks before it
+    make it no safer. A summary is not read for commands; a step that prints
+    the report (--out - outside Actions) is."""
+    text = ("::stop-commands::x\n  ::add-mask::y\n\t::error::z\n\u00a0::warning::w\n"
+            "\u3000::notice::v\nfine ::here\n\n ::set-output name=a::b")
+    block = run_report.pre(text).split("\n")
+    assert not [line for line in block if line.strip().startswith("::")]
+    assert block[1:-1] == ["&#58;:stop-commands::x", "  &#58;:add-mask::y", "\t&#58;:error::z",
+                           "\u00a0&#58;:warning::w", "\u3000&#58;:notice::v", "fine ::here", "",
+                           " &#58;:set-output name=a::b"]
+    # Through a report: generated text with an indented command, printed to stdout.
+    cell = _text_cell("no_baseline", "ok\n  ::add-mask::secret", prev=None)
+    out = _report(_text_files(cell, "ok\n  ::add-mask::secret", ref=None))
+    assert "  &#58;:add-mask::secret" in out.split("\n")
+    assert not [line for line in out.split("\n") if line.strip().startswith("::")]
+
+
+def test_a_long_text_is_cut_where_it_is_shown_and_nothing_else_is_dropped():
+    long = "\n".join(f"line {i:04d} of a text that goes on and on" for i in range(400))
+    cell = _text_cell("fail", long, ref=long.upper(), detail="new_drift")
+    out = _report(_text_files(cell, long, ref=long.upper()))
+    lines = out.split("\n")
+    # Each text stops at Limits.text_chars characters, and its heading says so.
+    assert (f"<details><summary>Generated text ({len(long)} characters, the first 4000 shown)"
+            "</summary>") in lines
+    assert (f"<details><summary>Reference text ({len(long)} characters, the first 4000 shown)"
+            "</summary>") in lines
+    assert DIFF_TITLE + ", cut to its first 8000 characters:" in lines
+    diff, generated, reference = _pre_blocks(out)
+    assert generated.endswith("\n…") and len(generated) <= 4002 and len(diff) <= 8002
+    assert generated.startswith("line 0000 of a text") and "line 0399" not in generated
+    assert f"[The whole file]({RAW}/{T_RUN})" in lines
+    # That is not the size limit at work: nothing else was shortened.
+    assert "Shortened to stay under" not in out and "### Recent commits on this lane" in lines
+    assert "<details><summary>Output files (1)</summary>" in lines
+
+
+def test_a_text_too_large_to_read_is_linked_not_shown():
+    cell = _text_cell("fail", T_NEW, detail="new_drift")
+    files = _text_files(cell, T_NEW)
+    size = run_report.TEXT_READ_MAX + 1
+    files[f"{P}/runs/master/{SHA}/{WF}/run.json"]["outputs"][0]["bytes"] = size
+    out = _report(files)
+    assert ("The generated text is 256.0 KB, too large to show here. [The whole file]"
+            f"({RAW}/{T_RUN}).") in out.split("\n")
+    assert _pre_blocks(out) == [] and "Reference text" not in out
+    assert f"[text]({RAW}/{T_RUN})" in out  # the table still links it
+
+
+def test_generated_texts_are_the_last_thing_the_size_limit_takes():
+    """The steps that existed keep their order, so a report without text is
+    shortened exactly as before; for a text workflow the text is the result."""
+    steps = run_report.SHRINK_STEPS
+    assert steps[-2:] == ({"text_chars": 1000}, {"text_chars": 0})
+    assert not any("text_chars" in step for step in steps[:-2]) and len(steps) == 11
+    assert run_report.Limits().text_chars == 4000
+    assert run_report.Limits(text_chars=1000).shortened() == [
+        "generated texts cut to their first 1000 characters"]
+    assert run_report.Limits(history_rows=0, matrix_rows=0, text_chars=0).shortened() == [
+        "recent commits left out", "generated texts left out"]
+
+    long = "\n".join(f"line {i:04d} of a text that goes on and on" for i in range(400))
+    cell = _text_cell("fail", long, ref=long.upper(), detail="new_drift")
+    reader = run_report.DictReader(_text_files(cell, long, ref=long.upper()),
+                                   RESULTS)
+    d = run_report.gather_lane(reader, LANES, SHA, "master", LANE)
+    full = run_report.render_lane(d, run_report.Limits())
+    # Cut: each text to 1000 characters, the difference to twice that.
+    cut = run_report.render_lane(d, run_report.Limits(text_chars=1000))
+    assert f"Generated text ({len(long)} characters, the first 1000 shown)" in cut
+    assert DIFF_TITLE + ", cut to its first 2000 characters:" in cut
+    assert [len(block) <= 2002 for block in _pre_blocks(cut)] == [True] * 3
+    # Left out: one sentence with the link, and the numbers stay.
+    none = run_report.render_lane(d, run_report.Limits(text_chars=0))
+    assert ("The generated text is left out here to keep the summary small. [The whole file]"
+            f"({RAW}/{T_RUN}).") in none.split("\n")
+    assert _pre_blocks(none) == [] and "| **differs** |" in none
+    assert len(none) < len(cut) < len(full)
+
+    # Through fit(): the text goes only after logs, tracebacks, file lists and history.
+    seen = []
+
+    def render(limits):
+        seen.append(limits)
+        return run_report.render_lane(d, limits)
+
+    budget = run_report.byte_size(none) + 200
+    out = run_report.fit(render, max_bytes=budget)
+    assert out is not None and run_report.byte_size(out) <= budget
+    assert [s.text_chars for s in seen] == [4000] * 10 + [1000, 0]
+    assert seen[-1].history_rows == 0 and seen[-1].log_chars == 0
+    note = next(line for line in out.split("\n") if line.startswith("Shortened to stay under"))
+    assert note.endswith("recent commits left out; generated texts left out. The linked files "
+                         "hold everything.")
+
+
+def test_the_difference_is_marked_once_however_often_the_report_is_rendered(monkeypatch):
+    """A report over the size limit is rendered again at every step down, and
+    marking the difference of two long texts is the slowest thing in it."""
+    calls = []
+    real = output_kinds.word_diff
+    monkeypatch.setattr(output_kinds, "word_diff", lambda a, b: calls.append(1) or real(a, b))
+    cell = _text_cell("fail", T_NEW, detail="new_drift")
+    reader = run_report.DictReader(_text_files(cell, T_NEW), RESULTS)
+    d = run_report.gather_lane(reader, LANES, SHA, "master", LANE)
+    blocks = [_pre_blocks(run_report.render_lane(d, run_report.Limits(**step)))
+              for step in ({}, *run_report.SHRINK_STEPS[:-1])]
+    assert len(calls) == 1 and all(len(shown) == 3 for shown in blocks)
+
+
+def test_a_text_that_passes_within_a_similarity_limit_shows_its_difference():
+    cell = _text_cell("pass", T_NEW, thresholds_used={"min_text_similarity": 0.8})
+    out = _report(_text_files(cell, T_NEW))
+    lines = out.split("\n")
+    assert lines[0].startswith("## ✅ ")
+    section = _section(out, "Passed without being bit-identical")
+    assert f"<details><summary><code>{WF}</code>: numbers and limits</summary>" in section
+    assert (f"| Reference `{T_TAG}` | differs | 86.5 % (limit ≥ 80 %) | line 2, column 22 | "
+            "209 here, 208 in the reference | 3 |") in section
+    assert DIFF_FOLDED + ":" in section and len(_pre_blocks(out)) == 3
+    assert "### Generated text" not in out  # shown once, where its difference is
+    # Below the limit it fails, the number is bold and the sentence names the limit.
+    low = _text_cell("fail", T_NEW, detail="new_drift",
+                     thresholds_used={"min_text_similarity": 0.98})
+    out = _report(_text_files(low, T_NEW))
+    assert "| **differs** | **86.5 %** (limit ≥ 98 %) | line 2, column 22 |" in out
+    assert "The generated text differs from the reference beyond its similarity limit, and" in out
+
+
+def test_a_text_that_matches_its_reference_again_is_not_listed_with_numbers_and_limits():
+    """The commit after a failing one restores the text: it differs from the
+    previous run and equals its reference. A text is not compared bit by bit
+    and that pass crossed no limit, so it is shown as a text that matches."""
+    out = _report(_text_files(_text_cell("pass", T_REF, prev=T_NEW)))
+    lines = out.split("\n")
+    assert lines[0].startswith("## ✅ ")
+    assert "Passed without being bit-identical" not in out and "numbers and limits" not in out
+    assert _section(out, "Generated text")[:3] == ["### Generated text", "",
+                                                   f"`{WF}`, identical to its reference:"]
+    assert _pre_blocks(out) == [T_REF] and "**differs**" not in out
+    # The table still says that it changed from the run before.
+    assert f"| identical text | changed from {T_PREV} |" in out
+    # An image workflow in that state keeps its place: it has limits.
+    image = _cell("flux_dev_t2i", vs_previous={"identical": False, "mean_mse": 0.5})
+    assert "### Passed without being bit-identical" in _report(_tree(_summary([image])))
+
+
+def test_a_difference_that_cannot_be_shown_and_a_file_under_another_name_are_said():
+    # Zero-width and control characters are not shown, so the two texts read the same.
+    hidden = T_REF.replace("regression", "regres\u200bsion").replace("person", "per\x0cson")
+    cell = _text_cell("fail", hidden, detail="new_drift")
+    out = _report(_text_files(cell, hidden))
+    lines = out.split("\n")
+    assert (f"| Reference `{T_TAG}` | **differs** | 93.3 % | line 1, column 9 | 210 here, 208 in "
+            "the reference | 3 |") in lines
+    assert ("The two texts differ only in characters that are not shown here (control or "
+            "zero-width characters, or a tab where the other text has blanks). Compare the two "
+            "files.") in lines
+    assert "Difference from the reference" not in out and _pre_blocks(out) == [T_REF, T_REF]
+    # The same file in both, and a second one that the run did not write: nothing to mark,
+    # and the table names what is missing.
+    fewer = {**_text_vs(T_REF, T_REF), "identical": False, "similarity": 0.999999,
+             "file_count_ref": 2}
+    out = _report(_text_files(_text_cell("fail", vs_golden=fewer, detail="new_drift")))
+    assert "**differs** (**1 file here, 2 in the reference**)" in out
+    assert "differ only in characters" not in out and "Difference from the reference" not in out
+
+    # ComfyUI names the file another way: the reference is there, under its old name.
+    moved = {**_text_vs(T_REF, T_REF), "identical": False, "similarity": 0.0, "files_compared": 0}
+    cell = _text_cell("fail", vs_golden=moved, detail="new_drift")
+    out = _report(_text_files(cell, ref=None, extra={
+        f"{P}/golden/{WF}/{T_TAG}/outputs/{WF}_00001_.txt": T_REF}))
+    lines = out.split("\n")
+    assert (f"| Reference `{T_TAG}` | **differs** (**no text file with the same name as in the "
+            "reference**) | 0.0 % |  | 208 | 3 |") in lines
+    assert ("The reference has no text file named <code>llm\\_qwen\\_t2t\\_00001.txt</code>, so "
+            "the difference is not shown.") in lines
+    assert "could not be read" not in out and _pre_blocks(out) == [T_REF]
+
+
+def test_a_text_with_long_lines_says_that_they_are_folded():
+    """An answer is often one long paragraph. The table counts lines and
+    columns in the file; what is shown has more and shorter lines."""
+    para = " ".join(f"word{i}" for i in range(150))
+    cell = _text_cell("fail", para.replace("word75", "other"), ref=para, detail="new_drift")
+    out = _report(_text_files(cell, para.replace("word75", "other"), ref=para))
+    lines = out.split("\n")
+    assert (f"| Reference `{T_TAG}` | **differs** | 99.3 % | line 1, column 516 | "
+            f"{len(para) - 1} here, {len(para)} in the reference | 1 |") in lines
+    assert DIFF_FOLDED + ":" in lines
+    assert (f"<details><summary>Generated text ({len(para) - 1} characters, long lines folded)"
+            "</summary>") in lines
+    assert (f"<details><summary>Reference text ({len(para)} characters, long lines folded)"
+            "</summary>") in lines
+    assert all(len(line) <= 100 for block in _pre_blocks(out) for line in block.split("\n"))
+    # Cut and folded: both are said.
+    out = run_report.render_lane(
+        run_report.gather_lane(run_report.DictReader(_text_files(cell, para, ref=para), RESULTS),
+                               LANES, SHA, "master", LANE), run_report.Limits(text_chars=200))
+    assert f"Generated text ({len(para)} characters, the first 200 shown, long lines folded)" in out
+    # Lines that fit are shown as they are, and no heading says otherwise.
+    assert "folded" not in _report(_text_files(_text_cell()))
+
+
+def test_a_text_that_was_not_sent_or_not_written_is_a_failed_comparison():
+    lost = {"kind": "text", "error": "output not transferred, over the worker's inline size "
+                                     f"limit: {TXT}"}
+    cell = _text_cell("fail", vs_golden=lost, vs_previous=lost, output_sha256="9" * 64)
+    files = _text_files(cell)
+    files[f"{P}/runs/master/{SHA}/{WF}/run.json"] = _text_run(T_REF, truncated=True)
+    del files[T_RUN]
+    out = _report(files)
+    lines = out.split("\n")
+    assert ("The generated text could not be compared with the reference. There is no previous "
+            "run to tell whether the change is new at this commit.") in lines
+    assert (f"| Reference `{T_TAG}` | comparison failed: output not transferred, over the "
+            "worker's inline size limit: llm\\_qwen\\_t2t\\_00001.txt |  |  |  |  |") in lines
+    assert _pre_blocks(out) == [] and "[text](" not in out
+    assert f"| `{WF}` | ❌ output changed |  | comparison failed | comparison failed |" in out
+    assert "not published: over the worker's size limit" in out
+
+
+def test_an_accepted_text_change_is_closed_by_the_text_sha():
+    """The lane's reference names the text file's sha, like the run does."""
+    cell = _text_cell("fail", T_NEW, detail="new_drift")
+    registry = {"lanes": {LANE: {"goldens": {WF: {"tag": "cccccccccccc",
+                                                 "sha": _sha256(T_NEW)}}}}}
+    out = _report(_text_files(cell, T_NEW, registry=registry, extra={
+        f"{P}/golden/{WF}/current.json": {"tag": "cccccccccccc", "blessed_by": "dev",
+                                          "blessed_ts": 1794790000, "reason": "accept #17754"}}))
+    lines = out.split("\n")
+    assert lines[0].startswith("## 🟡 ") or lines[0].startswith("## ✅ ")
+    assert f"#### 🟡 `{WF}`: output changed (accepted)" in lines
+    assert "1 changed output accepted as the reference after the run." in out
+    assert f"It is not the reference this run was compared with (`{T_TAG}`)." in lines
+    assert f"| `{WF}` | 🟡 output changed (accepted) | [text]({RAW}/{T_RUN}) |" in out
+
+
+def test_a_report_from_the_runners_files_shows_the_generated_text(tmp_path):
+    """The run could not publish and the results branch cannot be read: the
+    text the runner holds is shown, with the numbers of its comparison."""
+    workdir = tmp_path / "regression-work"
+    (workdir / WF / "outputs").mkdir(parents=True)
+    (workdir / WF / "outputs" / TXT).write_bytes(T_NEW.encode("utf-8"))
+    cell = _text_cell("fail", T_NEW, detail="new_drift")
+    comparison = {k: cell[k] for k in ("verdict", "detail", "vs_golden", "vs_previous",
+                                       "thresholds_used", "golden_tag", "previous_commit",
+                                       "previous_verdict", "figures")}
+    comparison["output_kind"] = "text"
+    (workdir / WF / "run.json").write_text(json.dumps(_text_run(T_NEW)), encoding="utf-8")
+    (workdir / WF / "comparison.json").write_text(json.dumps(comparison), encoding="utf-8")
+
+    rebuilt = run_report.summary_from_workdir(str(workdir), SHA, "master", LANE)
+    assert rebuilt["workflows"][WF]["output_kind"] == "text"
+    assert rebuilt["workflows"][WF]["output_sha256"] == _sha256(T_NEW)
+    assert rebuilt["workflows"][WF]["thumbnail"] is None
+
+    out = run_report.lane_report(run_report.Reader(), LANES, SHA, "master", LANE,
+                                 workdir=str(workdir))
+    lines = out.split("\n")
+    assert "> [!WARNING]" in lines
+    assert f"#### ❌ `{WF}`: output changed (new at this commit)" in lines
+    assert "| **differs** | 86.5 % | line 2, column 22 |" in out
+    assert _pre_blocks(out) == [T_NEW]
+    assert "The reference text could not be read, so the difference is not shown." in lines
+    assert "raw.githubusercontent.com" not in out and "[text](" not in out
+    # The same run with its summary published: the branch gives the reference and the links.
+    files = _text_files(cell, "the published copy is not the one read", ref=T_REF)
+    path = tmp_path / "summary.json"
+    path.write_text(json.dumps(files[f"{P}/runs/master/{SHA}/summary.json"]), encoding="utf-8")
+    out = _report(files, summary_file=str(path), workdir=str(workdir))
+    assert _pre_blocks(out)[1:] == [T_NEW, T_REF] and DIFF_FOLDED + ":" in out
+    assert f"[text]({RAW}/{T_RUN})" in out
+    # A file larger than its record says is read up to the report's limit, no further.
+    (workdir / WF / "outputs" / TXT).write_bytes(b"x" * (run_report.TEXT_READ_MAX + 5000))
+    out = run_report.lane_report(run_report.Reader(), LANES, SHA, "master", LANE,
+                                 workdir=str(workdir))
+    assert f"Generated text ({run_report.TEXT_READ_MAX} characters, the first 4000 shown)" in out
+
+
+def test_an_image_summary_rebuilt_from_the_runner_names_no_kind(tmp_path):
+    workdir = tmp_path / "regression-work"
+    (workdir / "flux_dev_t2i").mkdir(parents=True)
+    (workdir / "flux_dev_t2i" / "run.json").write_text(json.dumps(_run("flux_dev_t2i")))
+    (workdir / "flux_dev_t2i" / "comparison.json").write_text(json.dumps(
+        {"verdict": "pass", "vs_golden": IDENT, "vs_previous": IDENT}))
+    cell = run_report.summary_from_workdir(str(workdir), SHA, "master", LANE)["workflows"][
+        "flux_dev_t2i"]
+    assert "output_kind" not in cell and cell["output_sha256"] == "1" * 64
+    assert list(cell)[-1] == "custom_nodes"
+
+
+def test_the_kind_of_a_cell_is_the_one_it_names_or_the_one_its_comparison_carries():
+    assert run_report.cell_kind({}) == run_report.cell_kind(_cell("flux_dev_t2i")) == "image"
+    assert run_report.cell_kind({"output_kind": "text"}) == "text"
+    # A summary cell written without the key still says so in its metrics.
+    assert run_report.cell_kind({"vs_golden": {"kind": "text", "identical": True}}) == "text"
+    assert run_report.cell_kind({"vs_golden": None, "vs_previous": {"kind": "text"}}) == "text"
+    for odd in ("audio", ["text"], 3, None):
+        assert run_report.cell_kind({"output_kind": odd, "vs_golden": IDENT}) == "image"
+    run = {"outputs": [{"filename": "a_00001_.png", "sha256": "p"},
+                       {"filename": "a_00001.txt", "sha256": "t"}]}
+    assert run_report.output_sha(run, "image") == "p" and run_report.output_sha(run, "text") == "t"
+
+
+def test_text_metric_cells_by_shape():
+    cells = run_report.text_metric_cells
+    assert cells(None) == ["not compared", "", "", "", ""]
+    assert cells({"kind": "text", "error": "no text files to compare (ref=1, cand=0)"})[0] == (
+        "comparison failed: no text files to compare (ref=1, cand=0)")
+    assert cells(_text_vs(T_REF, T_REF)) == ["identical", "", "", "208", "3"]
+    # A blank-only change is never shown as fully alike.
+    assert cells(_text_vs("a b", "a  b"))[:3] == ["**differs**", "over 99.9 %", "line 1, column 3"]
+    # A missing file is said where the result is, and never passes for a small difference.
+    fewer = {**_text_vs(T_REF, T_REF), "identical": False, "similarity": 0.999999,
+             "file_count_ref": 2, "file_count_cand": 1}
+    assert cells(fewer, {"min_text_similarity": 0.5})[0] == (
+        "**differs** (**1 file here, 2 in the reference**)")
+    assert cells({**fewer, "file_count_cand": 3})[0] == (
+        "**differs** (**3 files here, 2 in the reference**)")
+    # So is a file that has no pair of the same name, with as many files on both sides.
+    renamed = {**fewer, "file_count_cand": 2, "files_compared": 1}
+    assert cells(renamed, {"min_text_similarity": 0.5})[0] == (
+        "**differs** (**only 1 of 2 text files with the same name as in the reference**)")
+    assert cells({**renamed, "files_compared": 0, "similarity": 0.0})[:2] == [
+        "**differs** (**no text file with the same name as in the reference**)", "0.0 %"]
+    # Bold marks what fails. The previous run and the noise floor are not what a run is judged by.
+    assert cells(_text_vs(T_REF, T_NEW), None, "the previous run", judged=False)[0] == "differs"
+    assert cells(fewer, None, "the previous run", judged=False)[0] == (
+        "differs (1 file here, 2 in the previous run)")
+    # With several files the place names its file.
+    two = {**_text_vs(T_REF, T_NEW), "file_count_ref": 2, "file_count_cand": 2}
+    assert cells(two)[2] == "line 2, column 22 of <code>llm\\_qwen\\_t2t\\_00001.txt</code>"
+    # Odd values never raise and never print.
+    assert cells({"kind": "text", "identical": False, "similarity": "x", "first_diff": "y",
+                  "chars_cand": [1], "lines_ref": None}) == ["**differs**", "", "", "", ""]
+
+
+def test_main_never_prints_generated_text(tmp_path, monkeypatch, capsys):
+    step = tmp_path / "step.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(step))
+    cell = _text_cell("fail", T_EVIL, detail="new_drift")
+    reader = run_report.DictReader(_text_files(cell, T_EVIL), RESULTS)
+    assert run_report.main(_args("--out", "-"), reader=reader) == 0
+    assert "&#58;:error::not a command" in step.read_text(encoding="utf-8")
+    printed = capsys.readouterr()
+    assert re.fullmatch(r"run report: wrote \d+ bytes to the job summary\n", printed.out)
+    assert printed.err == ""
+
+
+def test_readers_return_the_start_of_a_text_file(tmp_path):
+    files = {"a.txt": "héllo wörld", "b.json": {"x": 1}}
+    reader = run_report.DictReader(files, RESULTS)
+    assert reader.read_text("a.txt") == "héllo wörld" and reader.read_text("a.txt", 3) == "hé"
+    assert reader.read_text("b.json") is None and reader.read_text("nope.txt") is None
+    assert run_report.Reader().read_text("a.txt") is None
+
+    raw = b"caf\xc3\xa9 \xff\xfe end\r\nsecond line\n"
+    huge = run_report.TEXT_READ_MAX + 300_000
+    remote = make_remote(tmp_path, {**_tree(_summary([_cell("flux_dev_t2i")])),
+                                    f"{P}/golden/{WF}/{T_TAG}/outputs/{TXT}": raw,
+                                    f"{P}/golden/{WF}/{T_TAG}/outputs/big.txt": b"x" * 5000,
+                                    f"{P}/golden/{WF}/{T_TAG}/outputs/huge.txt": b"y" * huge,
+                                    f"{P}/golden/{WF}/{T_TAG}/outputs/empty.txt": b""})
+    reader = run_report.GitReader(_checkout(tmp_path, remote))
+    path = f"{P}/golden/{WF}/{T_TAG}/outputs/{TXT}"
+    # The blob as the branch holds it; bytes that are not UTF-8 are replaced, never raised.
+    assert output_kinds.normalise_text(reader.read_text(path)) == "café �� end\nsecond line"
+    assert reader.read_text(f"{P}/golden/{WF}/{T_TAG}/outputs/big.txt", 100) == "x" * 100
+    assert len(reader.read_text(f"{P}/golden/{WF}/{T_TAG}/outputs/big.txt")) == 5000
+    # A blob of any size is read up to the limit and no further: git is stopped there.
+    assert reader.read_text(f"{P}/golden/{WF}/{T_TAG}/outputs/huge.txt") == (
+        "y" * run_report.TEXT_READ_MAX)
+    assert reader.read_text(f"{P}/golden/{WF}/{T_TAG}/outputs/empty.txt") == ""
+    assert reader.read_text(f"{P}/golden/{WF}/{T_TAG}/outputs/none.txt") is None  # absent
+    assert reader.read_text(f"{P}/golden/{WF}/{T_TAG}/outputs") is None           # a directory
+    assert reader.read_text(f"{P}/golden/{WF}") is None
+    assert not (tmp_path / "checkout" / "regression").exists()  # nothing is checked out
