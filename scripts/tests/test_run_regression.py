@@ -572,3 +572,864 @@ def test_a_run_that_produced_nothing_is_not_compared(tmp_path, monkeypatch, stat
                           "previous_golden_tag": None, "figures": False}
     assert cell["output_sha256"] is None and cell["thumbnail"] is None
     assert store.published == ["comparison.json", "run.json"]
+
+
+# -- check levels: a smoke-level workflow through a run -----------------------------
+MIB = 1024 * 1024
+EMPTY_SMOKE = {"files": [], "problems": [], "notes": []}
+# A 3D workflow as the design has it: a picture of the mesh under the workflow
+# id, and the mesh itself as a second file.
+SMOKE_WORKFLOW = {
+    "3": {"class_type": "SaveImage", "inputs": {"filename_prefix": "wf", "images": ["1", 0]}},
+    "4": {"class_type": "SaveGLB", "inputs": {"filename_prefix": "wf_mesh", "mesh": ["2", 0]}}}
+
+
+def _fixture(name):
+    from pathlib import Path
+    return (Path(__file__).resolve().parent / "fixtures" / "smoke" / name).read_bytes()
+
+
+def _picture(seed=1, side=96, height=64):
+    """The bytes of a PNG that passes the smoke checks: noise, `side` px wide."""
+    import io
+    import numpy as np
+    from PIL import Image
+    pixels = np.random.default_rng(seed).integers(0, 256, (height, side, 3), dtype=np.uint8)
+    data = io.BytesIO()
+    Image.fromarray(pixels).save(data, "PNG")
+    return data.getvalue()
+
+
+def _sha(data):
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
+
+
+def _smoke_job(files, status="ok", unsent=()):
+    """A RunPod job that wrote `files` ({name: bytes}). A name in `unsent` is
+    listed and not written, like a file over the worker's size limit."""
+    def job(client, wf_id, workflow, workdir=None, **kw):
+        if status not in ("ok", "no_outputs"):
+            return {"status": status, "error": {"message": "boom"}}
+        out = workdir / "outputs"
+        out.mkdir(parents=True, exist_ok=True)
+        listed = []
+        for name, data in sorted(files.items()):
+            rec = {"filename": name, "bytes": len(data), "sha256": _sha(data)}
+            if name in unsent:
+                rec["truncated"] = True
+            else:
+                (out / name).write_bytes(data)
+            listed.append(rec)
+        return {"status": status, "outputs_dir": str(out), "gpu_name": "gpu",
+                "timings": {"prompt_exec_s": 3.0}, "outputs": listed}
+    return job
+
+
+class SmokeStore:
+    """A results store for one smoke-level workflow. It records what is
+    published, and every read of a reference or of an earlier run: a smoke run
+    makes none."""
+    READS = ("latest_pointer", "fetch_run_outputs", "run_summary", "golden_current",
+             "fetch_golden_outputs", "noise_floor", "download_json", "published_summary")
+
+    def __init__(self):
+        self.reads, self.published, self.exclude = [], None, None
+
+    def __getattr__(self, name):
+        if name not in self.READS:
+            raise AttributeError(name)
+        return lambda *args: self.reads.append(name)
+
+    def publish_workflow_run(self, branch, commit, wf_id, local_dir, exclude=()):
+        self.exclude = list(exclude)
+        names = (p.relative_to(local_dir).as_posix() for p in local_dir.rglob("*") if p.is_file())
+        self.published = sorted(name for name in names if name not in exclude)
+
+
+def _smoke_run(tmp_path, monkeypatch, files, status="ok", entry=None, workflow=None,
+               previous_files=None, unsent=()):
+    """process_workflow for a smoke-level workflow whose job wrote `files`;
+    returns (cell, comparison.json, the store)."""
+    import json
+    import types
+    store = SmokeStore()
+    monkeypatch.setattr(run_regression, "run_workflow_job", _smoke_job(files, status, unsent))
+    monkeypatch.setattr(run_regression, "RunPodClient", lambda endpoint_id: None)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "wf_api.json").write_text(
+        json.dumps(SMOKE_WORKFLOW if workflow is None else workflow), encoding="utf-8")
+    args = types.SimpleNamespace(workdir=str(tmp_path / "work"), endpoint_id="ep", lane_id="main",
+                                 commit="new", repo_url=None, branch="master", skip_publish=False)
+    if previous_files is not None:
+        # What main() read for the run: each smoke workflow's files of its previous result.
+        args.previous_smoke = {"another": [{"name": "x", "sha256": "y"}], "wf": previous_files}
+    entry = {"workflow_path": "wf_api.json", "models": [], "level": "smoke", **(entry or {})}
+    cell = run_regression.process_workflow("wf", entry, DEFAULTS, args, tmp_path, store)
+    comparison = json.loads((tmp_path / "work" / "wf" / "comparison.json").read_text())
+    kind = [] if entry.get("output_kind") in (None, "image") else ["output_kind"]
+    # Today's keys in today's order, then the kind when it is not image, then the two new ones.
+    assert list(cell) == CELL_KEYS + kind + ["level", "smoke"]
+    assert list(comparison) == COMPARISON_KEYS + kind + ["level", "smoke"]
+    for key in COMPARISON_KEYS + ["level", "smoke"]:
+        if key != "previous_golden_tag":
+            assert cell[key] == comparison[key], key
+    # Nothing is compared, so nothing was read: no reference and no earlier run.
+    assert store.reads == []
+    for key in ("detail", "vs_golden", "vs_previous", "thresholds_used", "golden_tag",
+                "previous_commit", "previous_verdict"):
+        assert cell[key] is None, key
+    assert cell["figures"] is False and cell["level"] == "smoke"
+    return cell, comparison, store
+
+
+def test_a_smoke_workflow_that_wrote_usable_files_passes(tmp_path, monkeypatch):
+    png, glb = _picture(), _fixture("mesh_300.glb")
+    cell, comparison, store = _smoke_run(tmp_path, monkeypatch, {
+        "wf_00001_.png": png, "wf_mesh_00001_.glb": glb})
+    assert (cell["verdict"], cell["worker_status"]) == ("pass", "ok")
+    assert cell["smoke"]["problems"] == [] and cell["smoke"]["notes"] == []
+    picture, mesh = cell["smoke"]["files"]
+    assert picture == {"name": "wf_00001_.png", "type": "image", "bytes": len(png),
+                       "sha256": _sha(png), "width": 96, "height": 64,
+                       "std": picture["std"], "flat_share": picture["flat_share"]}
+    assert list(mesh) == ["name", "type", "bytes", "sha256", "vertices", "faces", "extent"]
+    assert (mesh["name"], mesh["type"], mesh["vertices"]) == ("wf_mesh_00001_.glb", "mesh", 300)
+    # The main output of an image workflow is its first PNG, as at reference level.
+    assert cell["output_sha256"] == _sha(png) and cell["thumbnail"] == "wf_00001_.webp"
+    assert store.exclude == [] and store.published == [
+        "comparison.json", "outputs/thumbs/wf_00001_.webp", "outputs/wf_00001_.png",
+        "outputs/wf_mesh_00001_.glb", "run.json"]
+
+
+def test_a_smoke_workflow_with_a_missing_or_an_unusable_file_fails(tmp_path, monkeypatch):
+    import io
+    import numpy as np
+    from PIL import Image
+    passed, _, _ = _smoke_run(tmp_path / "ok", monkeypatch, {
+        "wf_00001_.png": _picture(), "wf_mesh_00001_.glb": _fixture("mesh_300.glb")})
+    # The mesh branch of the graph wrote nothing: ComfyUI ran the other one.
+    cell, _, store = _smoke_run(tmp_path / "missing", monkeypatch, {"wf_00001_.png": _picture()})
+    assert cell["verdict"] == "fail" and cell["smoke"]["problems"] == [
+        {"file": None, "check": "missing",
+         "text": "SaveGLB wrote no 3D file with the prefix wf_mesh"}]
+    # A failing cell differs from a passing one in its verdict and its smoke object only.
+    assert {k for k in cell if cell[k] != passed[k]} == {"verdict", "smoke"}
+    assert cell["thumbnail"] == "wf_00001_.webp" and "outputs/wf_00001_.png" in store.published
+
+    black = io.BytesIO()
+    Image.fromarray(np.zeros((64, 64, 3), dtype=np.uint8)).save(black, "PNG")
+    cell, _, _ = _smoke_run(tmp_path / "blank", monkeypatch, {
+        "wf_00001_.png": black.getvalue(), "wf_mesh_00001_.glb": _fixture("mesh_300.glb")})
+    assert cell["verdict"] == "fail"
+    assert [(p["file"], p["check"]) for p in cell["smoke"]["problems"]] == [
+        ("wf_00001_.png", "blank")]
+    # A cut file is a failure of the workflow, never a harness error.
+    cut = _fixture("mesh_300.glb")
+    cell, _, _ = _smoke_run(tmp_path / "cut", monkeypatch, {
+        "wf_00001_.png": _picture(), "wf_mesh_00001_.glb": cut[:len(cut) // 2]})
+    assert cell["verdict"] == "fail"
+    assert [(p["file"], p["check"]) for p in cell["smoke"]["problems"]] == [
+        ("wf_mesh_00001_.glb", "decode")]
+
+
+def test_a_smoke_workflow_that_wrote_nothing_fails(tmp_path, monkeypatch):
+    """`no_outputs` is an infrastructure status at reference level. At smoke
+    level it is the failure the level exists to catch."""
+    assert "no_outputs" in run_regression.INFRA_STATUSES
+    cell, comparison, store = _smoke_run(tmp_path, monkeypatch, {}, status="no_outputs")
+    assert (cell["verdict"], cell["worker_status"]) == ("fail", "no_outputs")
+    assert cell["smoke"] == {"files": [], "notes": [], "problems": [
+        {"file": None, "check": "missing", "text": "the workflow finished and wrote no file"}]}
+    assert cell["output_sha256"] is None and cell["thumbnail"] is None
+    assert store.published == ["comparison.json", "run.json"]
+
+
+@pytest.mark.parametrize("status, verdict", [("timeout", "execution_error"),
+                                             ("validation_error", "execution_error"),
+                                             ("custom_node_error", "execution_error"),
+                                             ("worker_error", "infra_error"),
+                                             ("missing_model", "infra_error"),
+                                             ("a_status_of_tomorrow", "infra_error")])
+def test_a_smoke_workflow_that_did_not_finish_is_not_checked(tmp_path, monkeypatch, status,
+                                                             verdict):
+    cell, comparison, store = _smoke_run(tmp_path, monkeypatch, {"wf_00001_.png": _picture()},
+                                         status=status)
+    assert (cell["verdict"], cell["worker_status"]) == (verdict, status)
+    assert comparison == {"verdict": verdict, "detail": None, "vs_golden": None,
+                          "vs_previous": None, "thresholds_used": None, "golden_tag": None,
+                          "previous_commit": None, "previous_verdict": None,
+                          "previous_golden_tag": None, "figures": False, "level": "smoke",
+                          "smoke": EMPTY_SMOKE}
+    assert cell["output_sha256"] is None and cell["thumbnail"] is None
+    assert store.published == ["comparison.json", "run.json"]
+
+
+def test_the_verdict_of_a_smoke_run_by_worker_status():
+    verdict = run_regression.smoke_verdict
+    assert verdict("ok", []) == "pass"
+    assert verdict("ok", [{"file": None, "check": "missing", "text": "x"}]) == "fail"
+    assert verdict("no_outputs", []) == "fail"
+    for status in sorted(run_regression.EXEC_FAIL_STATUSES):
+        assert verdict(status, []) == "execution_error", status
+    for status in sorted(run_regression.INFRA_STATUSES - {"no_outputs"}):
+        assert verdict(status, []) == "infra_error", status
+    # A status this does not know, or none at all, was not tested. It never passes.
+    assert verdict(None, []) == verdict("harness_error", []) == "infra_error"
+
+
+def test_an_audio_workflow_at_smoke_level_needs_no_comparator(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_regression, "comparator_for",
+                        lambda entry: pytest.fail("a smoke workflow is not compared"))
+    flac = _fixture("audio_1s.flac")
+    workflow = {"9": {"class_type": "SaveAudioAdvanced",
+                      "inputs": {"filename_prefix": "wf", "format": "flac", "audio": ["1", 0]}}}
+    cell, comparison, store = _smoke_run(
+        tmp_path / "pass", monkeypatch, {"wf_00001.flac": flac, "notes_00001.flac": b"x"},
+        entry={"output_kind": "audio", "expect": {"seconds": 1}}, workflow=workflow)
+    assert cell["verdict"] == "fail"  # the second file is no FLAC: every file is checked
+    cell, comparison, store = _smoke_run(
+        tmp_path / "one", monkeypatch, {"wf_00001.flac": flac},
+        entry={"output_kind": "audio", "expect": {"seconds": 1}}, workflow=workflow)
+    assert (cell["verdict"], cell["output_kind"], cell["thumbnail"]) == ("pass", "audio", None)
+    # The main output of an audio workflow: its first FLAC named after the workflow.
+    assert cell["output_sha256"] == _sha(flac)
+    assert cell["smoke"]["files"][0]["seconds"] == 1.0
+    assert store.published == ["comparison.json", "outputs/wf_00001.flac", "run.json"]
+    # What the entry expects is held against the file.
+    cell, _, _ = _smoke_run(tmp_path / "long", monkeypatch, {"wf_00001.flac": flac},
+                            entry={"output_kind": "audio", "expect": {"seconds": 30}},
+                            workflow=workflow)
+    assert cell["verdict"] == "fail"
+    assert [p["check"] for p in cell["smoke"]["problems"]] == ["expect"]
+
+
+def test_a_text_workflow_at_smoke_level_is_checked_and_not_compared(tmp_path, monkeypatch):
+    workflow = {"9": {"class_type": "SaveText",
+                      "inputs": {"filename_prefix": "wf", "format": "txt", "text": ["1", 0]}}}
+    said = "A short answer that is long enough to be a text.".encode()
+    cell, comparison, store = _smoke_run(tmp_path / "said", monkeypatch, {"wf_00001.txt": said},
+                                         entry={"output_kind": "text"}, workflow=workflow)
+    assert (cell["verdict"], cell["output_kind"]) == ("pass", "text")
+    assert cell["output_sha256"] == _sha(said) and cell["thumbnail"] is None
+    cell, _, _ = _smoke_run(tmp_path / "empty", monkeypatch, {"wf_00001.txt": b""},
+                            entry={"output_kind": "text"}, workflow=workflow)
+    assert cell["verdict"] == "fail"
+    assert [p["check"] for p in cell["smoke"]["problems"]] == ["empty"]
+
+
+# -- check levels: which output files of a smoke run are published ------------------
+def test_a_large_file_is_published_only_when_it_repeats(tmp_path, monkeypatch):
+    png, small, large = _picture(), b"s" * (MIB // 2), b"L" * (2 * MIB)
+    workflow = {**SMOKE_WORKFLOW,
+                "5": {"class_type": "SaveGLB", "inputs": {"filename_prefix": "wf_part"}}}
+    files = {"wf_00001_.png": png, "wf_part_00001_.obj": small, "wf_mesh_00001_.obj": large}
+    cell, comparison, store = _smoke_run(tmp_path / "first", monkeypatch, files,
+                                         workflow=workflow)
+    assert cell["verdict"] == "pass"
+    held = cell["smoke"]["files"][1]
+    # The key stands after what the worker reported, and only on a file that is held back.
+    assert held == {"name": "wf_mesh_00001_.obj", "type": None, "bytes": 2 * MIB,
+                    "sha256": _sha(large), "published": False}
+    assert ["published" in f for f in cell["smoke"]["files"]] == [False, True, False]
+    assert store.exclude == ["outputs/wf_mesh_00001_.obj"]
+    # The picture, its thumbnail, the small file and the two records are always published.
+    assert store.published == ["comparison.json", "outputs/thumbs/wf_00001_.webp",
+                               "outputs/wf_00001_.png", "outputs/wf_part_00001_.obj", "run.json"]
+    # The file stays on the runner, so the run's artifact has it.
+    assert (tmp_path / "first" / "work" / "wf" / "outputs" / "wf_mesh_00001_.obj").stat(
+        ).st_size == 2 * MIB
+
+    # The next run wrote the same bytes: now the file is published.
+    again, _, store = _smoke_run(tmp_path / "second", monkeypatch, files, workflow=workflow,
+                                 previous_files=cell["smoke"]["files"])
+    assert not [f for f in again["smoke"]["files"] if "published" in f]
+    assert store.exclude == [] and "outputs/wf_mesh_00001_.obj" in store.published
+    # A run that wrote other bytes holds it back again, whatever the run before published.
+    other = {**files, "wf_mesh_00001_.obj": b"M" * (2 * MIB)}
+    moved, _, store = _smoke_run(tmp_path / "third", monkeypatch, other, workflow=workflow,
+                                 previous_files=again["smoke"]["files"])
+    assert moved["smoke"]["files"][1]["published"] is False
+    assert store.exclude == ["outputs/wf_mesh_00001_.obj"]
+    # The limit itself is published: a file of 1 MiB, on its first run.
+    edge, _, store = _smoke_run(tmp_path / "limit", monkeypatch,
+                                {**files, "wf_mesh_00001_.obj": b"L" * MIB}, workflow=workflow)
+    assert not [f for f in edge["smoke"]["files"] if "published" in f] and store.exclude == []
+
+
+def test_a_file_the_worker_did_not_send_is_never_published(tmp_path, monkeypatch):
+    png, clip = _picture(), b"c" * 4096
+    workflow = {"3": SMOKE_WORKFLOW["3"],
+                "4": {"class_type": "SaveVideo", "inputs": {"filename_prefix": "wf_video"}}}
+    files = {"wf_00001_.png": png, "wf_video_00001_.mp4": clip}
+    cell, _, store = _smoke_run(tmp_path / "a", monkeypatch, files, workflow=workflow,
+                                unsent=("wf_video_00001_.mp4",))
+    assert cell["verdict"] == "pass"  # on its size alone, and the cell says so
+    assert cell["smoke"]["notes"] == ["wf_video_00001_.mp4 was not sent (over the worker's size "
+                                      "limit): checked by size only"]
+    assert cell["smoke"]["files"][1] == {"name": "wf_video_00001_.mp4", "type": "video",
+                                         "bytes": 4096, "sha256": _sha(clip), "sent": False,
+                                         "published": False}
+    assert list(cell["smoke"]["files"][1])[-2:] == ["sent", "published"]
+    assert store.exclude == ["outputs/wf_video_00001_.mp4"]
+    assert "outputs/wf_video_00001_.mp4" not in store.published
+    # Also when it repeats: there is no file to publish.
+    again, _, _ = _smoke_run(tmp_path / "b", monkeypatch, files, workflow=workflow,
+                             unsent=("wf_video_00001_.mp4",),
+                             previous_files=cell["smoke"]["files"])
+    assert again["smoke"]["files"][1]["published"] is False
+
+
+def test_a_file_that_is_held_back_is_still_checked_and_says_so_before_its_numbers(tmp_path,
+                                                                                 monkeypatch):
+    """A second picture of 1.2 MB, as a 3D workflow writes it: checked like the
+    first, and held back until it repeats. Every reader finds `published`
+    where the worker's own facts end."""
+    small, large = _picture(1), _picture(2, side=640, height=640)
+    assert len(large) > MIB
+    cell, _, store = _smoke_run(tmp_path, monkeypatch, {"wf_00001_.png": small,
+                                                        "wf_00002_.png": large},
+                                workflow={"3": SMOKE_WORKFLOW["3"], "4": SMOKE_WORKFLOW["3"]})
+    assert cell["verdict"] == "pass" and store.exclude == ["outputs/wf_00002_.png"]
+    first, second = cell["smoke"]["files"]
+    assert list(first) == ["name", "type", "bytes", "sha256", "width", "height", "std",
+                           "flat_share"]
+    assert list(second) == ["name", "type", "bytes", "sha256", "published", "width", "height",
+                            "std", "flat_share"]
+    assert (second["published"], second["width"], second["height"]) == (False, 640, 640)
+    # Its preview is small and is published, like the picture it was made from is not.
+    assert "outputs/thumbs/wf_00002_.webp" in store.published
+    assert "outputs/wf_00002_.png" not in store.published
+    # The main output is still the first picture.
+    assert cell["output_sha256"] == _sha(small) and cell["thumbnail"] == "wf_00001_.webp"
+
+
+def test_the_publish_rule_reaches_files_the_cell_does_not_list(tmp_path, monkeypatch):
+    """`smoke.files` holds 50 entries. A large file after them is held back too."""
+    import smoke
+    files = {f"wf_{i:05d}_.bin": b"x" for i in range(1, smoke.FILES_MAX + 1)}
+    files["wf_99999_.bin"] = b"L" * (MIB + 1)
+    cell, _, store = _smoke_run(tmp_path, monkeypatch, files, workflow={})
+    assert len(cell["smoke"]["files"]) == smoke.FILES_MAX and cell["verdict"] == "pass"
+    assert store.exclude == ["outputs/wf_99999_.bin"]
+    assert run_regression.held_back({"outputs": "none"}, None) == set()
+
+
+def test_previous_smoke_files_reads_each_earlier_summary_once():
+    files_a = [{"name": "a_00001_.png", "bytes": 9, "sha256": "a1"}]
+    files_b = [{"name": "b_00001_.glb", "bytes": 9, "sha256": "b1", "published": False}]
+    head = [{"c": "c2", "t": 2, "m": {"ct": 2},
+             "w": {"a": {"v": "pass"}, "b": {"v": "fail"}, "c": {"v": "infra_error"},
+                   "e": {"v": "pass"}}},
+            {"c": "c1", "t": 1, "m": {"ct": 1}, "w": {"c": {"v": "pass"}, "d": {"v": "pass"}}}]
+    summaries = {
+        "c2": {"workflows": {"a": {"smoke": {"files": files_a}}, "b": {"smoke": {"files": files_b}},
+                             "e": {"verdict": "pass"}}},
+        "c1": {"workflows": {"c": {"smoke": {"files": []}}}}}
+    reads = []
+
+    class Store:
+        def published_summary(self, branch, commit):
+            reads.append((branch, commit))
+            return summaries.get(commit)
+
+    found = run_regression.previous_smoke_files(Store(), "master", head, "c3",
+                                                ["a", "b", "c", "d", "e", "new"])
+    # c: its newest red or green result is at c1. d: no smoke result there. e: it was at
+    # reference level then. new: no result at all.
+    assert found == {"a": files_a, "b": files_b, "c": []}
+    assert sorted(reads) == [("master", "c1"), ("master", "c2")]
+    # A re-run of c2 itself reads the results before it, never its own.
+    reads.clear()
+    assert run_regression.previous_smoke_files(Store(), "master", head, "c2", ["a", "c"]) == {
+        "c": []}
+    assert reads == [("master", "c1")]
+    # A run without smoke workflows reads nothing.
+    reads.clear()
+    assert run_regression.previous_smoke_files(Store(), "master", head, "c3", []) == {}
+    assert reads == []
+
+
+def test_published_new_bytes_counts_what_the_previous_result_had_not_published():
+    def cell(wf_id, *files):
+        return {"workflow_id": wf_id, "smoke": {"files": list(files)}}
+
+    def one(name, size, sha, **more):
+        return {"name": name, "type": None, "bytes": size, "sha256": sha, **more}
+
+    count = run_regression.published_new_bytes
+    first = [cell("a", one("x.png", 100, "p1"), one("x.glb", 5000, "g1", published=False)),
+             cell("b", one("y.flac", 30, "f1")),
+             {"workflow_id": "ref", "verdict": "pass"}]  # a reference cell lists no files
+    assert count(first, {}) == 130
+    before = {"a": first[0]["smoke"]["files"], "b": first[1]["smoke"]["files"]}
+    # The same bytes again: the large file is published now, and nothing else is new.
+    second = [cell("a", one("x.png", 100, "p1"), one("x.glb", 5000, "g1")),
+              cell("b", one("y.flac", 30, "f1"))]
+    assert count(second, before) == 5000
+    assert count(second, {"a": second[0]["smoke"]["files"], "b": before["b"]}) == 0
+    # A changed file is new, a file that was not sent is not there, a size that is no
+    # number adds nothing.
+    third = [cell("a", one("x.png", 120, "p2"), one("x.glb", 5000, "g1", sent=False,
+                                                    published=False)),
+             cell("b", one("y.flac", None, "f2"), one("z.txt", 7, None))]
+    assert count(third, before) == 127
+
+
+# -- check levels: through main() ----------------------------------------------------
+LEVEL_NOW = 1794700000
+LEVEL_LANES = {"schema_version": 2, "primary": "main", "lanes": {
+    "main": {"cadence": "per-commit", "role": "primary", "layout": 2,
+             "prefix": "regression/lanes/main", "endpoint_id": "ep-main"},
+    "nightly": {"cadence": "nightly", "role": "lane", "layout": 2,
+                "prefix": "regression/lanes/nightly", "endpoint_id": "ep-nightly"}}}
+RUN_SUMMARY_KEYS = ["schema_version", "branch", "commit", "run_ts", "overall", "has_infra_error",
+                    "lane", "attempt", "run_url", "run_id", "env", "commit_meta", "tested_range",
+                    "workflows"]
+INDEX_CELL_KEYS = ["v", "d", "sha", "mse", "psnr", "pct", "pv", "exec", "vram", "g", "th"]
+
+
+def _shade(shade):
+    """The bytes of a small PNG of one shade, as a reference-level run compares it."""
+    import io
+    import numpy as np
+    from PIL import Image
+    data = io.BytesIO()
+    Image.fromarray(np.full((16, 24, 3), shade, dtype=np.uint8)).save(data, "PNG")
+    return data.getvalue()
+
+
+class FolderStore(run_regression.storage.Storage):
+    """A results store in a folder: what a run publishes, without git."""
+
+    def __init__(self, root, prefix):
+        super().__init__(prefix)
+        self.dir, self.summary_reads = root, []
+
+    def download_json(self, path):
+        import json
+        f = self.dir / path
+        return json.loads(f.read_text(encoding="utf-8")) if f.exists() else None
+
+    def read_blob_json(self, path):
+        if path.endswith("/summary.json"):
+            self.summary_reads.append(path.split("/")[-2])
+        return self.download_json(path)
+
+    def upload_json(self, path, obj, compact=False):
+        import json
+        f = self.dir / path
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(obj, indent=2), encoding="utf-8")
+
+    def upload_dir(self, blob_prefix, local_dir, exclude=()):
+        import shutil
+        for p in sorted(local_dir.rglob("*")):
+            rel = p.relative_to(local_dir).as_posix()
+            if p.is_file() and rel not in exclude:
+                dest = self.dir / blob_prefix / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(p, dest)
+
+    def download_dir(self, blob_prefix, local_dir):
+        import shutil
+        src = self.dir / blob_prefix
+        files = [p for p in sorted(src.rglob("*")) if p.is_file()] if src.is_dir() else []
+        for p in files:
+            dest = local_dir / p.relative_to(src)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(p, dest)
+        return len(files)
+
+
+class LevelLane:
+    """main() on a registry of two lanes, the per-commit lane `main` and the
+    lane `nightly`, with a results store in a folder and a GPU that writes for
+    each workflow the files it holds at that moment (`files`), or ends with
+    its `status`. `entries` are the manifest entries, `graphs` their workflows."""
+
+    def __init__(self, tmp_path, monkeypatch, entries, graphs=None):
+        import json
+        import commit_meta
+        self.tmp, self.monkeypatch, self.runs, self.last = tmp_path, monkeypatch, 0, None
+        self.files = {wf_id: {} for wf_id in entries}
+        self.status = dict.fromkeys(entries, "ok")
+        repo, manifest = tmp_path / "repo", {"defaults": DEFAULTS, "workflows": {}}
+        (repo / "manifest" / "workflows").mkdir(parents=True)
+        for wf_id, entry in entries.items():
+            path = f"manifest/workflows/{wf_id}_api.json"
+            (repo / path).write_text(json.dumps((graphs or {}).get(wf_id, {})), encoding="utf-8")
+            manifest["workflows"][wf_id] = {"enabled": True, "workflow_path": path,
+                                            "models": [], **entry}
+        self.manifest = repo / "manifest" / "workflows.json"
+        self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+        monkeypatch.setattr(index_builder, "load_lanes", lambda path=None: LEVEL_LANES)
+        monkeypatch.setattr(run_regression.storage, "from_args", self.store)
+        monkeypatch.setattr(run_regression, "run_workflow_job", self.job)
+        monkeypatch.setattr(run_regression, "RunPodClient", lambda endpoint_id: None)
+        # Commit c1 was committed at 10, c2 at 20, and so on.
+        monkeypatch.setattr(commit_meta, "fetch_commit_meta", lambda sha: {
+            "subject": "change (#9)", "pr": 9, "committed_ts": int(sha[1:]) * 10})
+        monkeypatch.setattr(commit_meta, "fetch_range", lambda prev, sha: {
+            "prev": prev, "commits_between": 1, "compare_url": f"{prev}...{sha}"})
+        for key in ("GITHUB_RUN_ID", "GITHUB_REPOSITORY", "GITHUB_SERVER_URL"):
+            monkeypatch.delenv(key, raising=False)
+
+    def store(self, args):
+        self.last = FolderStore(self.tmp / "store", args.prefix)
+        return self.last
+
+    def job(self, client, wf_id, workflow, workdir=None, **kw):
+        if self.status[wf_id] == "harness":
+            raise RuntimeError("the runner lost the job")
+        return _smoke_job(self.files[wf_id], self.status[wf_id])(client, wf_id, workflow,
+                                                                 workdir=workdir)
+
+    def reference(self, lane, wf_id, data):
+        """Approve `data` as the PNG reference of a workflow on a lane."""
+        base = self.tmp / "store" / LEVEL_LANES["lanes"][lane]["prefix"] / "golden" / wf_id
+        (base / "v1" / "outputs").mkdir(parents=True)
+        (base / "current.json").write_text('{"tag": "v1"}', encoding="utf-8")
+        (base / "v1" / "outputs" / f"{wf_id}_00001_.png").write_bytes(data)
+
+    def run(self, commit, lane, *argv, now=LEVEL_NOW):
+        """main() once: (exit code, the summary it wrote for the steps after it)."""
+        import json
+        import sys
+        import types
+        self.runs += 1
+        out = self.tmp / f"out{self.runs}.json"
+        self.monkeypatch.setattr(run_regression, "time", types.SimpleNamespace(time=lambda: now))
+        self.monkeypatch.setattr(sys, "argv", [
+            "run_regression.py", "--manifest", str(self.manifest), "--commit", commit,
+            "--branch", "master", "--lane", lane, "--workdir", str(self.tmp / f"w{self.runs}"),
+            "--summary-out", str(out), *argv])
+        code = run_regression.main()
+        return code, json.loads(out.read_text(encoding="utf-8"))
+
+    def text(self, path):
+        """The text of a published file (None: there is none)."""
+        f = self.tmp / "store" / path
+        return f.read_text(encoding="utf-8") if f.is_file() else None
+
+    def json(self, path):
+        import json
+        return json.loads(self.text(path))
+
+
+def test_an_image_lane_through_main_publishes_what_it_did_before_check_levels(tmp_path,
+                                                                             monkeypatch):
+    """What the pin of image behaviour cannot see, because it does not run
+    main(): the previous-run pointer and the shape of summary.json after a
+    full run of image workflows on a per-commit lane."""
+    import json
+    lane = LevelLane(tmp_path, monkeypatch, {"wf_a": {}, "wf_b": {}, "wf_c": {}})
+    for wf_id in lane.files:
+        lane.files[wf_id] = {f"{wf_id}_00001_.png": _shade(100)}
+        lane.reference("main", wf_id, _shade(100))
+    prefix = "regression/lanes/main"
+    code, summary = lane.run("c1", "main")
+    assert code == 0
+    pointer = lane.text(f"{prefix}/latest/master.json")
+    assert pointer == ('{\n  "commit": "c1",\n  "run_ts": 1794700000,\n  "workflows": [\n'
+                       '    "wf_a",\n    "wf_b",\n    "wf_c"\n  ]\n}')
+    text = lane.text(f"{prefix}/runs/master/c1/summary.json")
+    assert text == json.dumps(summary, indent=2), "--summary-out is the published file"
+    assert list(summary) == RUN_SUMMARY_KEYS and list(summary["workflows"]) == list(lane.files)
+    assert {k: summary[k] for k in RUN_SUMMARY_KEYS[:10]} == {
+        "schema_version": 2, "branch": "master", "commit": "c1", "run_ts": LEVEL_NOW,
+        "overall": "pass", "has_infra_error": False, "lane": "main", "attempt": 1,
+        "run_url": None, "run_id": None}
+    assert summary["tested_range"] is None and summary["commit_meta"]["pr"] == 9
+    for wf_id, cell in summary["workflows"].items():
+        assert list(cell) == CELL_KEYS + ["prior_verdict", "prior_commit"], wf_id
+        assert (cell["verdict"], cell["prior_verdict"], cell["prior_commit"]) == ("pass", None,
+                                                                                 None)
+    # The index: no cell names a level, every reference is listed, no chain is open.
+    head = lane.json("regression/index/master/main.json")
+    assert [list(cell) for cell in head["entries"][0]["w"].values()] == [INDEX_CELL_KEYS] * 3
+    assert "wr" not in head["entries"][0] and head["first_bad"] == {}
+    assert sorted(lane.json("regression/index/lanes.json")["lanes"]["main"]["goldens"]) == [
+        "wf_a", "wf_b", "wf_c"]
+
+    # A full run with an execution error is a result too. It does not move the pointer.
+    lane.status["wf_c"] = "timeout"
+    code, summary = lane.run("c2", "main", now=LEVEL_NOW + 600)
+    assert code == 1 and list(summary) == RUN_SUMMARY_KEYS
+    assert summary["tested_range"] == {"prev": "c1", "commits_between": 1,
+                                       "compare_url": "c1...c2"}
+    assert lane.text(f"{prefix}/latest/master.json") == pointer
+    assert lane.json("regression/index/master/main.json")["first_bad"]["wf_c"] == {
+        "commit": "c2", "run_ts": LEVEL_NOW + 600, "kind": "execution_error", "prev_good": "c1",
+        "pr": 9, "author": None, "golden": None, "runs": 1}
+    # A run that names its workflows is not the lane's run of the commit: it
+    # leaves the pointer alone, also when everything it ran can be compared.
+    code, summary = lane.run("c3", "main", "--workflows", "wf_a,wf_b", now=LEVEL_NOW + 1200)
+    assert code == 0 and [c["verdict"] for c in summary["workflows"].values()] == ["pass", "pass"]
+    assert lane.text(f"{prefix}/latest/master.json") == pointer
+    # The next full run that can be compared moves it.
+    lane.status["wf_c"] = "ok"
+    assert lane.run("c4", "main", now=LEVEL_NOW + 1800)[0] == 0
+    assert lane.json(f"{prefix}/latest/master.json") == {
+        "commit": "c4", "run_ts": LEVEL_NOW + 1800, "workflows": ["wf_a", "wf_b", "wf_c"]}
+
+
+THREE_D = {"3": {"class_type": "SaveImage", "inputs": {"filename_prefix": "wf_3d"}},
+           "4": {"class_type": "SaveGLB", "inputs": {"filename_prefix": "wf_3d_mesh"}},
+           "5": {"class_type": "SaveGLB", "inputs": {"filename_prefix": "wf_3d_part"}}}
+SOUND = {"9": {"class_type": "SaveAudioAdvanced",
+               "inputs": {"filename_prefix": "wf_audio", "format": "flac"}}}
+
+
+def test_a_nightly_lane_publishes_a_large_smoke_output_from_its_second_run_on(tmp_path,
+                                                                             monkeypatch):
+    monkeypatch.setattr(run_regression, "comparator_for",
+                        lambda entry: pytest.fail("a smoke workflow is not compared"))
+    lane = LevelLane(tmp_path, monkeypatch, {
+        "wf_3d": {"level": "smoke", "cadence": "nightly", "expect": {"width": 96}},
+        "wf_audio": {"level": "smoke", "cadence": "nightly", "output_kind": "audio"}},
+        {"wf_3d": THREE_D, "wf_audio": SOUND})
+    png, part, mesh, flac = _picture(), b"s" * (MIB // 2), b"L" * (2 * MIB), _fixture(
+        "audio_1s.flac")
+    lane.files["wf_3d"] = {"wf_3d_00001_.png": png, "wf_3d_part_00001_.obj": part,
+                           "wf_3d_mesh_00001_.obj": mesh}
+    lane.files["wf_audio"] = {"wf_audio_00001.flac": flac}
+    prefix = "regression/lanes/nightly"
+
+    def published(commit):
+        root = tmp_path / "store" / prefix / "runs" / "master" / commit
+        return sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())
+
+    code, summary = lane.run("c1", "nightly")
+    assert code == 0 and list(summary) == RUN_SUMMARY_KEYS + ["published_new_bytes"]
+    assert {wf: cell["verdict"] for wf, cell in summary["workflows"].items()} == {
+        "wf_3d": "pass", "wf_audio": "pass"}
+    cell = summary["workflows"]["wf_3d"]
+    assert list(cell) == CELL_KEYS + ["level", "smoke", "prior_verdict", "prior_commit"]
+    assert list(summary["workflows"]["wf_audio"]) == CELL_KEYS + [
+        "output_kind", "level", "smoke", "prior_verdict", "prior_commit"]
+    assert [(f["name"], f.get("published")) for f in cell["smoke"]["files"]] == [
+        ("wf_3d_00001_.png", None), ("wf_3d_mesh_00001_.obj", False),
+        ("wf_3d_part_00001_.obj", None)]
+    # The first run: everything but the 2 MiB file, which stays on the runner.
+    assert published("c1") == [
+        "attempt.json", "summary.json", "wf_3d/comparison.json",
+        "wf_3d/outputs/thumbs/wf_3d_00001_.webp", "wf_3d/outputs/wf_3d_00001_.png",
+        "wf_3d/outputs/wf_3d_part_00001_.obj", "wf_3d/run.json", "wf_audio/comparison.json",
+        "wf_audio/outputs/wf_audio_00001.flac", "wf_audio/run.json"]
+    assert (tmp_path / "w1" / "wf_3d" / "outputs" / "wf_3d_mesh_00001_.obj").is_file()
+    assert summary["published_new_bytes"] == len(png) + len(part) + len(flac)
+    assert lane.json(f"{prefix}/runs/master/c1/wf_3d/comparison.json")["smoke"] == cell["smoke"]
+    assert lane.last.summary_reads == ["c1"]  # its own attempts: there is no earlier result
+
+    # The second run wrote the same bytes: now the large file is published too.
+    code, summary = lane.run("c2", "nightly", now=LEVEL_NOW + 86400)
+    assert code == 0
+    assert not [f for f in summary["workflows"]["wf_3d"]["smoke"]["files"] if "published" in f]
+    assert "wf_3d/outputs/wf_3d_mesh_00001_.obj" in published("c2")
+    assert summary["published_new_bytes"] == len(mesh)
+    # Both workflows had their previous result at c1: its summary was read once.
+    assert lane.last.summary_reads == ["c2", "c1"]
+    # A third run of the same bytes adds nothing.
+    code, summary = lane.run("c3", "nightly", now=LEVEL_NOW + 2 * 86400)
+    assert summary["published_new_bytes"] == 0 and len(published("c3")) == len(published("c2"))
+    # Other bytes are held back again, and a changed small file counts as new.
+    lane.files["wf_3d"]["wf_3d_mesh_00001_.obj"] = b"M" * (2 * MIB)
+    lane.files["wf_3d"]["wf_3d_part_00001_.obj"] = b"t" * 1000
+    code, summary = lane.run("c4", "nightly", now=LEVEL_NOW + 3 * 86400)
+    assert "wf_3d/outputs/wf_3d_mesh_00001_.obj" not in published("c4")
+    assert summary["published_new_bytes"] == 1000
+
+    # The index: every cell names its level, and the lane lists no reference.
+    head = lane.json("regression/index/master/nightly.json")
+    cells = head["entries"][0]["w"]
+    assert list(cells["wf_3d"]) == INDEX_CELL_KEYS + ["l"]
+    assert list(cells["wf_audio"]) == INDEX_CELL_KEYS + ["k", "l"]
+    assert (cells["wf_audio"]["k"], cells["wf_audio"]["l"], cells["wf_audio"]["th"]) == (
+        "audio", "smoke", None)
+    assert cells["wf_3d"] == {"v": "pass", "d": None, "sha": _sha(png), "mse": None,
+                              "psnr": None, "pct": None, "pv": None, "exec": 3.0, "vram": None,
+                              "g": None, "th": "wf_3d_00001_.webp", "l": "smoke"}
+    assert lane.json("regression/index/lanes.json")["lanes"]["nightly"]["goldens"] == {}
+    assert lane.json(f"{prefix}/latest/master.json")["commit"] == "c4"
+
+
+def test_a_full_run_of_a_nightly_lane_always_moves_the_pointer(tmp_path, monkeypatch):
+    """Among 30 to 90 workflows one often has an error. With the rule of a
+    per-commit lane the pointer of such a lane would stand still."""
+    lane = LevelLane(tmp_path, monkeypatch, {
+        "wf_a": {"level": "smoke", "cadence": "nightly"},
+        "wf_b": {"level": "smoke", "cadence": "nightly"}})
+    lane.files["wf_a"], lane.files["wf_b"] = {"wf_a_00001_.png": _picture(1)}, {
+        "wf_b_00001_.png": _picture(2)}
+    latest = "regression/lanes/nightly/latest/master.json"
+    assert lane.run("c1", "nightly")[0] == 0
+    assert lane.json(latest)["commit"] == "c1"
+    lane.status["wf_b"] = "timeout"
+    code, summary = lane.run("c2", "nightly", now=LEVEL_NOW + 86400)
+    assert code == 1 and summary["workflows"]["wf_b"]["verdict"] == "execution_error"
+    assert lane.json(latest) == {"commit": "c2", "run_ts": LEVEL_NOW + 86400,
+                                 "workflows": ["wf_a", "wf_b"]}
+    # Not tested at all is no reason either.
+    lane.status["wf_b"] = "worker_error"
+    code, summary = lane.run("c3", "nightly", now=LEVEL_NOW + 2 * 86400)
+    assert code == 0 and summary["has_infra_error"] is True
+    assert lane.json(latest)["commit"] == "c3"
+    # A run that names its workflows never moves it, on this lane as on any other.
+    lane.status["wf_b"] = "ok"
+    code, summary = lane.run("c4", "nightly", "--workflows", "wf_b", now=LEVEL_NOW + 3 * 86400)
+    assert code == 0 and lane.json(latest)["commit"] == "c3"
+
+
+def test_a_smoke_workflow_on_a_per_commit_lane_from_its_first_failure_to_its_fix(tmp_path,
+                                                                                monkeypatch):
+    import io
+    import numpy as np
+    from PIL import Image
+    lane = LevelLane(tmp_path, monkeypatch, {"wf_img": {}, "wf_smoke": {"level": "smoke"}},
+                     {"wf_smoke": {"3": {"class_type": "SaveImage",
+                                         "inputs": {"filename_prefix": "wf_smoke"}}}})
+    good, black = _picture(), io.BytesIO()
+    Image.fromarray(np.zeros((64, 64, 3), dtype=np.uint8)).save(black, "PNG")
+    lane.files["wf_img"] = {"wf_img_00001_.png": _shade(100)}
+    lane.files["wf_smoke"] = {"wf_smoke_00001_.png": good}
+    lane.reference("main", "wf_img", _shade(100))
+    latest, index = "regression/lanes/main/latest/master.json", "regression/index/master/main.json"
+
+    code, summary = lane.run("c1", "main")
+    # A per-commit lane keeps the summary keys it always had, and its image cell its keys.
+    assert code == 0 and list(summary) == RUN_SUMMARY_KEYS
+    assert list(summary["workflows"]["wf_img"]) == CELL_KEYS + ["prior_verdict", "prior_commit"]
+    assert list(summary["workflows"]["wf_smoke"]) == CELL_KEYS + [
+        "level", "smoke", "prior_verdict", "prior_commit"]
+    assert lane.json(latest)["commit"] == "c1"
+    cells = lane.json(index)["entries"][0]["w"]
+    assert list(cells["wf_img"]) == INDEX_CELL_KEYS
+    assert list(cells["wf_smoke"]) == INDEX_CELL_KEYS + ["l"]
+
+    # The workflow did not finish: an execution error, and the pointer stays.
+    lane.status["wf_smoke"] = "timeout"
+    assert lane.run("c2", "main", now=LEVEL_NOW + 600)[0] == 1
+    assert lane.json(latest)["commit"] == "c1"
+    # It finished with a blank picture: a failure that can be compared with nothing,
+    # yet every workflow produced its outputs, so the pointer moves.
+    lane.status["wf_smoke"] = "ok"
+    lane.files["wf_smoke"] = {"wf_smoke_00001_.png": black.getvalue()}
+    code, summary = lane.run("c3", "main", now=LEVEL_NOW + 1200)
+    cell = summary["workflows"]["wf_smoke"]
+    assert code == 1 and (cell["verdict"], cell["prior_verdict"]) == ("fail", "execution_error")
+    assert [p["check"] for p in cell["smoke"]["problems"]] == ["blank"]
+    assert lane.json(latest)["commit"] == "c3"
+    head = lane.json(index)
+    assert head["entries"][0]["w"]["wf_smoke"]["d"] is None
+    # The chain is the one the execution error opened: it does not start again.
+    assert head["first_bad"] == {"wf_smoke": {
+        "commit": "c2", "run_ts": LEVEL_NOW + 600, "kind": "execution_error", "prev_good": "c1",
+        "pr": 9, "author": None, "golden": None, "runs": 2, "level": "smoke"}}
+    # The same failure again is a standing one.
+    code, summary = lane.run("c4", "main", now=LEVEL_NOW + 1800)
+    assert summary["workflows"]["wf_smoke"]["prior_verdict"] == "fail"
+    head = lane.json(index)
+    assert head["entries"][0]["w"]["wf_smoke"]["d"] == "inherited"
+    assert head["first_bad"]["wf_smoke"]["runs"] == 3
+    # Fixed: the chain closes.
+    lane.files["wf_smoke"] = {"wf_smoke_00001_.png": good}
+    assert lane.run("c5", "main", now=LEVEL_NOW + 2400)[0] == 0
+    assert lane.json(index)["first_bad"] == {}
+    assert lane.json("regression/index/lanes.json")["lanes"]["main"]["goldens"] == {
+        "wf_img": {"tag": "v1", "sha": None}}
+
+
+def test_the_index_lists_a_chain_only_for_a_workflow_the_lane_still_runs(tmp_path, monkeypatch):
+    import json
+    lane = LevelLane(tmp_path, monkeypatch, {"wf_a": {"level": "smoke"},
+                                             "wf_b": {"level": "smoke"}})
+    lane.files = {wf_id: {f"{wf_id}_00001_.png": _picture()} for wf_id in lane.files}
+    index = "regression/index/master/main.json"
+    assert lane.run("c1", "main")[0] == 0
+    lane.status["wf_b"] = "timeout"
+    assert lane.run("c2", "main", now=LEVEL_NOW + 600)[0] == 1
+    assert sorted(lane.json(index)["first_bad"]) == ["wf_b"]
+    # A run that names another workflow closes nothing: the lane still runs wf_b.
+    assert lane.run("c3", "main", "--workflows", "wf_a", now=LEVEL_NOW + 1200)[0] == 0
+    assert sorted(lane.json(index)["first_bad"]) == ["wf_b"]
+    # Switched off while it was red: no later run could close its chain.
+    manifest = json.loads(lane.manifest.read_text(encoding="utf-8"))
+    manifest["workflows"]["wf_b"]["enabled"] = False
+    lane.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+    assert lane.run("c4", "main", now=LEVEL_NOW + 1800)[0] == 0
+    head = lane.json(index)
+    assert head["first_bad"] == {}
+    # Its history stays where it is.
+    assert [sorted(e["w"]) for e in head["entries"]] == [["wf_a"], ["wf_a"], ["wf_a", "wf_b"],
+                                                        ["wf_a", "wf_b"]]
+
+
+def test_a_harness_error_cell_of_a_smoke_workflow_names_its_level(tmp_path, monkeypatch):
+    lane = LevelLane(tmp_path, monkeypatch, {"wf_img": {}, "wf_smoke": {"level": "smoke"}})
+    lane.status = {"wf_img": "harness", "wf_smoke": "harness"}
+    code, summary = lane.run("c1", "main", "--skip-publish")
+    assert code == 0 and summary["has_infra_error"] is True
+    error = "RuntimeError('the runner lost the job')"
+    assert summary["workflows"] == {
+        "wf_img": {"workflow_id": "wf_img", "worker_status": "harness_error",
+                   "verdict": "infra_error", "error": error, "prior_verdict": None,
+                   "prior_commit": None},
+        "wf_smoke": {"workflow_id": "wf_smoke", "worker_status": "harness_error",
+                     "verdict": "infra_error", "error": error, "level": "smoke",
+                     "prior_verdict": None, "prior_commit": None}}
+    # Publishing is off: nothing was written, and a nightly lane names no bytes either.
+    assert not (tmp_path / "store").exists()
+    assert "published_new_bytes" not in lane.run("c1", "nightly", "--skip-publish")[1]
+
+
+@pytest.mark.parametrize("entry, said", [
+    ({"level": "main"}, r"\[wf\] unknown level 'main' \(known: reference, smoke\); see "),
+    ({"level": 1}, r"\[wf\] unknown level 1 \(known: reference, smoke\); see "),
+    ({"cadence": "daily"},
+     r"\[wf\] unknown cadence 'daily' \(known: per-commit, nightly, weekly\); see "),
+    ({"expect": {"width": 64}}, r"\[wf\] expect is for a smoke-level workflow only; see "),
+    ({"level": "smoke", "expect": {"width": 0}},
+     r"\[wf\] expect.width must be a number above 0, not 0; see "),
+    ({"level": "smoke", "expect": {"size": 3}}, r"\[wf\] unknown expect key 'size' \(known: "),
+    ({"level": "smoke", "output_kind": "video"}, r"\[wf\] unknown output_kind 'video' \(known: "),
+    # Audio has no comparator yet: a reference-level entry of that kind cannot run.
+    ({"output_kind": "audio"},
+     r"\[wf\] no comparator for output_kind 'audio' yet: such a workflow can only run with "
+     r'"level": "smoke"; see manifest/workflows.json'),
+    ({"level": "reference", "output_kind": "audio"}, r"\[wf\] no comparator for output_kind"),
+])
+def test_an_entry_that_cannot_be_run_stops_the_run_before_its_start_marker(tmp_path, monkeypatch,
+                                                                           entry, said):
+    """A clean message, no traceback, no GPU job, and nothing written: a run
+    that left a start marker would count as an attempt at the commit."""
+    import json
+    import sys
+    import storage
+
+    class ReadOnlyStore(FakeStore):
+        def __getattr__(self, name):
+            pytest.fail(f"{name}: nothing is written or published before the check")
+
+    manifest = tmp_path / "manifest" / "workflows.json"
+    manifest.parent.mkdir()
+    manifest.write_text(json.dumps({"defaults": DEFAULTS, "workflows": {
+        "ok": {"enabled": True, "workflow_path": "x", "models": []},
+        "wf": {"enabled": True, "workflow_path": "x", "models": [], **entry}}}))
+    monkeypatch.setattr(storage, "from_args", lambda args: ReadOnlyStore({}))
+    monkeypatch.setattr(run_regression, "process_workflow",
+                        lambda *a: pytest.fail("no GPU job for an entry that cannot be run"))
+    monkeypatch.setattr(sys, "argv", ["run_regression.py", "--manifest", str(manifest),
+                                      "--commit", "new", "--branch", "master"])
+    with pytest.raises(SystemExit, match=said):
+        run_regression.main()
+
+
+def test_the_comparators_are_those_of_the_kinds_that_can_have_a_reference():
+    assert set(run_regression.COMPARATORS) == {"image", "text"}
+    assert run_regression.comparator_for({}).kind == "image"
+    assert run_regression.comparator_for({"output_kind": "text"}).kind == "text"
+    with pytest.raises(ValueError, match="no comparator for output_kind 'audio' yet"):
+        run_regression.comparator_for({"output_kind": "audio"})
+    with pytest.raises(ValueError, match="unknown output_kind 'mesh'"):
+        run_regression.comparator_for({"output_kind": "mesh"})

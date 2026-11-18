@@ -2795,7 +2795,7 @@ def test_the_kind_of_a_cell_is_the_one_it_names_or_the_one_its_comparison_carrie
     # A summary cell written without the key still says so in its metrics.
     assert run_report.cell_kind({"vs_golden": {"kind": "text", "identical": True}}) == "text"
     assert run_report.cell_kind({"vs_golden": None, "vs_previous": {"kind": "text"}}) == "text"
-    for odd in ("audio", ["text"], 3, None):
+    for odd in ("video", ["text"], 3, None):
         assert run_report.cell_kind({"output_kind": odd, "vs_golden": IDENT}) == "image"
     run = {"outputs": [{"filename": "a_00001_.png", "sha256": "p"},
                        {"filename": "a_00001.txt", "sha256": "t"}]}

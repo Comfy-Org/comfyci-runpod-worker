@@ -29,8 +29,13 @@ def test_kind_of_defaults_to_image_and_refuses_what_it_does_not_know():
     assert output_kinds.kind_of({}) == output_kinds.kind_of(None) == "image"
     assert output_kinds.kind_of({"output_kind": None}) == "image"
     assert output_kinds.kind_of({"output_kind": "text"}) == "text"
-    with pytest.raises(ValueError, match="unknown output_kind 'audio'"):
-        output_kinds.kind_of({"output_kind": "audio"})
+    assert output_kinds.kind_of({"output_kind": "audio"}) == "audio"
+    assert output_kinds.KINDS == ("image", "text", "audio")
+    # A mesh or a clip is a second file of an image workflow: neither is a kind.
+    for other in ("video", "mesh"):
+        with pytest.raises(ValueError, match=f"unknown output_kind '{other}' "
+                                             r"\(known: image, text, audio\)"):
+            output_kinds.kind_of({"output_kind": other})
     # Only an absent key or null means image: a typo must not run as one.
     for odd in ("", "Text", False, 0, ["text"]):
         with pytest.raises(ValueError, match="unknown output_kind"):
@@ -525,7 +530,7 @@ def test_an_unknown_kind_stops_the_run_before_any_gpu_job(tmp_path, monkeypatch)
     manifest.write_text(json.dumps({
         "defaults": {"timeout_s": 600, "comfy_flags": [], "thresholds": {}},
         "workflows": {"wf": {"enabled": True, "workflow_path": "x", "models": [],
-                             "output_kind": "audio"}}}))
+                             "output_kind": "video"}}}))
 
     class Store:
         root = "regression"
@@ -543,5 +548,5 @@ def test_an_unknown_kind_stops_the_run_before_any_gpu_job(tmp_path, monkeypatch)
                         lambda *a: pytest.fail("no GPU job for a kind nothing can compare"))
     monkeypatch.setattr(sys, "argv", ["run_regression.py", "--manifest", str(manifest), "--commit",
                                       "new", "--branch", "master", "--skip-publish"])
-    with pytest.raises(SystemExit, match=r"\[wf\] unknown output_kind 'audio'"):
+    with pytest.raises(SystemExit, match=r"\[wf\] unknown output_kind 'video'"):
         run_regression.main()

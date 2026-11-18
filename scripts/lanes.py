@@ -17,6 +17,11 @@ packs must, because only images CI builds (`build` not false) bake the packs'
 requirements. `workflow_runs_on_lane` is the one rule run_regression.py,
 golden_baseline.py and the per-commit plan share.
 
+A workflow entry also says how it is checked. `level_of`, `cadence_of` and
+`expect_of` read and validate its `level` (compared with a reference, or
+smoke), its `cadence` and its `expect`. The cadence is validated only: which
+lane runs a workflow is still decided by its `lanes` list alone.
+
   python scripts/lanes.py images [--only a,b]      JSON list of images to build
   python scripts/lanes.py per-commit [--only a,b]  JSON list of provisioned per-commit lanes
                                                    (each with the workflow ids enabled on it)
@@ -55,6 +60,61 @@ IMAGE_FIELDS = ("python", "cuda", "torch_index", "torch_spec")
 def is_retired(lane: dict | None) -> bool:
     """A retired lane's history stays readable, but it runs nothing any more."""
     return (lane or {}).get("cadence") == RETIRED
+
+
+LONG_CADENCES = ("nightly", "weekly")
+# What a workflow entry of manifest/workflows.json may say about how it is checked.
+LEVELS = ("reference", "smoke")
+WORKFLOW_CADENCES = ("per-commit", "nightly", "weekly")
+EXPECT_KEYS = ("width", "height", "frames", "seconds", "min_chars")
+
+
+def is_long_cadence(lane: dict | None) -> bool:
+    """A lane that runs once a night or once a week, not on every commit."""
+    return (lane or {}).get("cadence") in LONG_CADENCES
+
+
+def _choice(entry: dict | None, key: str, known: tuple[str, ...]) -> str:
+    """An entry's value for `key`, one of `known` (absent or null: the first)."""
+    value = (entry or {}).get(key)
+    if value is None:
+        return known[0]
+    if not isinstance(value, str) or value not in known:
+        raise ValueError(f"unknown {key} {value!r} (known: {', '.join(known)})")
+    return value
+
+
+def level_of(entry: dict | None) -> str:
+    """The check level a workflow entry declares. "reference" (absent or null):
+    its output is compared with an approved reference. "smoke": it only has to
+    finish and write usable files (smoke.py). ValueError for anything else."""
+    return _choice(entry, "level", LEVELS)
+
+
+def cadence_of(entry: dict | None) -> str:
+    """How often a workflow entry asks to be run (absent or null: per-commit);
+    ValueError for anything else than a known cadence."""
+    return _choice(entry, "cadence", WORKFLOW_CADENCES)
+
+
+def expect_of(entry: dict | None) -> dict:
+    """What a smoke-level entry says its output must be: `expect`, an object
+    with keys from EXPECT_KEYS and numbers above 0 ({} when absent or null).
+    ValueError for anything else, and for an entry that is not smoke level:
+    there the output is held to its reference."""
+    expect = (entry or {}).get("expect")
+    if expect is None:
+        return {}
+    if level_of(entry) != "smoke":
+        raise ValueError("expect is for a smoke-level workflow only")
+    if not isinstance(expect, dict):
+        raise ValueError("expect must be an object")
+    for key, value in expect.items():
+        if key not in EXPECT_KEYS:
+            raise ValueError(f"unknown expect key {key!r} (known: {', '.join(EXPECT_KEYS)})")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
+            raise ValueError(f"expect.{key} must be a number above 0, not {value!r}")
+    return expect
 
 
 def retired_only_images(lanes: dict) -> set[str]:

@@ -3,7 +3,7 @@
 A smoke-level workflow has no approved reference. It passes when it finished,
 every save node wrote its file, and every file of a known type passes the
 checks of its type. This module holds those checks and what a run publishes
-about them. Nothing imports it yet.
+about them. run_regression.py calls it for an entry with `"level": "smoke"`.
 
 A file's type comes from its extension (TYPES). A file of another extension is
 listed and not checked. Each check reads one file and returns what it measured

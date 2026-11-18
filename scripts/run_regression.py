@@ -2,6 +2,10 @@
 compare against golden + previous-run baselines, publish everything to storage
 (a GitHub results branch by default; GCS once credentials exist — see storage.py).
 
+A workflow whose entry says `"level": "smoke"` is not compared: it passes when
+it finished and every output file passes the checks of smoke.py. Its large
+output files are published only when they repeat.
+
 Exit code: 1 iff any enabled workflow's verdict is "fail" or "execution_error".
 Infrastructure problems and missing baselines are GitHub warnings, never
 failures, so RunPod flakiness cannot block core merges.
@@ -31,6 +35,7 @@ import lanes as lanes_mod
 import output_kinds
 import packs
 import regression_skip
+import smoke
 import storage
 from submit_and_poll import INFRA_STATUSES, RunPodClient, run_workflow_job
 
@@ -176,15 +181,71 @@ COMPARATORS: dict[str, output_kinds.Comparator] = {
 
 
 def comparator_for(entry: dict | None) -> output_kinds.Comparator:
-    """The comparator of a manifest entry's output kind (ValueError: unknown kind)."""
-    return COMPARATORS[output_kinds.kind_of(entry)]
+    """The comparator of a manifest entry's output kind (ValueError: an unknown
+    kind, or a kind that nothing can compare yet)."""
+    kind = output_kinds.kind_of(entry)
+    if kind not in COMPARATORS:
+        raise ValueError(f"no comparator for output_kind {kind!r} yet: such a workflow can "
+                         'only run with "level": "smoke"')
+    return COMPARATORS[kind]
+
+
+def smoke_verdict(status: str | None, problems: list) -> str:
+    """The verdict of a smoke-level run: "pass" when the workflow finished and
+    the checks of its output files found nothing. "no_outputs" (it finished
+    and wrote no file) is an infrastructure status at reference level, where a
+    template that ends in a preview gets it. Here it is a failure: it is the
+    first thing a smoke check exists to catch. A status this does not know
+    means the workflow was not tested."""
+    if status == "ok":
+        return "fail" if problems else "pass"
+    if status == "no_outputs":
+        return "fail"
+    return "execution_error" if status in EXEC_FAIL_STATUSES else "infra_error"
+
+
+def held_back(run_rec: dict, previous_files: list | None) -> set[str]:
+    """The names of the output files a smoke run does not publish: by the rule
+    of smoke.unpublished over every file the worker listed (with
+    `previous_files`, the `smoke.files` of the workflow's previous result),
+    and every file the worker did not send, of which there is nothing to publish."""
+    outputs = [o for o in run_rec.get("outputs") or []
+               if isinstance(o, dict) and isinstance(o.get("filename"), str)]
+    listed = [{"name": o["filename"], "bytes": o.get("bytes"), "sha256": o.get("sha256")}
+              for o in outputs]
+    return (smoke.unpublished(listed, previous_files)
+            | {o["filename"] for o in outputs if o.get("truncated")})
+
+
+def _not_published(entry: dict) -> dict:
+    """A `smoke.files` entry that says its file is not published, with the key
+    where every entry has it: after the worker's facts, before what was measured."""
+    head = {k: entry[k] for k in ("name", "type", "bytes", "sha256", "sent") if k in entry}
+    return {**head, "published": False, **{k: v for k, v in entry.items() if k not in head}}
+
+
+def check_smoke(run_rec: dict, workflow: dict, entry: dict, status: str | None,
+                previous_files: list | None) -> tuple[dict, set[str]]:
+    """(the `smoke` object of a run, the names of the output files that are
+    not published). An entry of `files` whose file is not published carries
+    `"published": False`."""
+    found = smoke.check_outputs(run_rec.get("outputs_dir"), run_rec, workflow,
+                                entry.get("expect"), status)
+    held = held_back(run_rec, previous_files)
+    found["files"] = [_not_published(f) if f["name"] in held else f for f in found["files"]]
+    return found, held
 
 
 def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: Path,
                      store: storage.Storage) -> dict:
     workdir = Path(args.workdir) / wf_id
     workdir.mkdir(parents=True, exist_ok=True)
-    cmp_ = comparator_for(entry)
+    # At reference level the output is compared with the approved reference
+    # and with the previous run. At smoke level nothing is compared, so there
+    # is no comparator, and no reference or earlier output is read.
+    level = lanes_mod.level_of(entry)
+    kind = output_kinds.kind_of(entry)
+    cmp_ = comparator_for(entry) if level == "reference" else None
 
     workflow = json.loads((repo_root / entry["workflow_path"]).read_text(encoding="utf-8"))
     workflow = apply_seed_overrides(workflow, entry.get("seed_overrides"))
@@ -214,10 +275,21 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
                         "vs_previous": None, "thresholds_used": None, "golden_tag": None,
                         "previous_commit": None, "previous_verdict": None,
                         "previous_golden_tag": None, "figures": False}
-    if cmp_.kind != output_kinds.DEFAULT_KIND:  # an image comparison.json keeps its keys
-        comparison["output_kind"] = cmp_.kind
+    if kind != output_kinds.DEFAULT_KIND:  # an image comparison.json keeps its keys
+        comparison["output_kind"] = kind
 
-    if status in INFRA_STATUSES:
+    held: set[str] = set()  # output files that stay off the results branch (smoke level only)
+    if cmp_ is None:
+        # Only a smoke comparison names its level: absent means reference.
+        comparison["level"] = level
+        # What the workflow wrote in its previous result, which main() read
+        # for every smoke workflow of the run: a large file is published only
+        # when it repeats.
+        previous_files = (getattr(args, "previous_smoke", None) or {}).get(wf_id)
+        comparison["smoke"], held = check_smoke(run_rec, workflow, entry, status,
+                                                previous_files)
+        comparison["verdict"] = smoke_verdict(status, comparison["smoke"]["problems"])
+    elif status in INFRA_STATUSES:
         comparison["verdict"] = "infra_error"
     elif status in EXEC_FAIL_STATUSES:
         comparison["verdict"] = "execution_error"
@@ -287,7 +359,9 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
     thumbnail = None
     if run_rec.get("outputs_dir") and comparison["verdict"] not in ("infra_error", "execution_error"):
         try:
-            thumbnail = cmp_.thumbnails(Path(run_rec["outputs_dir"]))
+            # A smoke run gets a preview of every PNG it wrote, whatever its output kind.
+            previews = cmp_.thumbnails if cmp_ else write_thumbnails
+            thumbnail = previews(Path(run_rec["outputs_dir"]))
         except Exception as e:  # previews are a convenience, never a failure
             print(f"[{wf_id}] thumbnail generation failed: {e!r}")
 
@@ -298,7 +372,11 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
         if d.exists():
             import shutil
             shutil.rmtree(d)
-    if not args.skip_publish:
+    if not args.skip_publish and held:
+        # The files held back stay in this folder, so the run's artifact has them.
+        store.publish_workflow_run(args.branch, args.commit, wf_id, publish_dir,
+                                   exclude=sorted(f"outputs/{name}" for name in held))
+    elif not args.skip_publish:
         store.publish_workflow_run(args.branch, args.commit, wf_id, publish_dir)
     cell = {"workflow_id": wf_id, "worker_status": status, "verdict": comparison["verdict"],
             "detail": comparison["detail"],
@@ -308,7 +386,8 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
             "previous_commit": comparison["previous_commit"],
             "previous_verdict": comparison["previous_verdict"],
             "figures": comparison["figures"],
-            "output_sha256": cmp_.primary_sha(run_rec),
+            "output_sha256": (cmp_.primary_sha(run_rec) if cmp_
+                              else smoke.main_sha(run_rec, wf_id, kind)),
             "thumbnail": thumbnail,
             "gpu_name": run_rec.get("gpu_name"), "timings": run_rec.get("timings"),
             "vram_peak_mb": run_rec.get("vram_peak_mb"),
@@ -318,9 +397,54 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
             "python_version": run_rec.get("python_version"),
             "env": run_rec.get("env"),
             "custom_nodes": run_rec.get("custom_nodes")}
-    if cmp_.kind != output_kinds.DEFAULT_KIND:  # absent means image: those cells keep their keys
-        cell["output_kind"] = cmp_.kind
+    if kind != output_kinds.DEFAULT_KIND:  # absent means image: those cells keep their keys
+        cell["output_kind"] = kind
+    if cmp_ is None:  # absent means reference: those cells keep their keys too
+        cell["level"] = level
+        cell["smoke"] = comparison["smoke"]
     return cell
+
+
+def previous_smoke_files(store: storage.Storage, branch: str, prior_entries: list[dict],
+                         commit: str, wf_ids: list[str]) -> dict[str, list]:
+    """Per workflow of `wf_ids`: the `smoke.files` of its previous result on
+    the lane, which is its newest red or green result at another commit that
+    the index (`prior_entries`) knows. A workflow without one is left out.
+    Each earlier summary is read once, and alone: no run folder is fetched."""
+    priors = index_builder.prior_verdicts(prior_entries, commit)
+    summaries: dict[str, dict] = {}
+    found: dict[str, list] = {}
+    for wf_id in wf_ids:
+        prior = (priors.get(wf_id) or {}).get("commit")
+        if not prior:
+            continue
+        if prior not in summaries:
+            summaries[prior] = store.published_summary(branch, prior) or {}
+        cell = (summaries[prior].get("workflows") or {}).get(wf_id) or {}
+        files = (cell.get("smoke") or {}).get("files")
+        if isinstance(files, list):
+            found[wf_id] = files
+    return found
+
+
+def published_new_bytes(results: list[dict], previous: dict[str, list]) -> int:
+    """Bytes of the output files this run published that the previous result
+    of their workflow had not published under the same name and sha256: about
+    what the run added to the results branch, where equal files are stored
+    once. Counted over the files that smoke cells list. `previous` is what
+    `previous_smoke_files` returned."""
+    total = 0
+    for cell in results:
+        before = {f.get("name"): f.get("sha256")
+                  for f in previous.get(cell["workflow_id"]) or []
+                  if isinstance(f, dict) and f.get("published", True) and f.get("sent", True)}
+        for f in (cell.get("smoke") or {}).get("files") or []:
+            size, sha = f.get("bytes"), f.get("sha256")
+            there = f.get("published", True) and f.get("sent", True)
+            new = not sha or before.get(f.get("name")) != sha
+            if there and new and isinstance(size, int) and not isinstance(size, bool):
+                total += size
+    return total
 
 
 def write_summary(path: Path, summary: dict):
@@ -393,11 +517,17 @@ def main():
                          "manifest/lanes.json): create one for its image and commit the id "
                          "before running this lane")
     store = storage.from_args(args)
+    manifest_path = Path(args.manifest).resolve()
+    repo_root = manifest_path.parent.parent
+    manifest = load_manifest(manifest_path)
+    defaults = manifest["defaults"]
     # The pointer as it stands before this run names the previous tested
     # commit (the per-workflow comparisons read it again later, but they can
     # race with each other once the first workflow publishes).
     prev_commit = (store.latest_pointer(args.branch) or {}).get("commit")
-    builder = index_builder.IndexBuilder(store, args.branch, lane_id, layout, lanes)
+    # The index lists an open failing chain only for a workflow the lane runs today.
+    builder = index_builder.IndexBuilder(store, args.branch, lane_id, layout, lanes,
+                                         active=lanes_mod.workflows_for_lane(manifest, lane_id))
     # The index as it stands before this run: it also records runs that had
     # execution errors, which the pointer above skips.
     prior_entries = (store.download_json(builder.head_path()) or {}).get("entries") or []
@@ -408,11 +538,6 @@ def main():
                                            store.attempt_marker(args.branch, args.commit))
     if attempt > 1:
         print(f"{args.commit[:8]} was already tried on lane {lane_id}; this is attempt {attempt}")
-
-    manifest_path = Path(args.manifest).resolve()
-    repo_root = manifest_path.parent.parent
-    manifest = load_manifest(manifest_path)
-    defaults = manifest["defaults"]
 
     selected = {
         wf_id: entry for wf_id, entry in manifest["workflows"].items()
@@ -429,11 +554,18 @@ def main():
     if not selected:
         print(f"no workflows selected for lane {lane_id}; nothing to do")
         return 0
-    # An output kind nothing can compare is a configuration error, like an
-    # unknown lane: caught here, before any GPU job is submitted.
+    # A level, a cadence, an expectation or an output kind that cannot be run
+    # is a configuration error, like an unknown lane: caught here, before the
+    # start marker and before any GPU job is submitted. A smoke-level workflow
+    # is not compared, so its kind needs no comparator.
     for wf_id, entry in selected.items():
         try:
-            comparator_for(entry)
+            level = lanes_mod.level_of(entry)
+            lanes_mod.cadence_of(entry)
+            lanes_mod.expect_of(entry)
+            output_kinds.kind_of(entry)
+            if level == "reference":
+                comparator_for(entry)
         except ValueError as e:
             raise SystemExit(f"[{wf_id}] {e}; see manifest/workflows.json")
 
@@ -446,6 +578,14 @@ def main():
         # before it costs anything.
         store.mark_attempt(args.branch, args.commit, attempt_marker(args, lane_id, attempt))
         store.checkpoint(f"regression {args.branch}@{args.commit[:8]}: attempt {attempt} started")
+
+    # A smoke run publishes a large output file only when it repeats: what each
+    # smoke workflow wrote in its previous result, read here once for them all.
+    # process_workflow finds it on `args`, like the lane and the endpoint.
+    at_smoke = [wf_id for wf_id, entry in selected.items()
+                if lanes_mod.level_of(entry) == "smoke"]
+    args.previous_smoke = previous_smoke_files(store, args.branch, prior_entries, args.commit,
+                                               at_smoke)
 
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(selected)) as pool:
@@ -460,6 +600,8 @@ def main():
                 print(f"[{wf_id}] harness error: {e!r}")
                 results.append({"workflow_id": wf_id, "worker_status": "harness_error",
                                 "verdict": "infra_error", "error": repr(e)[:1000]})
+                if wf_id in at_smoke:  # every cell of a smoke workflow names its level
+                    results[-1]["level"] = "smoke"
 
     results.sort(key=lambda r: r["workflow_id"])
     verdicts = {r["workflow_id"]: r["verdict"] for r in results}
@@ -487,12 +629,23 @@ def main():
                "tested_range": (commit_meta.fetch_range(prev_commit, args.commit)
                                 if prev_commit and prev_commit != args.commit else None),
                "workflows": {r["workflow_id"]: r for r in results}}
+    long_cadence = lanes_mod.is_long_cadence(lanes["lanes"][lane_id])
+    if long_cadence and not args.skip_publish:
+        # Only a nightly or weekly lane says how much it added to the results
+        # branch: a summary of a per-commit lane keeps the keys it always had.
+        summary["published_new_bytes"] = published_new_bytes(results, args.previous_smoke)
 
     if not args.skip_publish:
         store.publish_summary(args.branch, args.commit, summary)
-        # Advance the previous-run pointer only for fully comparable runs: a commit
-        # where every workflow at least produced outputs.
-        if all(r["verdict"] in ("pass", "fail", "no_baseline") for r in results):
+        # The previous-run pointer. A run that names its workflows is a re-test
+        # or a first look, not the lane's run of the commit: it never moves it.
+        # A full run of a per-commit lane moves it only when the run is fully
+        # comparable: every workflow at least produced outputs. A full run of a
+        # nightly or weekly lane always moves it: among that many workflows one
+        # often has an error, and the pointer would stand still.
+        named = args.workflows != "all"
+        comparable = all(r["verdict"] in ("pass", "fail", "no_baseline") for r in results)
+        if not named and (comparable or long_cadence):
             store.update_latest(args.branch,
                                 {"commit": args.commit, "run_ts": summary["run_ts"],
                                  "workflows": sorted(verdicts)})

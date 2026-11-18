@@ -121,6 +121,67 @@ def test_workflow_lane_filter():
             assert not lanes_mod.workflow_runs_on_lane(entry, LEGACY), wf_id
 
 
+def test_the_level_and_the_cadence_of_a_workflow_entry():
+    """Absent or null means today's behaviour: compared with a reference, on
+    every commit. Anything that is not a known value is a mistake."""
+    assert lanes_mod.LEVELS == ("reference", "smoke")
+    assert lanes_mod.WORKFLOW_CADENCES == ("per-commit", "nightly", "weekly")
+    for entry in (None, {}, {"level": None, "cadence": None}):
+        assert lanes_mod.level_of(entry) == "reference"
+        assert lanes_mod.cadence_of(entry) == "per-commit"
+    assert lanes_mod.level_of({"level": "smoke"}) == "smoke"
+    assert lanes_mod.level_of({"level": "reference"}) == "reference"
+    assert [lanes_mod.cadence_of({"cadence": c}) for c in ("per-commit", "nightly", "weekly")] == [
+        "per-commit", "nightly", "weekly"]
+    for odd in ("", "Smoke", "main", False, 0, ["smoke"]):
+        with pytest.raises(ValueError, match="unknown level .* \\(known: reference, smoke\\)"):
+            lanes_mod.level_of({"level": odd})
+    # A lane can be retired. A workflow cannot ask for that: it is switched off instead.
+    for odd in ("", "retired", "daily", True, 7):
+        with pytest.raises(ValueError, match="unknown cadence .* \\(known: per-commit, nightly, "
+                                             "weekly\\)"):
+            lanes_mod.cadence_of({"cadence": odd})
+    # The cadence is validated only so far: the lanes list alone decides where a workflow runs.
+    assert lanes_mod.workflow_runs_on_lane({"cadence": "weekly"}, PRIMARY)
+    # No committed entry uses a value the functions do not know.
+    for wf_id, entry in MANIFEST["workflows"].items():
+        assert lanes_mod.level_of(entry) in lanes_mod.LEVELS, wf_id
+        assert lanes_mod.cadence_of(entry) in lanes_mod.WORKFLOW_CADENCES, wf_id
+        assert isinstance(lanes_mod.expect_of(entry), dict), wf_id
+
+
+def test_what_a_smoke_entry_expects_of_its_output():
+    assert lanes_mod.EXPECT_KEYS == ("width", "height", "frames", "seconds", "min_chars")
+    for entry in (None, {}, {"expect": None}, {"level": "smoke"}, {"level": "smoke", "expect": {}}):
+        assert lanes_mod.expect_of(entry) == {}
+    expect = {"width": 1024, "height": 1024, "frames": 25, "seconds": 30.5, "min_chars": 40}
+    assert lanes_mod.expect_of({"level": "smoke", "expect": expect}) == expect
+    # At reference level the output is held to its reference, not to an expectation.
+    for entry in ({"expect": {"width": 64}}, {"level": "reference", "expect": {}}):
+        with pytest.raises(ValueError, match="expect is for a smoke-level workflow only"):
+            lanes_mod.expect_of(entry)
+    with pytest.raises(ValueError, match="unknown level"):
+        lanes_mod.expect_of({"level": "main", "expect": {"width": 64}})
+    for odd in ([], "width=64", 64, True):
+        with pytest.raises(ValueError, match="expect must be an object"):
+            lanes_mod.expect_of({"level": "smoke", "expect": odd})
+    with pytest.raises(ValueError, match="unknown expect key 'size' \\(known: width, height, "
+                                         "frames, seconds, min_chars\\)"):
+        lanes_mod.expect_of({"level": "smoke", "expect": {"width": 64, "size": 3}})
+    for value in (0, -1, 0.0, "64", None, True, False, [64], float("nan")):
+        with pytest.raises(ValueError, match="expect.width must be a number above 0, not "):
+            lanes_mod.expect_of({"level": "smoke", "expect": {"width": value}})
+
+
+def test_a_nightly_or_weekly_lane_is_a_long_cadence_lane():
+    assert lanes_mod.LONG_CADENCES == ("nightly", "weekly")
+    assert set(lanes_mod.LONG_CADENCES) < set(lanes_mod.CADENCES)
+    assert lanes_mod.is_long_cadence({"cadence": "nightly"})
+    assert lanes_mod.is_long_cadence({"cadence": "weekly"})
+    for lane in ({"cadence": "per-commit"}, {"cadence": "retired"}, {}, None):
+        assert not lanes_mod.is_long_cadence(lane)
+
+
 def test_image_matrix_skips_unbuilt_images_unless_asked_for():
     rows = lanes_mod.image_matrix(REGISTRY)
     assert [r["image"] for r in rows] == ["cu130-t2141", "cu132-t2150"]

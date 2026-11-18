@@ -658,11 +658,114 @@ def test_an_image_golden_names_no_kind():
 
 
 def test_an_unknown_output_kind_stops_golden_generation_before_any_job(tmp_path, monkeypatch):
-    remote, root = _text_remote(tmp_path), _text_manifest(tmp_path, output_kind="audio")
+    remote, root = _text_remote(tmp_path), _text_manifest(tmp_path, output_kind="video")
     calls = _text_jobs(monkeypatch, SAID, SAID)
     for flags in (("--ref", TEXT_COMMIT), ("--ref", TEXT_COMMIT, "--bless-only"),
                   ("--from-run", f"master/{COMMIT}")):
-        with pytest.raises(SystemExit, match=r"\[llm\] unknown output_kind 'audio' \(known: "
-                                             r"image, text\); see manifest/workflows.json"):
+        with pytest.raises(SystemExit, match=r"\[llm\] unknown output_kind 'video' \(known: "
+                                             r"image, text, audio\); see manifest/workflows.json"):
             _run_main(tmp_path, remote, root, *flags, "--workflows", "llm")
     assert calls == []
+
+
+# -- check levels -----------------------------------------------------------------------
+ALL_FLOWS = (("--ref", TEXT_COMMIT), ("--ref", TEXT_COMMIT, "--bless-only"),
+             ("--from-run", f"master/{COMMIT}", "--bless"))
+
+
+def test_a_reference_level_audio_workflow_stops_before_any_job(tmp_path, monkeypatch):
+    """Audio is a known kind with no comparator yet: a clean stop, no traceback."""
+    remote, root = _text_remote(tmp_path), _text_manifest(tmp_path, output_kind="audio")
+    calls = _text_jobs(monkeypatch, SAID, SAID)
+    for flags in ALL_FLOWS:
+        with pytest.raises(SystemExit, match=r"^\[llm\] no comparator for output_kind 'audio' "
+                                             r'yet: such a workflow can only run with "level": '
+                                             r'"smoke"; see manifest/workflows.json$'):
+            _run_main(tmp_path, remote, root, *flags, "--workflows", "llm")
+    assert calls == []
+
+
+def test_a_named_smoke_workflow_is_refused_and_all_leaves_it_out(tmp_path, monkeypatch, capsys):
+    """A smoke-level workflow is not compared: there is no golden to generate,
+    to promote or to bless for it."""
+    remote, root = _text_remote(tmp_path), _text_manifest(tmp_path, level="smoke")
+    calls = _text_jobs(monkeypatch, SAID, SAID, SAID, SAID)
+    for flags in ALL_FLOWS:
+        with pytest.raises(SystemExit,
+                           match="^llm is a smoke-level workflow: it has no reference$"):
+            _run_main(tmp_path, remote, root, *flags, "--workflows", "llm")
+    skipped = "::notice::[llm] is a smoke-level workflow: it has no reference; skipped"
+    with pytest.raises(SystemExit, match="no workflows selected for lane legacy"):
+        _run_main(tmp_path, remote, root, "--ref", TEXT_COMMIT)
+    assert skipped in capsys.readouterr().out and calls == []
+
+    # Next to a reference-level workflow: `all` generates that one only.
+    path = root / "manifest" / "workflows.json"
+    manifest = json.loads(path.read_text())
+    manifest["workflows"]["ref"] = {**manifest["workflows"]["llm"], "level": "reference"}
+    (root / "manifest" / "workflows" / "ref.json").write_text("{}", encoding="utf-8")
+    path.write_text(json.dumps(manifest))
+    assert _run_main(tmp_path, remote, root, "--ref", TEXT_COMMIT, "--bless") == 0
+    assert skipped in capsys.readouterr().out and calls == ["ref", "ref"]
+    goldens = _clone(tmp_path, remote) / "regression/golden"
+    assert (goldens / "ref" / "current.json").exists() and not (goldens / "llm").exists()
+    with pytest.raises(SystemExit, match="^llm is a smoke-level workflow: it has no reference$"):
+        _run_main(tmp_path / "both", remote, root, "--ref", "e" * 40, "--workflows", "ref,llm")
+    assert calls == ["ref", "ref"]
+
+    # A level that is not known is a mistake in the manifest, as an unknown kind is.
+    manifest["workflows"]["llm"]["level"] = "main"
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(SystemExit, match=r"^\[llm\] unknown level 'main' \(known: reference, "
+                                         r"smoke\); see manifest/workflows.json$"):
+        _run_main(tmp_path / "odd", remote, root, "--ref", "e" * 40)
+
+
+def _smoke_comparison(*files):
+    return {"verdict": "pass", "detail": None, "vs_golden": None, "vs_previous": None,
+            "thresholds_used": None, "golden_tag": None, "previous_commit": None,
+            "previous_verdict": None, "previous_golden_tag": None, "figures": False,
+            "output_kind": "text", "level": "smoke",
+            "smoke": {"files": list(files), "problems": [], "notes": []}}
+
+
+def test_from_run_refuses_a_smoke_run_that_held_a_file_back(tmp_path, capsys):
+    """Smoke to reference is one manifest edit and one approval of a published
+    smoke run. A run that did not publish every output file is not whole on
+    the results branch: the reference would lack what it held back."""
+    said = {"name": "llm_00001.txt", "type": "text", "bytes": len(OTHER), "sha256": _sha(OTHER),
+            "chars": 40, "words": 8}
+    clip = {"name": "llm_video_00001_.mp4", "type": "video", "bytes": 3000000, "sha256": "v" * 64,
+            "published": False, "width": 640, "height": 352, "frames": 25, "seconds": 1.0,
+            "bytes_per_frame_mp": 14280}
+    mesh = {"name": "llm_mesh_00001_.glb", "type": "mesh", "bytes": 9000000, "sha256": "m" * 64,
+            "sent": False, "published": False}
+    assert golden_baseline.unpublished_files(_smoke_comparison(said, clip, mesh)) == [
+        "llm_video_00001_.mp4", "llm_mesh_00001_.glb"]
+    assert golden_baseline.unpublished_files(_smoke_comparison(said)) == []
+    for none in (None, {}, {"verdict": "pass", "vs_golden": {"identical": True}},
+                 {"smoke": None}, {"smoke": {"files": "x"}}):
+        assert golden_baseline.unpublished_files(none) == []
+
+    root = _text_manifest(tmp_path)  # the entry is at reference level now
+    flags = ("--from-run", f"master/{COMMIT}", "--workflows", "llm", "--bless")
+    files = _published_text_run(TEXT_FLOOR)
+    files[f"regression/runs/master/{COMMIT}/llm/comparison.json"] = _smoke_comparison(
+        said, clip, mesh)
+    remote = make_remote(tmp_path, files)
+    assert _run_main(tmp_path, remote, root, *flags) == 1
+    assert (f"::error::[llm] master/{COMMIT} cannot be a reference: it was a smoke run that did "
+            "not publish llm_video_00001_.mp4, llm_mesh_00001_.glb. Use a later run that shows "
+            "the same output: that one publishes every file") in capsys.readouterr().out
+    base = _clone(tmp_path, remote) / "regression/golden/llm"
+    assert not (base / COMMIT[:12]).exists()
+    assert json.loads((base / "current.json").read_text()) == {"tag": "v1"}
+
+    # A smoke run that published every file is approved like any other run.
+    other = tmp_path / "whole"
+    other.mkdir()
+    files[f"regression/runs/master/{COMMIT}/llm/comparison.json"] = _smoke_comparison(said)
+    remote = make_remote(other, files)
+    assert _run_main(other, remote, root, *flags) == 0
+    current = _clone(other, remote) / "regression/golden/llm/current.json"
+    assert json.loads(current.read_text())["tag"] == COMMIT[:12]
