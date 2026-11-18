@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -67,6 +68,7 @@ BOUNDING_BOX = "BOUNDING_BOX"
 # filled the definition's default, a 512 px crop where the template has its own.
 WIDGET_TYPES = {"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO", "COLOR", BOUNDING_BOX}
 BOX_FIELDS = ("x", "y", "width", "height")
+COLOUR = re.compile(r"#[0-9a-fA-F]{3,8}")
 # What the frontend's control widget after a seed holds, and the input names
 # it attaches that widget to even when the definition does not ask for one.
 CONTROL_WORDS = ("fixed", "increment", "decrement", "randomize")
@@ -540,20 +542,23 @@ class Converter:
                 "combo whose options are defined on the node instance, not the "
                 "server: the widget layout cannot be derived from /object_info"
             )
-        if opts.get("hidden"):
-            value = default_of(entry)
+        # A hidden widget is stored like any other: Painter keeps its width
+        # and height between its mask and its colour. A node that stores no
+        # value for one gets the default, because the values run out.
+        if cursor < len(values) and _is_stray_control(entry, values[cursor], out):
+            cursor += 1  # a control word stored after a seed that asked for none
+        if cursor < len(values):
+            value = values[cursor]
+            cursor += 1
+            if opts.get("control_after_generate") and cursor < len(values):
+                cursor += 1  # the UI-only control widget that follows a seed
         else:
-            if cursor < len(values) and _is_stray_control(entry, values[cursor], out):
-                cursor += 1  # a control word stored after a seed that asked for none
-            if cursor < len(values):
-                value = values[cursor]
-                cursor += 1
-                if opts.get("control_after_generate") and cursor < len(values):
-                    cursor += 1  # the UI-only control widget that follows a seed
-            else:
-                value = default_of(entry)
+            value = default_of(entry)
         out[name] = value
 
+        if isinstance(entry, (list, tuple)) and entry[0] == "COLOR":
+            if not isinstance(value, str) or not COLOUR.fullmatch(value):
+                raise ConversionError(f"{name} holds {value!r}, not a colour like #000000")
         if isinstance(entry, (list, tuple)) and entry[0] == BOUNDING_BOX:
             if not isinstance(value, dict) or not set(BOX_FIELDS) <= set(value):
                 raise ConversionError(

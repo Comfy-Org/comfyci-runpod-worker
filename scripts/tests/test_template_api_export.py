@@ -521,6 +521,50 @@ def test_the_four_numbers_stored_after_a_box_are_not_the_next_widgets():
             inputs([bad, "front"])
 
 
+# Painter, as ComfyUI defines it (comfy_extras/nodes_painter.py): the width
+# and the height are hidden widgets between the mask and the colour.
+PAINTER = {
+    "Painter": {
+        "input": {
+            "required": {
+                "mask": ["STRING", {"widgetType": "PAINTER", "image_upload": True,
+                                    "default": "", "socketless": True}],
+                "width": ["INT", {"hidden": True, "default": 512, "socketless": True}],
+                "height": ["INT", {"hidden": True, "default": 512, "socketless": True}],
+                "bg_color": ["COLOR", {"default": "#000000", "socketless": True}],
+            },
+            "optional": {"image": ["IMAGE", {}]},
+        },
+        "input_order": {"required": ["mask", "width", "height", "bg_color"],
+                        "optional": ["image"]},
+    },
+    "SaveImage": OBJECT_INFO["SaveImage"],
+}
+
+
+def test_a_hidden_widget_is_stored_like_any_other():
+    """image_anima_lllite_image_inpainting stores [mask, 1024, 1024, "#000000"].
+    A hidden widget took no value, so the colour got the width: Painter then
+    calls hex_to_rgb(1024) when no image is wired, and the run ends there."""
+    def inputs(widgets):
+        workflow = {
+            "nodes": [node(1, "Painter", widgets=widgets,
+                           outputs=[{"name": "IMAGE", "type": "IMAGE", "links": [1]}]),
+                      save(link=1)],
+            "links": [[1, 1, 0, 99, 0, "IMAGE"]],
+        }
+        return Converter(PAINTER).convert(workflow)["1"]["inputs"]
+
+    assert inputs(["", 1024, 768, "#ff0000"]) == {
+        "mask": "", "width": 1024, "height": 768, "bg_color": "#ff0000"}
+    # A node that stores no value for them gets the definition's.
+    assert inputs([""]) == {"mask": "", "width": 512, "height": 512, "bg_color": "#000000"}
+    # A colour input that would get another widget's value is refused.
+    for bad in (1024, None, "black", "#12"):
+        with pytest.raises(ConversionError, match="bg_color holds .* not a colour like #000000"):
+            inputs(["", 1024, 768, bad])
+
+
 # --------------------------------------------------------------------------- #
 # subgraphs
 # --------------------------------------------------------------------------- #
