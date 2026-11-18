@@ -4801,3 +4801,149 @@ def test_an_execution_error_on_a_nightly_lane_is_placed_by_the_workflows_own_las
     assert "so the error is new in this run. This run covers 3 commits, so the error started in " \
         "one of them" in out
     assert "| Covers | 3 commits since " in out and "previous full run" not in out
+
+
+# -- a job that fetched its models --------------------------------------------------------
+FETCH_HEADER = SMOKE_HEADER.replace("| Peak VRAM GB |",
+                                    "| Models GB | Fetch s (MB/s) | Peak VRAM GB |")
+
+
+def _fetched(cell, fetch_s, **fetch):
+    """(a cell whose job fetched its models, its run record). `fetch_s` is the
+    whole of the job's fetch step, `fetch` what the worker reported of it."""
+    report = {"files": 2, "bytes": 0, "seconds": 0.0, "mb_per_s": None, "streams": 4,
+              "token": True, "reused": 0, "reused_bytes": 0, "evicted": 0, **fetch}
+    cell = {**cell, "timings": {**cell["timings"], "model_fetch_s": fetch_s}}
+    return cell, {**_smoke_run(cell), "model_fetch": report, "timings": cell["timings"]}
+
+
+def test_a_job_that_fetched_its_models_says_how_much_and_how_fast():
+    """The two columns are the standing measurement of download speed: what a
+    weekly run really downloads, and how long that takes."""
+    mesh, mesh_run = _fetched(_smoke_cell(MESH, [_png(f"{MESH}_00001_.png")]), 180.4,
+                              bytes=17_300_000_000, seconds=175.2, mb_per_s=98.7)
+    # Every file of this one was still on the worker: nothing to download, no speed.
+    music, music_run = _fetched(_smoke_cell(MUSIC, [_flac()], output_kind="audio"), 0.3,
+                                files=0, reused=3, reused_bytes=7_500_000_000)
+    out = _night_report([mesh, music], runs={MESH: mesh_run, MUSIC: music_run})
+    table = _section(out, "All workflows")
+    assert table[2] == FETCH_HEADER
+    rows = {line.split(" | ")[0]: line for line in table[4:6]}
+    assert " | 12.4 | 17.3 | 180.4 (99) | 21.3 | " in rows[f"| `{MESH}`"]
+    assert " | 12.4 | 0.00 (+7.50 found on the worker) | 0.3 | 21.3 | " in rows[f"| `{MUSIC}`"]
+    assert run_report.FETCH_NOTE in table and run_report.EXEC_NOTE in table
+    assert ("| Model downloads | 17.3 GB downloaded by 2 jobs in 175 s of downloading, 99 MB/s "
+            "on average. 7.50 GB more were still on a worker from an earlier job |"
+            ) in out.split("\n")
+    assert "Hugging Face token" not in out
+    # A workflow of the run that fetched nothing has two empty cells.
+    plain = _smoke_cell(CLIP, [_png(f"{CLIP}_00001_.png")])
+    out = _night_report([mesh, plain], runs={MESH: mesh_run})
+    row = next(line for line in out.split("\n") if line.startswith(f"| `{CLIP}` "))
+    assert " | 12.4 |  |  | 21.3 | " in row
+    assert "| Model downloads | 17.3 GB downloaded by 1 job in 175 s of downloading, " in out
+
+
+def test_a_page_without_a_fetch_has_neither_column_nor_the_row():
+    out = _night_report([_smoke_cell(MESH, [_png(f"{MESH}_00001_.png")])])
+    assert _section(out, "All workflows")[2] == SMOKE_HEADER
+    assert "Model downloads" not in out and run_report.FETCH_NOTE not in out
+    assert "Models GB" not in out and "Fetch s" not in out
+    # A record that carries something else under the key is no fetch.
+    cell = _smoke_cell(MESH, [_png(f"{MESH}_00001_.png")])
+    for junk in (None, [], "yes", 3, {}):
+        out = _night_report([cell], runs={MESH: {**_smoke_run(cell), "model_fetch": junk}})
+        assert _section(out, "All workflows")[2] == SMOKE_HEADER, junk
+
+
+def test_a_fetch_without_a_token_is_said_in_the_facts():
+    """Without a token public files still download, on a limit that every
+    user of the worker's address shares. Nothing else would tell anyone that
+    the endpoint's secret is missing."""
+    mesh, mesh_run = _fetched(_smoke_cell(MESH, [_png(f"{MESH}_00001_.png")]), 180.4,
+                              bytes=17_300_000_000, seconds=175.2, mb_per_s=98.7, token=False)
+    music, music_run = _fetched(_smoke_cell(MUSIC, [_flac()], output_kind="audio"), 60.0,
+                                bytes=2_000_000_000, seconds=24.8, mb_per_s=80.6)
+    out = _night_report([mesh, music], runs={MESH: mesh_run, MUSIC: music_run})
+    assert ("| Model downloads | 19.3 GB downloaded by 2 jobs in 200 s of downloading, 96 MB/s "
+            f"on average. ⚠️ No Hugging Face token was there for `{MESH}`: public files still "
+            "download, on a limit shared with every user of the worker's address, and a gated "
+            "file is refused. Check `HF_TOKEN` on the lane's endpoint |") in out.split("\n")
+    # Numbers that are no numbers are left out, and the page is still there.
+    odd, odd_run = _fetched(_smoke_cell(MESH, [_png(f"{MESH}_00001_.png")]), "fast",
+                            bytes="many", seconds=None, mb_per_s="quick", reused_bytes=[1])
+    out = _night_report([odd], runs={MESH: odd_run})
+    row = next(line for line in out.split("\n") if line.startswith(f"| `{MESH}` "))
+    assert " | 12.4 |  |  | 21.3 | " in row
+    assert "| Model downloads | 0.00 GB downloaded by 1 job |" in out.split("\n")
+
+
+def _unfetched(status, error, **fetch):
+    """The page of a nightly run with one workflow whose models did not arrive."""
+    cell = {**_smoke_cell(MESH, verdict="infra_error", worker_status=status),
+            "timings": {"checkout_s": 1.9, "pip_s": 0.0, "model_fetch_s": 3.1}}
+    run = {**_run(MESH, status, error=error), "timings": cell["timings"],
+           "model_fetch": {"files": 0, "bytes": 0, "seconds": 0.0, "mb_per_s": None, "streams": 4,
+                           "token": True, "reused": 0, "reused_bytes": 0, "evicted": 0, **fetch}}
+    return _block(_night_report([cell], runs={MESH: run}).replace("#### ⚠️", "#### ❌"), MESH)
+
+
+def test_a_refused_model_says_who_has_to_do_what():
+    refused = {"model": "checkpoints/ltx.safetensors", "error": "HTTP 403 Forbidden",
+               "http_status": 403, "host": "huggingface.co", "repo": "Lightricks/LTX-2.5"}
+    block = _unfetched("model_access_error", {
+        "message": "the model host answered 403 for Lightricks/LTX-2.5", "host": "huggingface.co",
+        "repo": "Lightricks/LTX-2.5", "http_status": 403, "failed": [refused]})
+    assert block[1].startswith(
+        "An infrastructure problem stopped this workflow. Worker status: "
+        "<code>model\\_access\\_error</code>. This is not a verdict on the commit. The model "
+        "host refuses a file it needs. Another attempt would have ended the same way, so the "
+        "run did not try it again.")
+    assert "- **Message:** the model host answered 403 for Lightricks/LTX-2.5" in block
+    assert ("- **What to do:** accept the licence of <code>Lightricks/LTX-2.5</code> on "
+            "<code>huggingface.co</code> with the account behind `HF_TOKEN`, or correct the URL "
+            "in the manifest.") in block
+    assert ("- **Not downloaded:** <code>checkpoints/ltx.safetensors</code> (HTTP 403 Forbidden)"
+            ) in block
+    # The other two answers of a host that says no.
+    for status, said in ((401, "<code>huggingface.co</code> wants a token it accepts for "
+                               "<code>org/gated</code>: check `HF_TOKEN` on the lane's endpoint, "
+                               "and that its account may read the repository."),
+                         (404, "the file is not at <code>org/gated</code> on "
+                               "<code>huggingface.co</code>: correct the URL in the manifest.")):
+        block = _unfetched("model_access_error", {
+            "message": f"the model host answered {status} for org/gated",
+            "host": "huggingface.co", "repo": "org/gated", "http_status": status})
+        assert f"- **What to do:** {said}" in block, status
+    # What the worker sends is not trusted: it is escaped, or left out.
+    block = _unfetched("model_access_error", {
+        "message": "no", "host": "<b>evil</b>", "repo": None, "http_status": 403,
+        "failed": ["junk", {"model": "a|b", "error": None}]})
+    assert ("- **What to do:** accept the licence of the file's repository on "
+            "<code>&lt;b&gt;evil&lt;/b&gt;</code> with the account behind `HF_TOKEN`, or correct "
+            "the URL in the manifest.") in block
+    assert "- **Not downloaded:** <code>a&#124;b</code> (no reason recorded)" in block
+    for junk in ("403", 403.0, True, None, 500, [403]):
+        block = _unfetched("model_access_error", {"message": "no", "http_status": junk})
+        assert not [line for line in block if "What to do" in line], junk
+
+
+def test_a_download_that_failed_names_the_files():
+    lost = [{"model": "vae/ae.safetensors", "error": "sha256 mismatch: got abc"}]
+    block = _unfetched("model_fetch_error", {
+        "message": "model download failed: vae/ae.safetensors: sha256 mismatch: got abc",
+        "failed": lost})
+    assert "<code>model\\_fetch\\_error</code>" in block[1]
+    assert ("- **Message:** model download failed: vae/ae.safetensors: sha256 mismatch: got abc"
+            ) in block
+    assert ("- **Not downloaded:** <code>vae/ae.safetensors</code> (sha256 mismatch: got abc)"
+            ) in block
+    assert not [line for line in block if "What to do" in line]
+    # A full disk names no file: the message says it all.
+    block = _unfetched("model_fetch_error", {
+        "message": "model download failed: disk full: 12.3 GB free, 65.0 GB needed",
+        "failed": [{"error": "disk full: 12.3 GB free, 65.0 GB needed"}]})
+    assert not [line for line in block if "Not downloaded" in line]
+    many = [{"model": f"vae/m{i}", "error": "HTTP 503"} for i in range(12)]
+    block = _unfetched("model_fetch_error", {"message": "down", "failed": many})
+    assert [line for line in block if line.endswith("<code>vae/m9</code> (HTTP 503), +2 more")]

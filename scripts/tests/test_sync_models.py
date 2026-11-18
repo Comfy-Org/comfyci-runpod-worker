@@ -148,3 +148,73 @@ def test_the_workers_serve_the_sync_job():
     assert "COPY src/ /worker/src/" in (ROOT / "Dockerfile").read_text(encoding="utf-8")
     workflow = (ROOT / ".github" / "workflows" / "sync-models.yml").read_text(encoding="utf-8")
     assert "group: sync-models" in workflow and "cancel-in-progress: false" in workflow
+
+
+def test_the_input_files_of_a_workflow_whose_jobs_fetch_its_models_are_synced(tmp_path,
+                                                                             monkeypatch, capsys):
+    """A job downloads models, never input files: ComfyUI reads those from the
+    volume on every lane. So the sync sends the input files of a workflow that
+    runs only on lanes with `"model_storage": "job"`, and none of its models."""
+    def file(name, directory="vae", size=10):
+        return {"directory": directory, "name": name, "url": "u", "bytes": size}
+
+    lanes = {"primary": "main", "endpoint_defaults": {"network_volumes": ["vol"]}, "lanes": {
+        "main": {"cadence": "per-commit", "endpoint_id": "ep-main"},
+        "week": {"cadence": "weekly", "endpoint_id": "ep-week", "model_storage": "job"},
+        "bare": {"cadence": "nightly", "endpoint_id": None, "network_volumes": [],
+                 "model_storage": "job"},
+        "old": {"cadence": "retired", "endpoint_id": "ep-old"}}}
+    workflows = {
+        "image": {"enabled": True, "models": [file("a"), file("in.png", "input")]},
+        "weekly": {"enabled": True, "cadence": "weekly",
+                   "models": [file("big", size=10**11), file("cat.png", "input"),
+                              file("in.png", "input")]},
+        "weekly_off": {"enabled": False, "cadence": "weekly",
+                       "models": [file("big2"), file("dog.png", "input")]},
+        "weekly_plain": {"enabled": True, "cadence": "weekly", "models": [file("big3")]},
+        # No lane with a volume runs these: nothing of them is on it.
+        "nightly_bare": {"enabled": True, "cadence": "nightly",
+                         "models": [file("c"), file("bird.png", "input")]},
+        "retired_only": {"enabled": True, "lanes": ["old"],
+                         "models": [file("d"), file("fish.png", "input")]}}
+    manifest = tmp_path / "workflows.json"
+    manifest.write_text(json.dumps({"defaults": {}, "workflows": workflows}), encoding="utf-8")
+    held = lanes_mod.volume_models({"workflows": workflows}, lanes)
+    assert {wf: [m["name"] for m in models] for wf, models in held.items()} == {
+        "image": ["a", "in.png"], "weekly": ["cat.png", "in.png"], "weekly_off": ["dog.png"]}
+    monkeypatch.setattr(index_builder, "load_lanes", lambda path=None: lanes)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    sent = []
+
+    class Client:
+        def __init__(self, endpoint_id):
+            sent.append(endpoint_id)
+
+        def run(self, job_input):
+            sent.append([f"{m['directory']}/{m['name']}" for m in job_input["models"]])
+            return "job1"
+
+    monkeypatch.setattr(sync_models, "RunPodClient", Client)
+    monkeypatch.setattr(sync_models, "_poll", lambda client, job_id, timeout: {
+        "status": "COMPLETED", "output": {"status": "ok"}})
+
+    def sync(*argv):
+        monkeypatch.setattr(sys, "argv", ["sync_models.py", "--manifest", str(manifest), *argv])
+        sent.clear()
+        return sync_models.main(), capsys.readouterr().out
+
+    code, out = sync()
+    # Each file once, to the volume of the primary lane's endpoint.
+    assert code == 0 and sent == ["ep-main", ["vae/a", "input/in.png", "input/cat.png",
+                                              "input/dog.png"]]
+    assert ("not synced, no lane reads their models from the volume: weekly_plain, "
+            "nightly_bare, retired_only\n") in out
+    assert ("only the input files are synced, each job fetches the models: weekly, "
+            "weekly_off\n") in out
+    code, out = sync("--workflows", "weekly")
+    assert code == 0 and sent[1] == ["input/cat.png", "input/in.png"]
+    assert "not synced" not in out and "only the input files are synced" in out
+    # Once the lane keeps its models on the volume, everything of it is synced.
+    del lanes["lanes"]["week"]["model_storage"]
+    code, out = sync("--workflows", "weekly")
+    assert sent[1] == ["vae/big", "input/cat.png", "input/in.png"] and "synced" not in out

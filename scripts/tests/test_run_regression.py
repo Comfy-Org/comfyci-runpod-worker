@@ -3309,3 +3309,157 @@ def test_a_real_interrupt_reaches_the_run_while_it_waits_for_its_jobs(tmp_path, 
     assert stopped.value.code == 128 + signal.SIGINT
     assert len(submitted) == 2 and sorted(cancelled) == sorted(f"job-{wf}" for wf in submitted)
     assert signal.getsignal(signal.SIGINT) is before
+
+
+# -- a lane whose jobs fetch their models ---------------------------------------------------
+# The weekly lane says `"model_storage": "job"`: each job downloads the models
+# the volume does not hold. The runner tells the job to, and waits longer.
+FETCH_LANES = {**LEVEL_LANES, "lanes": {**LEVEL_LANES["lanes"], "weekly": {
+    "cadence": "weekly", "role": "lane", "layout": 2, "prefix": "regression/lanes/weekly",
+    "endpoint_id": "ep-long", "model_storage": "job", "timeout_minutes": 350}}}
+# What process_workflow gives run_workflow_job on a per-commit lane, besides
+# the client, the id and the workflow. A lane with its models on the volume
+# gains nothing here.
+JOB_KEYWORDS = {"comfy_commit", "models", "timeout_s", "comfy_flags", "workdir", "comfy_repo",
+                "lane", "custom_nodes", "queue_deadline_s"}
+
+
+def _model(name, size, directory="vae"):
+    return {"directory": directory, "name": name, "bytes": size, "sha256": "ab" * 32,
+            "url": f"https://huggingface.co/org/repo/resolve/main/{name}"}
+
+
+def _fetch_lane(tmp_path, monkeypatch, entries, answers=None):
+    """A LevelLane on FETCH_LANES whose GPU keeps what each job was given
+    (`lane.sent`) and adds `answers[wf_id]` to what the job answers."""
+    lane = LevelLane(tmp_path, monkeypatch, entries)
+    monkeypatch.setattr(index_builder, "load_lanes", lambda path=None: FETCH_LANES)
+    lane.sent = {}
+
+    def job(client, wf_id, workflow, **kw):
+        lane.sent[wf_id] = kw
+        rec = _smoke_job(lane.files[wf_id], lane.status[wf_id])(client, wf_id, workflow,
+                                                                workdir=kw["workdir"])
+        return {**rec, **(answers or {}).get(wf_id, {})}
+
+    monkeypatch.setattr(run_regression, "run_workflow_job", job)
+    for wf_id in entries:
+        lane.files[wf_id] = {f"{wf_id}_00001_.png": _picture()}
+    return lane
+
+
+def test_a_lane_that_fetches_tells_each_job_to_and_gives_it_the_time(tmp_path, monkeypatch):
+    smoke = {"level": "smoke", "cadence": "weekly"}
+    lane = _fetch_lane(tmp_path, monkeypatch, {
+        "big": {**smoke, "models": [_model("a.safetensors", 60 * 10**9),
+                                    _model("b.safetensors", 1),
+                                    _model("clip.mp4", 10**9, "input")]},
+        "bare": dict(smoke)})
+    code, summary = lane.run("c1", "weekly", "--skip-publish")
+    assert code == 0 and [c["verdict"] for c in summary["workflows"].values()] == ["pass"] * 2
+    # 60 GB and a byte at 25 MB a second, rounded up. The input file is not fetched.
+    assert lane.sent["big"]["fetch_missing"] is True
+    assert lane.sent["big"]["fetch_allowance_s"] == 2401
+    assert (lane.sent["bare"]["fetch_missing"], lane.sent["bare"]["fetch_allowance_s"]) == (True, 0)
+    assert set(lane.sent["big"]) == JOB_KEYWORDS | {"attempts", "poll_interval_s",
+                                                    "fetch_missing", "fetch_allowance_s"}
+    # The job is given its whole model list, as on every lane: the worker
+    # decides what the volume lacks.
+    assert [m["name"] for m in lane.sent["big"]["models"]] == ["a.safetensors", "b.safetensors",
+                                                              "clip.mp4"]
+    # How many files at once is the worker's own choice, unless the run says it.
+    code, _ = lane.run("c2", "weekly", "--skip-publish", "--fetch-streams", "1")
+    assert code == 0 and lane.sent["big"]["fetch_streams"] == 1
+    assert run_regression.fetch_options({"models": [_model("a", 25_000_001)]},
+                                        FETCH_LANES["lanes"]["weekly"]) == {
+        "fetch_missing": True, "fetch_allowance_s": 2}
+
+
+def test_a_lane_with_its_models_on_the_volume_submits_its_jobs_as_before(tmp_path, monkeypatch):
+    """This test passes on the code from before jobs could fetch models too:
+    it pins what that code gave a job."""
+    models = [_model("a.safetensors", 60 * 10**9)]
+    lane = _fetch_lane(tmp_path / "main", monkeypatch, {"wf": {"level": "smoke",
+                                                               "models": models}})
+    code, _ = lane.run("c1", "main", "--skip-publish")
+    assert code == 0 and set(lane.sent["wf"]) == JOB_KEYWORDS
+    lane = _fetch_lane(tmp_path / "nightly", monkeypatch, {"wf": {
+        "level": "smoke", "cadence": "nightly", "models": models}})
+    code, _ = lane.run("c1", "nightly", "--skip-publish")
+    assert code == 0 and set(lane.sent["wf"]) == JOB_KEYWORDS | {"attempts", "poll_interval_s"}
+
+
+def test_only_a_lane_that_fetches_gives_its_jobs_the_fetch_options(tmp_path, monkeypatch):
+    models = [_model("a.safetensors", 60 * 10**9)]
+    lane = _fetch_lane(tmp_path, monkeypatch, {"wf": {"level": "smoke", "models": models}})
+    # The flag is for a lane that fetches. On another it changes nothing.
+    code, _ = lane.run("c1", "main", "--skip-publish", "--fetch-streams", "1")
+    assert code == 0 and set(lane.sent["wf"]) == JOB_KEYWORDS
+    for other in (None, {}, FETCH_LANES["lanes"]["main"], FETCH_LANES["lanes"]["nightly"],
+                  {"cadence": "retired", "model_storage": "job"}, {"model_storage": "volume"}):
+        assert run_regression.fetch_options({"models": models}, other, streams=1) == {}, other
+
+
+def test_the_record_and_the_cell_of_a_job_that_fetched_say_how_it_went(tmp_path, monkeypatch):
+    report = {"files": 2, "bytes": 800, "seconds": 4.0, "mb_per_s": 0.0, "streams": 4,
+              "token": True, "reused": 0, "reused_bytes": 0, "evicted": 0}
+    answers = {"wf": {"model_fetch": report,
+                      "timings": {"model_fetch_s": 4.2, "prompt_exec_s": 3.0}}}
+    lane = _fetch_lane(tmp_path, monkeypatch, {"wf": {
+        "level": "smoke", "cadence": "weekly", "models": [_model("a.safetensors", 800)]}},
+        answers)
+    code, summary = lane.run("c1", "weekly")
+    assert code == 0
+    record = lane.json("regression/lanes/weekly/runs/master/c1/wf/run.json")
+    assert record["model_fetch"] == report and record["timings"]["model_fetch_s"] == 4.2
+    cell = summary["workflows"]["wf"]
+    # The cell has the keys of any smoke cell. The download time rides in
+    # `timings`, apart from the workflow's own seconds.
+    assert list(cell) == CELL_KEYS + ["level", "smoke", "prior_verdict", "prior_commit"]
+    assert cell["timings"] == {"model_fetch_s": 4.2, "prompt_exec_s": 3.0}
+
+
+def test_a_model_that_could_not_be_fetched_is_not_tested_whatever_the_level(tmp_path,
+                                                                           monkeypatch):
+    """`model_fetch_error` and `model_access_error` are worker statuses of a
+    workflow that was not tested. A reference-level workflow has no output to
+    compare then: before the runner knew the two, it went on to compare."""
+    for status in ("model_fetch_error", "model_access_error"):
+        lane = _fetch_lane(tmp_path / status, monkeypatch, {
+            "ref": {"cadence": "weekly"}, "smoke": {"level": "smoke", "cadence": "weekly"}})
+        lane.status.update(ref=status, smoke=status)
+        code, summary = lane.run("c1", "weekly", "--skip-publish")
+        for cell in summary["workflows"].values():
+            assert (cell["worker_status"], cell["verdict"]) == (status, "infra_error"), status
+        # A weekly run with an untested workflow is red.
+        assert code == 1 and summary["overall"] == "pass" and summary["has_infra_error"] is True
+
+
+def test_the_runs_deadline_counts_the_time_a_job_may_fetch(tmp_path, monkeypatch):
+    """A job of a lane that fetches can take its download longer. A run does
+    not start one that could still be running at its deadline."""
+    clock = Clock()
+    monkeypatch.setattr(run_regression, "time", clock)
+    week = {**LONG_LANES["lanes"]["week"], "model_storage": "job"}
+    registry = {**LONG_LANES, "lanes": {**LONG_LANES["lanes"], "week": week}}
+    # 600 s of timeout, 900 s to start, 1,200 s more in the queue: 45 minutes.
+    # The 60 GB of `big` add 2,400 s: 85 minutes. 60 minutes are left.
+    entries = {"big": {"models": [_model("a.safetensors", 60 * 10**9)]},
+               "small": {"models": [_model("b.safetensors", 10**9)]}}
+    gpu = Gpu({"big": "pass", "small": "pass"})
+    code, summary = _long_run(tmp_path, monkeypatch, RecordingStore(), gpu, "--deadline-minutes",
+                              "60", "--max-in-flight", "1", entries=entries, lane="week",
+                              registry=registry)
+    assert code == 1 and gpu.calls == ["small"]
+    assert summary["workflows"]["big"]["worker_status"] == "not_reached"
+    assert summary["workflows"]["big"]["error"] == (
+        "not started: its job can take 85 min, and 60 min were left before the run's deadline")
+    # The same workflows on a lane with its models on the volume: both fit.
+    gpu = Gpu({"big": "pass", "small": "pass"})
+    code, summary = _long_run(tmp_path, monkeypatch, RecordingStore(), gpu, "--deadline-minutes",
+                              "60", "--max-in-flight", "1", entries=entries, lane="week")
+    assert code == 0 and gpu.calls == ["big", "small"]
+    worst = run_regression.job_worst_case_s
+    assert worst({}, {"timeout_s": 600}, 1800, 1) == 2700
+    assert worst({}, {"timeout_s": 600}, 1800, 1, 2400) == 5100
+    assert worst({}, {"timeout_s": 600}, 600, 2, 100) == 3200

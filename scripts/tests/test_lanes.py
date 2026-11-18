@@ -665,6 +665,69 @@ def test_status_strict_is_a_flag_of_the_command(monkeypatch, capsys):
     assert "main: differs: workers.max is 2 on RunPod" in capsys.readouterr().out
 
 
+# -- lanes whose jobs fetch their models ------------------------------------------------
+def test_which_lanes_fetch_and_what_a_job_fetches():
+    fetches = lanes_mod.fetches_models
+    assert fetches({"cadence": "weekly", "model_storage": "job"})
+    assert fetches({"cadence": "per-commit", "model_storage": "job", "network_volumes": []})
+    for lane in (None, {}, {"cadence": "weekly"}, {"model_storage": "volume"},
+                 {"model_storage": None}, {"cadence": "retired", "model_storage": "job"}):
+        assert not fetches(lane), lane
+    # The committed registry: the weekly lane fetches, and no other lane does.
+    assert [lane_id for lane_id, lane in REGISTRY["lanes"].items() if fetches(lane)] == [
+        "py313-torch2.14.1-cu130-weekly"]
+
+    def model(name, size, directory="vae"):
+        return {"name": name, "directory": directory, "bytes": size}
+
+    entry = {"models": [model("a", 60 * 10**9), model("cat.png", 10**9, "input"),
+                        model("b", 1, "loras"), "junk"]}
+    assert [m["name"] for m in lanes_mod.fetched_models(entry)] == ["a", "b"]
+    assert lanes_mod.fetch_bytes(entry) == 60 * 10**9 + 1
+    # 25 MB a second, rounded up: the runner waits that long, and the lint plans with it.
+    assert lanes_mod.FETCH_PLAN_BYTES_PER_S == 25_000_000
+    assert lanes_mod.fetch_allowance_s(entry) == 2401
+    assert lanes_mod.fetch_allowance_s({"models": [model("a", 25_000_000)]}) == 1
+    for nothing in (None, {}, {"models": None}, {"models": []},
+                    {"models": [model("cat.png", 10**9, "input")]},
+                    {"models": [model("a", None), model("b", "9"), model("c", True),
+                                model("d", -5)]}):
+        assert lanes_mod.fetched_models(nothing) is not None
+        assert lanes_mod.fetch_allowance_s(nothing) == 0, nothing
+
+
+def test_validate_counts_the_download_when_it_asks_whether_a_job_can_ever_start():
+    """A run starts no job that could still be running at its deadline. On a
+    lane whose jobs fetch their models the download is part of that time."""
+    lanes = {"primary": "main", "images": {"img": {
+        "python": "3.13", "cuda": "13.0", "torch_index": "i", "torch_spec": "t"}}, "lanes": {
+        "main": {"cadence": "per-commit", "role": "primary", "layout": 2, "image": "img",
+                 "prefix": "regression/lanes/main", "endpoint_id": "ep"},
+        "week": {"cadence": "weekly", "role": "lane", "layout": 2, "image": "img",
+                 "prefix": "regression/lanes/week", "endpoint_id": None,
+                 "endpoint_name": "long", "timeout_minutes": 120, "model_storage": "job"}}}
+
+    def problems(size, **lane):
+        registry = {**lanes, "lanes": {**lanes["lanes"], "week": {**lanes["lanes"]["week"],
+                                                                 **lane}}}
+        manifest = {"defaults": {"timeout_s": 600}, "workflows": {"big": {
+            "enabled": True, "cadence": "weekly",
+            "models": [{"name": "m", "directory": "vae", "bytes": size}]}}}
+        return lanes_mod.validate(registry, manifest)
+
+    # 95 minutes to the deadline. 600 s and 2,100 s leave 3,000 s for the download.
+    assert problems(74 * 10**9) == []            # 2,960 s
+    assert problems(75 * 10**9) == [
+        "workflow big: it can never start on lane week: its job can take 95 min (timeout_s 600 "
+        "and 2100 s for the queue and a cold start, and 3000 s to download its models), and a "
+        "run's deadline is 95 min after its start. Raise the lane's timeout_minutes or lower "
+        "timeout_s"]
+    # The same file on a lane that reads it from the volume takes no time to download.
+    assert problems(75 * 10**9, model_storage="volume") == []
+    assert problems(75 * 10**9, model_storage=None) == []
+    assert problems(75 * 10**9, timeout_minutes=121) == []
+
+
 def test_dockerfile_takes_every_build_arg_the_workflow_passes():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     declared = set(re.findall(r"^ARG (\w+)", dockerfile, re.M))

@@ -516,3 +516,129 @@ def test_an_output_whose_name_leaves_the_outputs_folder_is_written_nowhere(tmp_p
                        "run/wf/outputs/wf_00001_.png", "run/wf/outputs/wf_00003_.png"]
     # 10 s after its first signal GitHub kills the step: connect and answer fit in that.
     assert 2 * submit_and_poll.STOP_CANCEL_TIMEOUT_S < 7.5
+
+
+# -- a job that fetches its models ----------------------------------------------------------
+class Sent(FakeClient):
+    """Keeps the input of each job it is given."""
+
+    def __init__(self, bodies):
+        super().__init__(bodies)
+        self.inputs = []
+
+    def run(self, job_input):
+        self.inputs.append(job_input)
+        return super().run(job_input)
+
+
+DONE = {"status": "COMPLETED", "output": {"status": "ok", "outputs": []}}
+# What a job of a lane with its models on the volume is sent, and what its
+# record holds: every key, in this order. Neither may gain one.
+JOB_INPUT = ('{"mode": "run", "comfy_commit": "cccccccccccccccccccccccccccccccccccccccc", '
+             '"comfy_repo": null, "workflow_id": "wf", "workflow": {}, "models": [], '
+             '"timeout_s": 10, "comfy_flags": [], "lane": null, "custom_nodes": []}')
+RECORD_KEYS = ["status", "error", "comfy_version", "torch_version", "python_version", "gpu_name",
+               "vram_peak_mb", "rss_peak_mb", "validation", "timings", "commit_checked_out",
+               "env", "lane", "custom_nodes", "runpod_job_id", "attempt", "delay_ms", "delay_s",
+               "execution_ms", "outputs", "outputs_dir"]
+
+
+def test_the_input_and_the_record_of_a_job_that_fetches_nothing_are_unchanged(tmp_path):
+    """This test passes on the code from before jobs could fetch models too:
+    it pins what that code sent and recorded."""
+    client = Sent([DONE])
+    rec = _job(client, tmp_path)
+    assert json.dumps(client.inputs[0]) == JOB_INPUT
+    assert list(rec) == RECORD_KEYS
+
+
+def test_only_fetch_missing_asks_for_a_fetch(tmp_path):
+    client = Sent([DONE, DONE])
+    for kw in ({"fetch_allowance_s": 400}, {"fetch_streams": 1}):
+        submit_and_poll.run_workflow_job(client, "wf", {}, comfy_commit="c" * 40, models=[],
+                                         timeout_s=10, comfy_flags=[], workdir=tmp_path, **kw)
+    assert [json.dumps(sent) for sent in client.inputs] == [JOB_INPUT] * 2
+
+
+def test_a_job_of_a_lane_that_fetches_is_told_to(tmp_path):
+    def sent(**kw):
+        client = Sent([DONE])
+        submit_and_poll.run_workflow_job(client, "wf", {}, comfy_commit="c" * 40, models=[],
+                                         timeout_s=10, comfy_flags=[], workdir=tmp_path, **kw)
+        return json.dumps(client.inputs[0])
+
+    asked = JOB_INPUT[:-1] + ', "fetch_missing": true}'
+    assert sent(fetch_missing=True) == asked
+    assert sent(fetch_missing=True, fetch_allowance_s=400) == asked  # the runner's own business
+    assert sent(fetch_missing=True, fetch_streams=1) == asked[:-1] + ', "fetch_streams": 1}'
+    assert sent(fetch_missing=False, fetch_streams=1) == JOB_INPUT
+
+
+def test_the_record_carries_the_fetch_report_only_when_the_worker_sent_one(tmp_path):
+    report = {"files": 2, "bytes": 800, "seconds": 4.0, "mb_per_s": 0.0, "streams": 4,
+              "token": True, "reused": 0, "reused_bytes": 0, "evicted": 0}
+    client = Sent([{"status": "COMPLETED", "output": {
+        "status": "ok", "timings": {"model_fetch_s": 4.2, "prompt_exec_s": 3.0},
+        "model_fetch": report, "outputs": []}}])
+    rec = submit_and_poll.run_workflow_job(client, "wf", {}, comfy_commit="c" * 40, models=[],
+                                           timeout_s=10, comfy_flags=[], workdir=tmp_path,
+                                           fetch_missing=True)
+    assert rec["model_fetch"] == report and rec["timings"]["model_fetch_s"] == 4.2
+    assert list(rec) == RECORD_KEYS[:14] + ["model_fetch"] + RECORD_KEYS[14:]
+    # A worker image from before the fetch sends none, also when it is asked.
+    rec = submit_and_poll.run_workflow_job(Sent([DONE]), "wf", {}, comfy_commit="c" * 40,
+                                           models=[], timeout_s=10, comfy_flags=[],
+                                           workdir=tmp_path, fetch_missing=True)
+    assert list(rec) == RECORD_KEYS
+
+
+def test_the_runner_waits_longer_for_a_job_that_downloads_its_models(tmp_path, monkeypatch):
+    """The runner gives up on a job after its timeout plus 900 s. A download
+    of 60 GB at the planning speed takes 2,400 s more."""
+    deadline = submit_and_poll.poll_deadline_s
+    assert deadline(10, 600, 2400) == 3310 and deadline(10, 1800, 2400) == 4510
+    # Without a fetch the limit is the whole number it was, as its message prints it.
+    assert deadline(10) == 910 and isinstance(deadline(10), int)
+    clock = Clock()
+    monkeypatch.setattr(submit_and_poll, "time", clock)
+
+    def job(run_s, **kw):
+        client = QueuedClient(clock, queue_s=0, run_s=run_s)
+        rec = submit_and_poll.run_workflow_job(
+            client, "wf", {}, comfy_commit="c" * 40, models=[], timeout_s=10, comfy_flags=[],
+            workdir=tmp_path, attempts=1, **kw)
+        return client, rec
+
+    # 3,000 s of work: past 910 s, inside 910 + 2,400.
+    client, rec = job(3000, fetch_missing=True, fetch_allowance_s=2400)
+    assert (client.cancelled, rec["status"]) == ([], "ok")
+    client, rec = job(3400, fetch_missing=True, fetch_allowance_s=2400)
+    assert client.cancelled == ["job-1"]
+    assert rec == {"status": "infra_error", "attempt": 1, "reason": "timed_out",
+                   "error": {"message": "job job-1 exceeded deadline (3310s)"}}
+    # The time is for a fetch: a job that is not told to fetch does not get it.
+    client, rec = job(3000, fetch_allowance_s=2400)
+    assert rec["error"] == {"message": "job job-1 exceeded deadline (910s)"}
+
+
+def test_a_failed_download_is_tried_again_and_a_refused_file_is_not(tmp_path):
+    assert {"model_fetch_error", "model_access_error"} <= submit_and_poll.INFRA_STATUSES
+    assert "model_fetch_error" in submit_and_poll.RETRYABLE_STATUSES
+    assert submit_and_poll.INFRA_STATUSES - submit_and_poll.RETRYABLE_STATUSES == {
+        "bad_request", "model_access_error"}
+    failed = {"message": "model download failed: vae/x: HTTP 503 Service Unavailable"}
+    client = FakeClient([
+        {"status": "COMPLETED", "output": {"status": "model_fetch_error", "failure": failed}},
+        DONE])
+    rec = _job(client, tmp_path)
+    assert (client.runs, rec["status"], rec["attempt"]) == (2, "ok", 2)
+    # The host said no: a person has to act, and a second job would hear the same.
+    refused = {"message": "the model host answered 403 for Lightricks/LTX-2.5",
+               "host": "huggingface.co", "repo": "Lightricks/LTX-2.5", "http_status": 403}
+    client = FakeClient([
+        {"status": "COMPLETED", "output": {"status": "model_access_error", "failure": refused,
+                                           "model_fetch": {"files": 0, "token": False}}},
+        DONE])
+    rec = _job(client, tmp_path)
+    assert (client.runs, rec["status"], rec["error"]) == (1, "model_access_error", refused)
+    assert rec["model_fetch"] == {"files": 0, "token": False}

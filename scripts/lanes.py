@@ -32,6 +32,11 @@ A lane may name its own GPU pools, data centers and network volumes
 `endpoint_defaults` (`placement_of`), and an empty list of volumes means no
 volume (`without_volume`).
 
+A lane says where its models are. On the network volume, which the model sync
+fills (`volume_models`). Or, with `"model_storage": "job"`, each job downloads
+the models the volume does not hold (`fetches_models`, `fetched_models`), and
+gets `fetch_allowance_s` more time for it.
+
   python scripts/lanes.py images [--only a,b]      JSON list of images to build
                           [--since REV]            only the images changed after commit REV
   python scripts/lanes.py per-commit [--only a,b]  JSON list of provisioned per-commit lanes
@@ -94,6 +99,13 @@ EXPECT_KEYS = ("width", "height", "frames", "seconds", "min_chars")
 LANE_COUNTS = ("workers_max", "disk_gb", "idle_timeout_s", "max_in_flight", "timeout_minutes")
 # Where a lane's models are: on the network volume, or fetched for each job.
 MODEL_STORAGE = ("volume", "job")
+# The `directory` of a models entry that is an input file of the workflow and
+# no model. ComfyUI reads it from the volume (--input-directory) on every lane.
+INPUT_DIRECTORY = "input"
+# The speed a job is given to download its models, in bytes a second: 25 MB/s,
+# slower than any download measured (38 to 447 MB/s a file). The runner waits
+# that long for a job that fetches, and the manifest lint plans with it.
+FETCH_PLAN_BYTES_PER_S = 25_000_000
 # Lists a lane may name in place of the ones `endpoint_defaults` has: the GPU
 # pools its workers run on, their data centers and their network volumes.
 PLACEMENT_KEYS = ("gpu_pools", "data_center_ids", "network_volumes")
@@ -153,6 +165,33 @@ def on_volume(lanes: dict, lane: dict | None) -> bool:
     say `"model_storage": "job"`."""
     return not (is_retired(lane) or (lane or {}).get("model_storage") == "job"
                 or without_volume(lanes, lane))
+
+
+def fetches_models(lane: dict | None) -> bool:
+    """Whether the jobs of a lane download their models themselves: it is not
+    retired and says `"model_storage": "job"`. What such a job finds on the
+    volume it does not download."""
+    return not is_retired(lane) and (lane or {}).get("model_storage") == "job"
+
+
+def fetched_models(entry: dict | None) -> list[dict]:
+    """The models of a workflow entry that a job downloads on a lane that
+    fetches: all but its input files, which stay on the volume."""
+    return [m for m in (entry or {}).get("models") or []
+            if isinstance(m, dict) and m.get("directory") != INPUT_DIRECTORY]
+
+
+def fetch_bytes(entry: dict | None) -> int:
+    """The bytes of a workflow's `fetched_models`, as far as they say them."""
+    sizes = (m.get("bytes") for m in fetched_models(entry))
+    return sum(n for n in sizes if isinstance(n, int) and not isinstance(n, bool) and n > 0)
+
+
+def fetch_allowance_s(entry: dict | None) -> int:
+    """Seconds a job gets to download a workflow's models, on top of its
+    `timeout_s`: their bytes at FETCH_PLAN_BYTES_PER_S, rounded up. Every
+    model counts, also one the job will find on the worker or on the volume."""
+    return math.ceil(fetch_bytes(entry) / FETCH_PLAN_BYTES_PER_S)
 
 
 def endpoint_settings_of(lanes: dict, lane: dict) -> dict:
@@ -373,6 +412,31 @@ def volume_workflows(manifest: dict, lanes: dict) -> list[str]:
     return [wf_id for wf_id in (manifest.get("workflows") or {}) if wf_id in found]
 
 
+def volume_models(manifest: dict, lanes: dict) -> dict[str, list[dict]]:
+    """Per workflow id, in manifest order, the models entries the network
+    volume has to hold: what the model sync downloads and the manifest lint
+    adds up. Every entry of a workflow of `volume_workflows`. Of any other
+    workflow only its input files, and only when a lane that is not retired
+    and mounts a volume runs it: its jobs fetch the models, and read the
+    input files from the volume all the same. A workflow with nothing to hold
+    there has no key. ValueError for an entry with an unknown cadence."""
+    whole = set(volume_workflows(manifest, lanes))
+    entries = lanes.get("lanes") or {}
+    out = {}
+    for wf_id, entry in (manifest.get("workflows") or {}).items():
+        models = [m for m in entry.get("models") or [] if isinstance(m, dict)]
+        if wf_id not in whole:
+            try:
+                mounted = [lane_id for lane_id in lanes_for_workflow(entry, lanes)
+                           if not without_volume(lanes, entries[lane_id])]
+            except ValueError as e:
+                raise ValueError(f"[{wf_id}] {e}") from None
+            models = [m for m in models if m.get("directory") == INPUT_DIRECTORY and mounted]
+        if models:
+            out[wf_id] = models
+    return out
+
+
 def named_on_lane(manifest: dict, named: str | None, lane_id: str, lane: dict) -> list[str]:
     """The workflows a dispatch names (`named`, a csv of ids) that run on a
     lane, switched on or not: run_regression.py runs a workflow that is named,
@@ -578,27 +642,33 @@ def _shared_endpoint_problems(lanes: dict) -> list[str]:
     return problems
 
 
-def _never_started(wf_id: str, timeout_s, entries: dict, on: list[str]) -> list[str]:
+def _never_started(wf_id: str, timeout_s, entries: dict, on: list[str],
+                   entry: dict | None = None) -> list[str]:
     """Problems with an enabled workflow on the nightly and weekly lanes that
     run it (`on`): a job that at its worst takes as long as a run has before
     its deadline is never submitted, so the workflow would be `not_reached`
     in every run. `timeout_s` is the workflow's own or the manifest's default.
-    A lane whose time limit leaves no time at all is said once, for the lane."""
+    On a lane whose jobs fetch their models, the time to download those of
+    `entry` counts too. A lane whose time limit leaves no time at all is said
+    once, for the lane."""
     if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)):
         return []
-    need = timeout_s + LONG_JOB_ALLOWANCE_S
     problems = []
     for lane_id in on:
         lane = entries[lane_id]
         minutes = lane.get("timeout_minutes")
         if not is_long_cadence(lane) or not (minutes is None or _is_count(minutes)):
             continue
+        fetch = fetch_allowance_s(entry) if fetches_models(lane) else 0
+        need = timeout_s + LONG_JOB_ALLOWANCE_S + fetch
         window = deadline_window_s(lane)
         if 0 < window <= need:
             problems.append(
                 f"workflow {wf_id}: it can never start on lane {lane_id}: its job can take "
                 f"{math.ceil(need / 60)} min (timeout_s {timeout_s:g} and {LONG_JOB_ALLOWANCE_S} s "
-                f"for the queue and a cold start), and a run's deadline is {window // 60} min "
+                "for the queue and a cold start"
+                + (f", and {fetch} s to download its models" if fetch else "")
+                + f"), and a run's deadline is {window // 60} min "
                 "after its start. Raise the lane's timeout_minutes or lower timeout_s")
     return problems
 
@@ -709,7 +779,7 @@ def validate(lanes: dict, manifest: dict | None = None, packs: dict | None = Non
                 timeout_s = entry.get("timeout_s")
                 if timeout_s is None:
                     timeout_s = (manifest.get("defaults") or {}).get("timeout_s")
-                problems += _never_started(wf_id, timeout_s, entries, on)
+                problems += _never_started(wf_id, timeout_s, entries, on, entry)
             except ValueError as e:
                 problems.append(f"workflow {wf_id}: {e}")
         names = entry.get("custom_nodes") or []
