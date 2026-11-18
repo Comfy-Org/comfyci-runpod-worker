@@ -64,6 +64,12 @@ THUMB_PX = 96
 FIGURE_PX = 720
 INLINE_PNG_MAX_BYTES = 4 * 1024 * 1024
 TRACEBACK_CHARS = 8000
+USUAL_RUNS = 30       # passing runs a workflow's usual time range is taken from
+USUAL_MIN_RUNS = 8    # fewer than this and no range is shown
+SLOW_FACTOR = 1.5     # a time this many times the top of the range is marked slow
+EXEC_NOTE = ("Exec s is how long the workflow ran. The usual range is what 8 in 10 of the lane's "
+             f"last {USUAL_RUNS} passing runs took, and a time more than {SLOW_FACTOR:g} times its "
+             "top is marked slow. Times differ between workers and are not part of the result.")
 
 SHA_RE = re.compile(r"[0-9a-f]{7,40}")
 FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -1705,17 +1711,40 @@ def reference_cell(v: View) -> str:
     return " · ".join(b for b in bits if b)
 
 
+def usual_exec(d: LaneData, wf: str) -> tuple[float, float] | None:
+    """(low, high) seconds a workflow usually takes on the lane: the 10th and
+    90th percentile over its newest USUAL_RUNS passing runs, this commit left
+    out. None until USUAL_MIN_RUNS of them exist.
+
+    Workers are different machines and the models load from shared storage, so
+    the same code takes up to a third longer from one run to the next. A time
+    is read against this range, not against the previous run."""
+    times = []
+    for e in d.entries:
+        cell = as_dict(as_dict(e.get("w")).get(wf))
+        if e.get("c") != d.commit and cell.get("v") == "pass" and is_num(cell.get("exec")):
+            times.append(cell["exec"])
+            if len(times) == USUAL_RUNS:
+                break
+    if len(times) < USUAL_MIN_RUNS:
+        return None
+    times.sort()
+    return tuple(times[round(p * (len(times) - 1))] for p in (0.1, 0.9))
+
+
 def exec_cell(d: LaneData, v: View) -> str:
-    """Exec seconds, with the change against the previous tested run."""
+    """Exec seconds next to the workflow's usual range; a time well above the
+    range is marked slow. Timing is never part of the verdict."""
     secs = as_dict(v.cell.get("timings")).get("prompt_exec_s")
     if not is_num(secs):
         return ""
-    prev = v.cell.get("previous_commit") or tested_range(d).get("prev")
-    before = next((as_dict(as_dict(e.get("w")).get(v.wf)).get("exec")
-                   for e in d.entries if e["c"] == prev), None) if prev else None
-    if is_num(before) and before > 0:
-        return f"{secs:.1f} ({(secs - before) / before * 100:+.1f} %)"
-    return f"{secs:.1f}"
+    usual = usual_exec(d, v.wf)
+    if not usual:
+        return f"{secs:.1f}"
+    low, high = usual
+    slow = f" {WARN} slow" if secs > high * SLOW_FACTOR else ""
+    spec = ".0f" if high >= 10 else ".1f"  # whole seconds say nothing about a 0.5 s workflow
+    return f"{secs:.1f} (usual {low:{spec}} to {high:{spec}}){slow}"
 
 
 def start_cell(timings: dict) -> str:
@@ -1744,8 +1773,9 @@ def workflows_block(d: LaneData, limits: Limits) -> list[str]:
     # columns that scroll out of view should be the ones needed least.
     out = [f"### All workflows ({len(rows)})", "",
            *table(["Workflow", "Result", "Output", "vs reference", "vs previous", "Reference",
-                   "Exec s (vs previous run)", "Server start s (checkout s)", "Peak VRAM GB",
-                   "Peak RSS GB", "Output sha256"], rows)]
+                   "Exec s (usual range)", "Server start s (checkout s)", "Peak VRAM GB",
+                   "Peak RSS GB", "Output sha256"], rows),
+           "", EXEC_NOTE]
 
     file_rows, total = [], 0
     for v in d.views:

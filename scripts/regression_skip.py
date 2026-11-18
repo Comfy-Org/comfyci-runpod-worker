@@ -1,6 +1,6 @@
 """Whether the regression cron tests a commit on a lane (again).
 
-The cron polls ComfyUI master every 30 minutes and tests HEAD on every
+The cron polls ComfyUI master every 5 minutes and tests HEAD on every
 per-commit lane. A commit counts as tested on a lane once a run published its
 summary there, whatever the verdict: pass, fail and execution_error are all
 results, and testing the same commit again only spends GPU time on the same
