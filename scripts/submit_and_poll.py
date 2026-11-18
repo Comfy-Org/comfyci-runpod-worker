@@ -72,14 +72,24 @@ class RunPodClient:
             pass
 
 
-def _poll(client: RunPodClient, job_id: str, exec_timeout_s: float) -> dict:
+def poll_deadline_s(exec_timeout_s: float, queue_deadline_s: float = QUEUE_DEADLINE_S) -> float:
+    """Seconds after its submission at which the runner gives up on a job. A
+    job that may wait longer in the queue gets that much more, so it is not cut
+    short afterwards for having stood in line."""
+    return (exec_timeout_s + COLD_START_ALLOWANCE_S
+            + max(0, queue_deadline_s - QUEUE_DEADLINE_S))
+
+
+def _poll(client: RunPodClient, job_id: str, exec_timeout_s: float,
+          queue_deadline_s: float = QUEUE_DEADLINE_S) -> dict:
     """Poll until COMPLETED/FAILED. Returns RunPod's status body; raises TimeoutError.
 
     Transient network failures (runner DNS blips etc.) are tolerated for up to
     ~5 minutes before giving up — the job keeps running server-side either way.
     """
     t0 = time.monotonic()
-    deadline = t0 + exec_timeout_s + COLD_START_ALLOWANCE_S
+    allowed_s = poll_deadline_s(exec_timeout_s, queue_deadline_s)
+    deadline = t0 + allowed_s
     net_errors = 0
     while time.monotonic() < deadline:
         try:
@@ -94,12 +104,12 @@ def _poll(client: RunPodClient, job_id: str, exec_timeout_s: float) -> dict:
         state = st.get("status")
         if state in ("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"):
             return st
-        if state == "IN_QUEUE" and time.monotonic() - t0 > QUEUE_DEADLINE_S:
+        if state == "IN_QUEUE" and time.monotonic() - t0 > queue_deadline_s:
             client.cancel(job_id)
-            raise TimeoutError(f"job {job_id} stuck IN_QUEUE > {QUEUE_DEADLINE_S}s")
+            raise TimeoutError(f"job {job_id} stuck IN_QUEUE > {queue_deadline_s}s")
         time.sleep(POLL_INTERVAL_S)
     client.cancel(job_id)
-    raise TimeoutError(f"job {job_id} exceeded deadline ({exec_timeout_s + COLD_START_ALLOWANCE_S}s)")
+    raise TimeoutError(f"job {job_id} exceeded deadline ({allowed_s}s)")
 
 
 def _write_outputs(output_entries: list[dict], dest: Path) -> list[dict]:
@@ -127,7 +137,8 @@ def run_workflow_job(client: RunPodClient, workflow_id: str, workflow_json: dict
                      comfy_commit: str, models: list[dict], timeout_s: float,
                      comfy_flags: list[str], workdir: Path,
                      comfy_repo: str | None = None, lane: str | None = None,
-                     custom_nodes: list[dict] | None = None) -> dict:
+                     custom_nodes: list[dict] | None = None,
+                     queue_deadline_s: float = QUEUE_DEADLINE_S) -> dict:
     """Submit + poll one workflow with a single retry on infra flakes.
 
     Returns a run record: {"status": ..., "outputs_dir": ..., worker fields...}.
@@ -136,6 +147,8 @@ def run_workflow_job(client: RunPodClient, workflow_id: str, workflow_json: dict
     it was produced for. `custom_nodes` are the pack records (scripts/packs.py)
     the worker installs before the server starts; the record carries the
     worker's per-pack install and import report under the same key.
+    `queue_deadline_s` is how long the job may wait in RunPod's queue before it
+    is cancelled (and submitted once more).
     """
     job_input = {
         "mode": "run",
@@ -153,7 +166,7 @@ def run_workflow_job(client: RunPodClient, workflow_id: str, workflow_json: dict
     for attempt in (1, 2):
         try:
             job_id = client.run(job_input)
-            st = _poll(client, job_id, timeout_s)
+            st = _poll(client, job_id, timeout_s, queue_deadline_s)
         except (requests.RequestException, TimeoutError) as e:
             last_err = str(e)[:1000]
             continue

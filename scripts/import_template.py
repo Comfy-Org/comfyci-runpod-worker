@@ -46,6 +46,7 @@ import json
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -67,6 +68,8 @@ SAVE_IMAGE = "SaveImage"
 TEXT_SINKS = ("PreviewAny", "SaveText")
 MODEL_SUFFIXES = (".safetensors", ".sft", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".onnx")
 MARKDOWN_LINK = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
+# A file of a Hugging Face model repository: repository, revision, path.
+HF_FILE = re.compile(r"https://huggingface\.co/([^/]+/[^/]+)/resolve/([^/]+)/(.+)")
 
 # ComfyUI's models/ subdirectory for each loader input, so the entry says where
 # the worker must put the file. Keyed by loader *and* input name, because the
@@ -257,6 +260,96 @@ def published_sha256(url: str) -> str | None:
     return etag if re.fullmatch(r"[0-9a-f]{64}", etag) else None
 
 
+def _head(url: str, follow: bool) -> tuple[int | None, Any]:
+    """(status, headers) of a HEAD request, also for an error answer."""
+    opener = urllib.request.build_opener(*([] if follow else [_NoRedirect]))
+    request = urllib.request.Request(url, method="HEAD")
+    try:
+        with opener.open(request, timeout=60) as response:
+            return response.status, response.headers
+    except urllib.error.HTTPError as error:
+        return error.code, error.headers
+    except OSError:
+        return None, {}
+
+
+def _size(value: Any) -> int | None:
+    if isinstance(value, str) and value.isdigit() and int(value) > 0:
+        return int(value)
+    return None
+
+
+def listed_bytes(url: str) -> int | None:
+    """The size Hugging Face's file listing gives for a ``resolve`` URL."""
+    match = HF_FILE.fullmatch(url.split("?")[0])
+    if not match:
+        return None
+    repo, revision, path = match.groups()
+    listing = f"https://huggingface.co/api/models/{repo}/tree/{revision}"
+    if "/" in path:
+        listing += "/" + urllib.parse.quote(path.rsplit("/", 1)[0])
+    try:
+        with urllib.request.urlopen(listing, timeout=60) as response:
+            rows = json.load(response)
+    except (OSError, ValueError):
+        return None
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict) and row.get("path") == path:
+            size = row.get("size")
+            return size if isinstance(size, int) and size > 0 else None
+    return None
+
+
+def published_bytes(url: str) -> int | None:
+    """The size of a download in bytes, or None when no host says it.
+
+    Hugging Face names the size of an LFS file on its redirect
+    (``X-Linked-Size``). Any other file answers with its ``Content-Length``,
+    once the redirects are followed. A gated Hugging Face file answers neither
+    without a token: its size comes from the repository's file listing, which
+    is public.
+    """
+    status, headers = _head(url, follow=False)
+    size = _size(headers.get("X-Linked-Size"))
+    if size is None and status is not None and 300 <= status < 400:
+        status, headers = _head(url, follow=True)
+    if size is None and status == 200:
+        size = _size(headers.get("Content-Length"))
+    return size if size is not None else listed_bytes(url)
+
+
+def fill_bytes(manifest_path: Path, lookup=None) -> list[str]:
+    """Add ``bytes`` to every models entry of the manifest that has none.
+
+    The file is rewritten with only those keys added. ``lookup`` gives the
+    size of a URL (default: ``published_bytes``). Returns the URLs whose size
+    could not be found: their entries stay as they are, and the manifest lint
+    names them.
+    """
+    lookup = lookup or published_bytes
+    text = manifest_path.read_text(encoding="utf-8")
+    manifest = json.loads(text)
+    if json.dumps(manifest, indent=2, ensure_ascii=False) + "\n" != text:
+        raise SystemExit(
+            f"{manifest_path} is not laid out the way this command writes it "
+            "(2 spaces, one key a line): rewriting it would change more than the sizes"
+        )
+    sizes: dict[str, int | None] = {}
+    for entry in manifest["workflows"].values():
+        for model in entry.get("models") or []:
+            if "bytes" in model:
+                continue
+            url = model["url"]
+            if url not in sizes:
+                sizes[url] = lookup(url)
+            if sizes[url] is not None:
+                model["bytes"] = sizes[url]
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    return sorted(url for url, size in sizes.items() if size is None)
+
+
 def seed_overrides(prompt: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """The seed inputs a run must pin, with the values the template already has."""
     overrides: dict[str, dict[str, Any]] = {}
@@ -287,6 +380,9 @@ def build_entry(
             sha = published_sha256(url)
             if sha:
                 model["sha256"] = sha
+            size = published_bytes(url)
+            if size:
+                model["bytes"] = size
         models.append(model)
 
     return {
@@ -303,17 +399,15 @@ def build_entry(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("template", help="Template name, e.g. image_pixeldit_t2i")
+    parser.add_argument("template", nargs="?", help="Template name, e.g. image_pixeldit_t2i")
     parser.add_argument(
         "--templates-dir",
         type=Path,
-        required=True,
         help="templates/ directory of a Comfy-Org/workflow_templates checkout",
     )
     parser.add_argument(
         "--object-info",
         type=Path,
-        required=True,
         help="ComfyUI /object_info dump taken with the workflow's models present",
     )
     parser.add_argument(
@@ -323,9 +417,29 @@ def main() -> int:
     parser.add_argument(
         "--skip-sha",
         action="store_true",
-        help="Do not look up published sha256 checksums (no network).",
+        help="Do not look up published sha256 checksums and sizes (no network).",
+    )
+    parser.add_argument(
+        "--fill-bytes",
+        action="store_true",
+        help="Import nothing. Ask each download URL of manifest/workflows.json for its "
+        "size and add it as `bytes` to every models entry that has none.",
     )
     args = parser.parse_args()
+
+    if args.fill_bytes:
+        unknown = fill_bytes(ROOT / "manifest" / "workflows.json")
+        for url in unknown:
+            print(
+                f"error: no size found for {url}: add its bytes by hand",
+                file=sys.stderr,
+            )
+        return 1 if unknown else 0
+    if not (args.template and args.templates_dir and args.object_info):
+        parser.error(
+            "the following arguments are required: template, --templates-dir, "
+            "--object-info"
+        )
 
     workflow_id = args.id or args.template
     template = json.loads(

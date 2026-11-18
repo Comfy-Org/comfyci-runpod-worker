@@ -227,6 +227,157 @@ def test_a_loaded_file_the_template_never_links_is_refused():
         build_entry("my_wf", prompt, {"nodes": []}, skip_sha=True)
 
 
+def test_an_entry_looked_up_on_the_network_carries_the_sha_and_the_size(monkeypatch):
+    """The lint asks every models entry for its bytes, so a new entry has them."""
+    prompt = {"1": {"class_type": "UNETLoader", "inputs": {"unet_name": "u.safetensors"}}}
+    template = {"nodes": [{"type": "Note", "widgets_values": ["[u](https://h.test/u.safetensors)"]}]}
+    monkeypatch.setattr(import_template, "published_sha256", lambda url: "a" * 64)
+    monkeypatch.setattr(import_template, "published_bytes", lambda url: 1234)
+    assert build_entry("my_wf", prompt, template, skip_sha=False)["models"] == [
+        {"name": "u.safetensors", "url": "https://h.test/u.safetensors",
+         "directory": "diffusion_models", "sha256": "a" * 64, "bytes": 1234}]
+    monkeypatch.setattr(import_template, "published_sha256", lambda url: None)
+    monkeypatch.setattr(import_template, "published_bytes", lambda url: None)
+    assert list(build_entry("my_wf", prompt, template, skip_sha=False)["models"][0]) == [
+        "name", "url", "directory"]
+
+
+LFS = "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/vae/qwen_image_vae.safetensors"
+GATED = "https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors"
+MOVED = "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors"
+RAW = "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/96309bd/input/shirt.png"
+
+
+def test_a_download_size_comes_from_the_redirect_the_file_or_the_listing(monkeypatch):
+    """The four answers the manifest's own URLs gave on 2026-11-18."""
+    answers = {
+        (LFS, False): (302, {"X-Linked-Size": "253806246", "Content-Length": "1084"}),
+        (MOVED, False): (307, {"Content-Length": "132"}),
+        (MOVED, True): (200, {"Content-Length": "335304388"}),
+        (RAW, False): (200, {"Content-Length": "1366572"}),
+        (GATED, False): (401, {"Content-Length": "136"}),
+        ("https://h.test/gone", False): (404, {"Content-Length": "9"}),
+        ("https://h.test/down", False): (None, {}),
+        ("https://h.test/empty", False): (200, {"Content-Length": "0"}),
+    }
+    asked, listed = [], []
+    monkeypatch.setattr(import_template, "_head",
+                        lambda url, follow: asked.append((url, follow)) or answers[(url, follow)])
+    monkeypatch.setattr(import_template, "listed_bytes",
+                        lambda url: listed.append(url) or {GATED: 335304388}.get(url))
+    size = import_template.published_bytes
+    assert size(LFS) == 253806246      # the redirect names it: the length there is the page's
+    assert size(MOVED) == 335304388    # a renamed repository: only the file itself says it
+    assert size(RAW) == 1366572
+    assert size(GATED) == 335304388    # no token: the length of the refusal is not a size
+    assert [size(f"https://h.test/{name}") for name in ("gone", "down", "empty")] == [None] * 3
+    assert asked == [(LFS, False), (MOVED, False), (MOVED, True), (RAW, False), (GATED, False),
+                     ("https://h.test/gone", False), ("https://h.test/down", False),
+                     ("https://h.test/empty", False)]
+    assert listed == [GATED, "https://h.test/gone", "https://h.test/down", "https://h.test/empty"]
+
+
+def test_the_listing_is_asked_for_the_files_own_folder(monkeypatch):
+    class Answer:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def __enter__(self):
+            import io
+            return io.BytesIO(json.dumps(self.rows).encode())
+
+        def __exit__(self, *exc):
+            return False
+
+    asked = []
+
+    def urlopen(url, timeout=None):
+        asked.append(url)
+        if "missing" in url:
+            raise OSError("404")
+        return Answer([{"type": "directory", "path": "split_files/vae/old"},
+                       {"type": "file", "path": "ae.safetensors", "size": 335304388},
+                       {"type": "file", "path": "split_files/vae/ae.safetensors", "size": 77,
+                        "lfs": {"size": 77}}])
+
+    monkeypatch.setattr(import_template.urllib.request, "urlopen", urlopen)
+    assert import_template.listed_bytes(GATED + "?download=true") == 335304388
+    assert import_template.listed_bytes(MOVED) == 77
+    assert asked == [
+        "https://huggingface.co/api/models/black-forest-labs/FLUX.1-dev/tree/main",
+        "https://huggingface.co/api/models/Comfy-Org/z_image_turbo/tree/main/split_files/vae"]
+    # A file the listing does not have, a listing that fails, a host that has none.
+    assert import_template.listed_bytes(GATED.replace("ae.", "other.")) is None
+    assert import_template.listed_bytes(GATED.replace("FLUX.1-dev", "missing")) is None
+    assert import_template.listed_bytes(RAW) is None and len(asked) == 4
+
+
+def _sized_manifest():
+    def model(name, **more):
+        return {"name": name, "url": f"https://h.test/{name}", "directory": "vae", **more}
+
+    return {"schema_version": 1, "workflows": {
+        "a": {"models": [model("x.safetensors", sha256="0" * 64), model("y.png", bytes=7)]},
+        "b": {"models": [model("x.safetensors", sha256="0" * 64), model("z.safetensors")]},
+        "c": {"models": []}}}
+
+
+def test_fill_bytes_adds_the_missing_sizes_and_nothing_else(tmp_path):
+    path = tmp_path / "workflows.json"
+    before = json.dumps(_sized_manifest(), indent=2) + "\n"
+    path.write_text(before, encoding="utf-8")
+    asked = []
+    unknown = import_template.fill_bytes(
+        path, lambda url: asked.append(url) or {"https://h.test/x.safetensors": 123}.get(url))
+    # Each URL once. One that has its size is not asked, and one nobody knows is named.
+    assert asked == ["https://h.test/x.safetensors", "https://h.test/z.safetensors"]
+    assert unknown == ["https://h.test/z.safetensors"]
+    after = path.read_text(encoding="utf-8")
+    models = {wf: entry["models"] for wf, entry in json.loads(after)["workflows"].items()}
+    assert list(models["a"][0]) == ["name", "url", "directory", "sha256", "bytes"]
+    assert models["a"][0]["bytes"] == 123 == models["b"][0]["bytes"]
+    assert models["a"][1]["bytes"] == 7 and "bytes" not in models["b"][1]
+    # The file differs by the two new lines and the comma each of them needs.
+    added = [line.strip() for line in after.splitlines() if line not in before.splitlines()]
+    assert sorted(added) == ['"bytes": 123'] * 2 + ['"sha256": "' + "0" * 64 + '",'] * 2
+    assert len(after.splitlines()) == len(before.splitlines()) + 2
+    # Run again with every size known: nothing changes.
+    assert import_template.fill_bytes(path, lambda url: 5) == []
+    assert json.loads(path.read_text(encoding="utf-8"))["workflows"]["b"]["models"][1]["bytes"] == 5
+
+
+def test_fill_bytes_leaves_a_manifest_in_another_layout_alone(tmp_path):
+    path = tmp_path / "workflows.json"
+    compact = json.dumps(_sized_manifest())
+    path.write_text(compact, encoding="utf-8")
+    with pytest.raises(SystemExit, match="not laid out the way this command writes it"):
+        import_template.fill_bytes(path, lambda url: pytest.fail("nothing is asked"))
+    assert path.read_text(encoding="utf-8") == compact
+
+
+def test_the_fill_bytes_command_needs_no_template(tmp_path, monkeypatch, capsys):
+    (tmp_path / "manifest").mkdir()
+    path = tmp_path / "manifest" / "workflows.json"
+    path.write_text(json.dumps(_sized_manifest(), indent=2) + "\n", encoding="utf-8")
+    monkeypatch.setattr(import_template, "ROOT", tmp_path)
+    monkeypatch.setattr(import_template, "published_bytes",
+                        lambda url: None if url.endswith("z.safetensors") else 99)
+    monkeypatch.setattr(sys, "argv", ["import_template.py", "--fill-bytes"])
+    assert import_template.main() == 1
+    assert capsys.readouterr().err == (
+        "error: no size found for https://h.test/z.safetensors: add its bytes by hand\n")
+    written = json.loads(path.read_text(encoding="utf-8"))["workflows"]
+    assert written["a"]["models"][0]["bytes"] == 99 and "bytes" not in written["b"]["models"][1]
+    monkeypatch.setattr(import_template, "published_bytes", lambda url: 99)
+    assert import_template.main() == 0
+    # Without the flag the command still asks for its template.
+    monkeypatch.setattr(sys, "argv", ["import_template.py", "--skip-sha"])
+    with pytest.raises(SystemExit):
+        import_template.main()
+    assert "the following arguments are required: template, --templates-dir" in (
+        capsys.readouterr().err)
+
+
 def _text_prompt(sink):
     return {
         "1": {"class_type": "CLIPLoader", "inputs": {"clip_name": "q.safetensors"}},

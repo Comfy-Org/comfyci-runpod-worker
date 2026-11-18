@@ -109,6 +109,14 @@ this repo per template.
    (names from `manifest/custom_nodes.json`) and restricts itself with `lanes`
    to the lanes whose image bakes them; see [Custom-node packs](#custom-node-packs).
 
+   Every `models` entry also carries `bytes`, the size of the download. The
+   importer writes it next to the sha256. For an entry written by hand,
+   `python scripts/import_template.py --fill-bytes` asks each URL for its size
+   and adds the missing ones to the manifest, changing nothing else. The lint
+   adds the sizes up, each file once, and fails when they pass 90 % of the
+   network volume (`endpoint_defaults.volume_gb` in `manifest/lanes.json`).
+   Nothing deletes from the volume, so a full one fails every sync after it.
+
    **A text workflow** (a model that answers in text, like the
    `llm_qwen38_27b_t2t` entry) is written by hand: the importer only writes
    image workflows and stops on a text template with what to do. Convert the
@@ -248,6 +256,39 @@ decision lives in `scripts/regression_skip.py`. The cron used to key on the
 previous-run pointer, which does not advance on execution errors, so a red
 HEAD was re-run on both lanes every half hour (53 runs for 11 commits during
 the 2026-11-03/04 z_image timeouts).
+
+**A run that names its workflows.** A dispatch of **GPU regression** with
+`workflows=<ids>` tests only those workflows. It is a re-test or a first look,
+not the lane's run of the commit, so it pushes no start marker and never moves
+the previous-run pointer. What it publishes depends on what the lane has for
+the commit:
+
+- No result yet: the summary holds the named workflows and lists their ids
+  under `scope`. The cron does not count such a summary as tested: its next
+  tick tests the commit with every workflow, and that run replaces the
+  summary. A second named run at the same commit adds its cells, and its ids
+  to `scope`.
+- A result: only the cells of the named workflows are replaced. Every other
+  cell stays as it is, byte for byte, and so do `run_ts`, `run_url`, `run_id`,
+  `attempt`, `env`, `commit_meta` and `tested_range`, which describe the
+  lane's run. `overall` and `has_infra_error` are worked out again over every
+  cell, and the re-test records itself under `retests` (`run_ts`, `run_url`,
+  `run_id`, `env`, `workflows`). The history row keeps its link to the lane's
+  run, and the PR comment step decides over every cell of the commit. The job
+  itself is red or green by the workflows it tested.
+
+A lane tests a commit once, so a dispatch for a commit that already has the
+lane's result must name it (`commit=<sha>`). To try a workflow without
+writing anything, turn `publish` off: the commit is then tested whatever the
+lane has for it, nothing reaches the results branch, no pull request gets a
+comment, and the result is on the run's page and in its attached files.
+
+**Waiting for a worker.** A run submits all its jobs at once, and an endpoint
+has 3 workers. A job may wait 600 seconds in RunPod's queue, and 60 seconds
+more for each job submitted before it in the run (the order of the manifest).
+A job that waits longer is cancelled and submitted once more. The extra wait
+is added to the time the runner gives the job as a whole, its `timeout_s`
+plus 900 seconds.
 
 A failure vs golden is also classified against the previous tested run
 (`detail` in `summary.json`): `new_drift` when this commit's outputs differ
@@ -518,6 +559,16 @@ not run. Workflows that need custom-node packs must use it (see below).
 empty, they resolve to the lane that owns the bare `regression` prefix
 (layout 1), which is the retired cu128 lane.
 
+**Check the endpoints against the manifest.** `RUNPOD_API_KEY=... python
+scripts/runpod_endpoints.py status` prints the endpoint of every provisioned
+lane, and each setting that differs from `lanes.json`: the largest number of
+workers (the lane's `workers_max`, else `endpoint_defaults.workers.max`), the
+idle timeout and the disk. A retired lane's endpoint is held to 0 workers and
+nothing else. `--strict` exits 1 when something differs. The command only
+reads. RunPod's documentation says an endpoint without a request for 3 days
+is lowered to 2 workers, and after 7 days to 0, so look before the first run
+of a lane that stood idle.
+
 ### Adding a lane
 
 The cu132 lane is the worked example.
@@ -546,9 +597,14 @@ The cu132 lane is the worked example.
    there. `min_cuda_driver` is the endpoint's host driver floor; RunPod's
    serverless 4090 hosts report CUDA 13.2 (driver 595.x). Merge, or build and
    provision from the branch first (see the cu132 order below).
-2. `build-image.yml` builds every buildable image on push to main (or dispatch
-   it from the branch with the image id) and tags it `:<image>` and
-   `:<image>-<sha>`. Every image CI builds bakes every pack in
+2. `build-image.yml` builds the images a push to main changed (or dispatch
+   it from the branch with the image id) and tags each `:<image>` and
+   `:<image>-<sha>`. A change to the Dockerfile, `src/`, `docker/` or
+   `manifest/custom_nodes.json` builds every buildable image. A change to
+   `lanes.json` alone builds only an image whose entry is new or differs
+   (`lanes.py images --since <the commit before the push>`), so adding a lane
+   to an existing image or writing an endpoint id builds and repoints
+   nothing. Every image CI builds bakes every pack in
    `manifest/custom_nodes.json`, so a pack requirement that does not install
    on the lane's Python breaks the build. **Python 3.14**: the registry's
    `opencv-python(-headless)==4.12.0.88` pin needs `numpy<2.3`, and no numpy
@@ -616,8 +672,9 @@ last role, and every default-prefix path breaks if the layout-1 lane goes).
 3. Scale its endpoint to max 0 workers in the RunPod console, once no GPU
    regression run that started before the merge is still using it. Do not
    delete it yet: an idle endpoint costs nothing and max 0 frees its share of
-   the worker quota. ci.comfy.org needs to know the `retired` cadence, or it
-   shows the lane as stale a day after its last run.
+   the worker quota. `runpod_endpoints.py status` names a retired endpoint
+   that still has workers. ci.comfy.org needs to know the `retired` cadence,
+   or it shows the lane as stale a day after its last run.
 4. The model sync already follows the primary, so nothing depends on the
    retired endpoint. From now on always pass `lane=` to **Golden baselines**
    and **Build run index**.
@@ -656,10 +713,8 @@ in order:
    refused, add `"workers_max": 2` to the lane for the create rather than
    scaling cu128 down while it is still the primary on main, and take it out
    again before you commit the `endpoint_id` (step 7 raises the endpoint to
-   3). Only `create` reads `workers_max`, so dropping it changes nothing on
-   the endpoint and a re-create gets 3, whereas dropping it after the merge
-   is one more `lanes.json` change on main, which rebuilds both images and
-   repoints both lanes again.
+   3). `create` and `status` read `workers_max`: dropping it changes nothing
+   on the endpoint, a re-create gets 3, and `status` then expects 3.
 4. Generate goldens from the branch (a fresh endpoint has no stale workers):
    `gh workflow run golden-baseline.yml --ref lanes-cu132 -f lane=py313-torch2.15.0-cu132 -f ref=v0.42.0 -f workflows=all -f bless=false`
    (v0.42.0 is the tag the cu130 goldens use). Inspect
@@ -669,10 +724,15 @@ in order:
    A bless from the branch publishes the branch's registry to
    `index/lanes.json` (cu130 primary, cu128 retired; hence step 1) until
    main's next publish rewrites it; step 9 makes it stick.
-5. Merge. That starts **Build worker images** (rebuilds `cu130-t2141` and
-   `cu132-t2150` from scratch, then repoints both lanes) and **Sync models**
-   (on the cu130 endpoint), and the cron stops testing cu128 from its next
-   tick. Wait for both runs to finish.
+5. Merge. That starts **Build worker images** and **Sync models** (on the
+   cu130 endpoint), and the cron stops testing cu128 from its next tick. Wait
+   for both runs to finish. The build makes the images the merge changed and
+   repoints their lanes (see [Adding a lane](#adding-a-lane), step 2): both
+   `cu130-t2141` and `cu132-t2150` when the merge touches the Dockerfile,
+   `src/`, `docker/` or the pack registry, only an image whose entry is new
+   or changed on main otherwise, and none when the merge only adds a lane or
+   an endpoint id. A lane whose image was not built keeps the tag its
+   endpoint has.
 6. Expect the cron to test master HEAD on cu132 within minutes of the
    merge, before the repoint or before the stale workers are flushed, so on
    the branch's image or a mix of old and new workers. A commit is tested
@@ -693,8 +753,9 @@ in order:
    the run is not cancelled (a cron tick that queues behind a running run
    cancels a pending dispatch; dispatch it again if so). In each lane's
    `runs/master/<sha>/summary.json`, every workflow's `env.image_sha` must
-   equal the merge commit, the sha in the new `-<sha>` image tags; one that
-   does not ran on a stale worker: flush again and re-dispatch. Re-bless
+   equal the merge commit, the sha in the new `-<sha>` image tags (for an
+   image the merge did not build: the sha in the tag its endpoint has); one
+   that does not ran on a stale worker: flush again and re-dispatch. Re-bless
    drifted workflows with `from_run`.
 9. Publish the primary flip: `gh workflow run build-index.yml -f branch=master -f lane=py313-torch2.14.1-cu130`.
 10. The `RUNPOD_ENDPOINT_ID` secret (set 2026-08-18, so the cu128 endpoint) is
@@ -868,7 +929,9 @@ with Actions read on the frontend repo) is optional and reserved for phase 2
 2. **RunPod**: create a Network Volume (≥200 GB, datacenter with 4090
    availability), then one serverless endpoint per lane from its image with
    the volume attached (see *Lanes*). Optionally set `HF_TOKEN` as an endpoint
-   env var for gated models.
+   env var for gated models. The volume's size is `endpoint_defaults.volume_gb`
+   in `manifest/lanes.json`: change it there when the volume grows, because
+   the lint holds the manifest's model files to 90 % of it.
 3. **Repo secrets** (this repo): `RUNPOD_API_KEY`, and optionally `HF_TOKEN`
    (gated models; sent with the sync job) and `PULSE_GH_TOKEN` (PR comments,
    see above). Every lane names its endpoint in `manifest/lanes.json`;

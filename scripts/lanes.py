@@ -18,6 +18,7 @@ requirements. `workflow_runs_on_lane` is the one rule run_regression.py,
 golden_baseline.py and the per-commit plan share.
 
   python scripts/lanes.py images [--only a,b]      JSON list of images to build
+                          [--since REV]            only the images changed after commit REV
   python scripts/lanes.py per-commit [--only a,b]  JSON list of provisioned per-commit lanes
                                                    (each with the workflow ids enabled on it)
   python scripts/lanes.py report [--only a,b]      JSON list of the lanes a report-only run shows:
@@ -29,10 +30,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import subprocess
 import sys
 from pathlib import Path
 
 # Standard library only: the workflows' plan jobs run this before installing anything.
+REPO_ROOT = Path(__file__).resolve().parents[1]
 LANES_FILE = Path(__file__).resolve().parents[1] / "manifest" / "lanes.json"
 MANIFEST_FILE = Path(__file__).resolve().parents[1] / "manifest" / "workflows.json"
 PACKS_FILE = Path(__file__).resolve().parents[1] / "manifest" / "custom_nodes.json"
@@ -50,6 +54,10 @@ CADENCES = ("per-commit", "nightly", "weekly", "retired")
 RETIRED = "retired"
 ROLES = ("primary", "lane", "legacy")
 IMAGE_FIELDS = ("python", "cuda", "torch_index", "torch_spec")
+# What every worker image is built from, as paths in the repository, next to
+# its own IMAGE_FIELDS in the registry. A change under one rebuilds them all.
+IMAGE_SOURCES = ("Dockerfile", "src/", "docker/", "manifest/custom_nodes.json")
+REGISTRY_PATH = "manifest/lanes.json"
 
 
 def is_retired(lane: dict | None) -> bool:
@@ -69,11 +77,56 @@ def _csv(value: str | None) -> set[str] | None:
     return {v.strip() for v in value.split(",") if v.strip()} if value else None
 
 
-def image_matrix(lanes: dict, only: str | None = None) -> list[dict]:
+def _git(repo: Path, *args: str) -> str | None:
+    """What a git command prints in `repo`; None when it fails or there is no git."""
+    try:
+        r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
+                           encoding="utf-8")
+    except OSError:
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def images_since(lanes: dict, rev: str | None, repo: Path | None = None
+                 ) -> tuple[set[str] | None, str]:
+    """(ids of the images the commits after `rev` changed, why). None for the
+    ids means every image.
+
+    Every image is built from IMAGE_SOURCES, so a change to one of those
+    changes them all. A change to the registry alone changes only the images
+    whose row of the build matrix differs from the one `rev` had, which is
+    none when a lane was added or an endpoint id was written. It compares with
+    `rev`, the commit before a push, and not with the parent of HEAD: a push
+    can hold several commits. When `rev` is not known here (all zeros for a
+    new branch, gone after a forced push) every image is built."""
+    repo = repo or REPO_ROOT
+    if not re.fullmatch(r"[0-9a-f]{7,40}", rev or "") or not rev.strip("0"):
+        return None, f"every image is built: no commit to compare with ({rev or 'none'})"
+    names = _git(repo, "diff", "--name-only", "--no-renames", rev, "HEAD")
+    old_text = _git(repo, "show", f"{rev}:{REGISTRY_PATH}")
+    if names is None or old_text is None:
+        return None, (f"every image is built: {rev[:8]} or its {REGISTRY_PATH} is not in "
+                      "this checkout")
+    sources = [n for n in names.splitlines() if n.startswith(IMAGE_SOURCES)]
+    if sources:
+        return None, f"every image is built: {sources[0]} changed since {rev[:8]}"
+    try:
+        before = {row["image"]: row for row in image_matrix(json.loads(old_text))}
+    except (ValueError, AttributeError, TypeError):
+        return None, f"every image is built: {REGISTRY_PATH} of {rev[:8]} could not be read"
+    changed = {row["image"] for row in image_matrix(lanes) if before.get(row["image"]) != row}
+    return changed, (f"images changed since {rev[:8]}: {', '.join(sorted(changed))}" if changed
+                     else f"no image changed since {rev[:8]}: nothing is built")
+
+
+def image_matrix(lanes: dict, only: str | None = None, since: str | None = None,
+                 repo: Path | None = None) -> list[dict]:
     """Images build-image.yml builds: every image not marked `"build": false`
-    (unless asked for by name), never one that only retired lanes run."""
+    (unless asked for by name), never one that only retired lanes run. With
+    `since` (a commit), only the images changed after it (`images_since`)."""
     wanted = _csv(only)
     retired = retired_only_images(lanes)
+    changed = images_since(lanes, since, repo)[0] if since is not None else None
     out = []
     for image_id, image in (lanes.get("images") or {}).items():
         if image_id in retired:
@@ -81,6 +134,8 @@ def image_matrix(lanes: dict, only: str | None = None) -> list[dict]:
         if image.get("build") is False and not (wanted and image_id in wanted):
             continue
         if wanted and image_id not in wanted:
+            continue
+        if changed is not None and image_id not in changed:
             continue
         out.append({"image": image_id, **{k: image.get(k) for k in IMAGE_FIELDS}})
     return out
@@ -255,6 +310,9 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("images")
     p.add_argument("--only", default=None)
+    p.add_argument("--since", default=None,
+                   help="a commit: list only the images changed after it (the commit before "
+                        "a push). Every image when it is not known here")
     p = sub.add_parser("per-commit")
     p.add_argument("--only", default=None)
     p = sub.add_parser("report")
@@ -266,7 +324,9 @@ def main(argv: list[str] | None = None) -> int:
 
     lanes = load_lanes()
     if args.cmd == "images":
-        print(json.dumps(image_matrix(lanes, args.only)))
+        if args.since is not None:
+            print(f"::notice::{images_since(lanes, args.since)[1]}", file=sys.stderr)
+        print(json.dumps(image_matrix(lanes, args.only, args.since)))
     elif args.cmd == "per-commit":
         manifest = load_json(MANIFEST_FILE) if MANIFEST_FILE.exists() else None
         for note in left_out(lanes, args.only):
