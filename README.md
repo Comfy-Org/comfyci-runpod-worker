@@ -48,6 +48,7 @@ pick with `--storage` / `REGRESSION_STORAGE`):
 | `scripts/` | Orchestration run on the (CPU) CI runner: submit/poll, compare, publish, golden generation |
 | `scripts/template_api_export.py`, `scripts/import_template.py` | Turn a workflow template into a corpus entry (see [Adding a workflow](#adding-a-workflow)) |
 | `.github/workflows/regression.yml` | Scheduled poller that tests each new master commit on every per-commit lane and reports the results in the run: one job summary per lane, one for all lanes, and the run's files as an artifact (interim, until the core CI job below) |
+| `.github/workflows/nightly-weekly.yml` | Tests master HEAD once a night and once a week on the lanes of those cadences (see [Nightly and weekly lanes](#nightly-and-weekly-lanes)) |
 | `scripts/run_report.py` | Renders those job summaries from the results branch (see [What a run shows](#what-a-run-shows)) |
 | `action.yml` | Composite action for ComfyUI's `test-ci.yml` (GCS phase) |
 
@@ -115,6 +116,10 @@ this repo per template.
    `"expect": {"width": 1024, "height": 1024, "seconds": 30}`. An unknown
    key, a value that is not a number above 0, or `expect` on a
    reference-level entry stops a run before any GPU job starts.
+
+   `cadence` says how often the workflow runs: on every commit (no key, or
+   `"per-commit"`), `"nightly"` or `"weekly"`. It runs on the lanes of that
+   cadence and on no other (see [Lanes](#lanes)).
 
    For a hand-exported workflow, the entry needs the same shape: `workflow_path`,
    `seed_overrides` (node id → input patch, belt-and-braces for the seed),
@@ -486,7 +491,15 @@ it cannot hold up the commits that wait for the run to end.
 lanes disagree on, each lane's open failures, and the newest 25 commits as a
 table with one column per lane. An open failure is listed only for a workflow
 the lane still runs: one that was renamed, moved or switched off while it was
-red is left out.
+red is left out. A nightly or weekly lane that has an endpoint gets no column:
+it tests one commit in many. It has a row in the table "Nightly and weekly
+lanes" instead, built from its last full run (the newest that has a result for
+every workflow the lane runs today): when it ran, with a link to the run, the
+commits it covered, its result, what did not pass and how many workflows were
+not tested. A last run older than 36 hours on a nightly lane, or 8 days on a
+weekly one, is marked "no run for ...". GitHub can drop a scheduled run
+without a word, and that mark is then the only sign. The open failures of
+those lanes are listed with the others.
 
 **A commit that was already tested.** A cron tick that finds the commit
 tested on a lane tests nothing there. Its summary shows the published result
@@ -634,11 +647,11 @@ variable `PULSE_PR_COMMENTS` to `on`. Setting it to `off` stops it at once.
 A lane is one environment the corpus runs in: a worker image (Python, torch
 build, CUDA channel), the RunPod endpoint running that image, a cadence and a
 storage prefix. `manifest/lanes.json` declares the images once under `images`
-and the lanes under `lanes`; `scripts/lanes.py` derives the build matrix and
-the per-commit matrix from it, and `scripts/lanes.py validate` (run by the
-tests) keeps the file consistent. Goldens are per lane: cu130+ images enable
-comfy-kitchen kernels that cu128 cannot, so a new lane always starts with its
-own baselines.
+and the lanes under `lanes`; `scripts/lanes.py` derives the build matrix, the
+per-commit matrix and the matrix of a nightly or weekly run from it, and
+`scripts/lanes.py validate` (run by the tests) keeps the file consistent.
+Goldens are per lane: cu130+ images enable comfy-kitchen kernels that cu128
+cannot, so a new lane always starts with its own baselines.
 
 Today's lanes:
 
@@ -646,6 +659,8 @@ Today's lanes:
 |---|---|---|---|
 | `py313-torch2.14.1-cu130` | `cu130-t2141` | primary, blocking | per-commit |
 | `py313-torch2.15.0-cu132` | `cu132-t2150` | lane, informational | per-commit (from its first endpoint) |
+| `py313-torch2.14.1-cu130-nightly` | `cu130-t2141` | lane, informational | nightly (from its first endpoint) |
+| `py313-torch2.14.1-cu130-weekly` | `cu130-t2141` | lane, informational | weekly (from its first endpoint) |
 | `py312-torch2.11.0-cu128` | `cu128-t2110` (never rebuilt) | legacy | retired: history only |
 
 - **Role**: exactly one lane is `primary`, the one `primary` names. It is the
@@ -654,20 +669,49 @@ Today's lanes:
   others are `lane`, or `legacy` for a lane whose endpoint is never repointed
   automatically.
 - **Cadence**: `per-commit` lanes with an `endpoint_id` run on every new master
-  commit. `nightly` and `weekly` are accepted but nothing schedules them yet.
-  `retired` means history only: the lane stays out of the per-commit matrix
+  commit (**GPU regression**). `nightly` and `weekly` lanes with an
+  `endpoint_id` run once a night and once a week (**GPU regression (nightly
+  and weekly)**, see [below](#nightly-and-weekly-lanes)).
+  `retired` means history only: the lane stays out of every matrix
   (even with `lane=`), of image builds and repoints, and `run_regression.py`,
   golden generation and `runpod_endpoints.py create/set-image` refuse it.
   Blessing or promoting its goldens still works (storage only).
 - **`blocking`** is informational: it is shown on the dashboard, and nothing
   gates ComfyUI merges on it.
 
-A workflow can restrict itself to lanes with `lanes` in
-`manifest/workflows.json` (a list of lane ids; null, the default, means every
-lane). `run_regression.py`, `golden_baseline.py` and the per-commit plan
-(`lanes.py per-commit` lists each lane's workflows) all honour it, even when
-the workflow is named explicitly, and the dashboard shows a skipped cell as
-not run. Workflows that need custom-node packs must use it (see below).
+**Which lanes run a workflow** is decided by two keys of its entry in
+`manifest/workflows.json`:
+
+- `cadence`: `per-commit` (the default, also when the key is absent),
+  `nightly` or `weekly`. A workflow runs on the lanes of its own cadence and
+  on no other. Moving a workflow to another cadence is that one word, and a
+  change of the primary lane edits no workflow entry.
+- `lanes`: a list of lane ids that narrows it further (null, the default,
+  means every lane of the cadence). Workflows that need custom-node packs
+  must use it (see below).
+
+`run_regression.py`, `golden_baseline.py`, the reports and the plans of both
+workflow files share the one rule (`lanes.why_not_on_lane`). It is a hard
+filter: a workflow that a dispatch names on a lane that does not run it is
+skipped, with a log line that says why ("cadence nightly, the lane is
+per-commit", or "manifest lanes: ..."), and the dashboard shows the cell as
+not run. A report does not list a workflow of another cadence under "not run
+on this lane". On a retired lane only the `lanes` list counts, so its goldens
+of any cadence can still be blessed.
+
+The two keys together can leave a workflow on no lane, and no run would turn
+red for a workflow that never runs. So `validate` fails for an enabled
+workflow that no lane runs (retired lanes do not count): "cadence 'nightly'
+and lanes [...] leave it on no lane". A pack workflow names its lanes, so
+moving one to `nightly` also means naming a nightly lane in its list.
+
+A golden lives under a lane's prefix. A reference-level workflow that changes
+cadence therefore has no golden on its new lane: its first run there ends in
+`no_baseline`, and that run's output is approved without GPU time (**Golden
+baselines** with `from_run`, `lane=<the new lane>` and `bless=true`, see
+[Accepting an intentional change](#accepting-an-intentional-change-re-bless)).
+Its history is split between the two lanes. A smoke-level workflow moves with
+the edit alone.
 
 **Always pass `lane=`** to **Golden baselines** and **Build run index**: left
 empty, they resolve to the lane that owns the bare `regression` prefix
@@ -677,11 +721,98 @@ empty, they resolve to the lane that owns the bare `regression` prefix
 scripts/runpod_endpoints.py status` prints the endpoint of every provisioned
 lane, and each setting that differs from `lanes.json`: the largest number of
 workers (the lane's `workers_max`, else `endpoint_defaults.workers.max`), the
-idle timeout and the disk. A retired lane's endpoint is held to 0 workers and
-nothing else. `--strict` exits 1 when something differs. The command only
-reads. RunPod's documentation says an endpoint without a request for 3 days
-is lowered to 2 workers, and after 7 days to 0, so look before the first run
-of a lane that stood idle.
+idle timeout (`idle_timeout_s`, else `endpoint_defaults.workers.idleTimeout`)
+and the disk (`disk_gb`, else `endpoint_defaults.disk_gb`). A retired lane's
+endpoint is held to 0 workers and nothing else. `--strict` exits 1 when
+something differs. Without another flag the command only reads.
+
+**RunPod lowers the workers of an endpoint nobody uses.** RunPod's
+documentation says an endpoint without a request for 3 days is lowered to 2
+workers, and after 7 days to 0, where it stays until someone raises it. Jobs
+sent to it then only wait in the queue. `status --restore-workers` raises the
+largest number of workers to the manifest's when it is lower, with one PATCH.
+It never lowers one and never touches a retired lane's endpoint. If the
+account's worker quota refuses the raise, the command ends with RunPod's
+message. The nightly and weekly workflow runs it before each test run. On a
+per-commit lane that stood idle (a new lane before its first run), run it by
+hand with `--lane <lane id>`.
+
+### Nightly and weekly lanes
+
+Workflows that are too slow or too many for every commit run once a night or
+once a week. **GPU regression (nightly and weekly)**
+(`.github/workflows/nightly-weekly.yml`) tests ComfyUI master HEAD:
+
+| Cadence | Cron (UTC) | Lanes |
+|---|---|---|
+| nightly | `17 1 * * *`, every day at 01:17 | every `nightly` lane that has an `endpoint_id` and an enabled nightly workflow |
+| weekly | `17 3 * * 0`, Sunday at 03:17 | the same for `weekly` |
+
+`python scripts/lanes.py cadence nightly` prints the plan. With no such lane
+the plan is `[]`, it says why each lane of the cadence is left out, and the
+run ends after its plan job. So a lane can be declared before its endpoint
+exists, which is the state of both lanes today: no workflow has either
+cadence yet, and neither lane has an endpoint.
+
+- **One lane per cadence.** Everything the suite stores about a commit on a
+  lane assumes that one run wrote it: the summary, the start marker, the
+  previous-run pointer, the goldens. So a cadence is a lane with its own
+  prefix, never a second run inside a per-commit lane. The label names the
+  cadence, because the dashboard prints only a lane's label.
+- **Its own workflow file and group.** The runs have their own name in the
+  Actions list ("GPU regression · nightly"), and wait in the concurrency
+  group `gpu-nightly-weekly`. A per-commit tick is in another group and never
+  replaces one. One group for both cadences, so the two never run at once.
+  `queue: max` lets several runs wait in line. If GitHub ever rejects the
+  file for that line, delete the line and do not dispatch while a run waits.
+- **Its own endpoint, shared by the two lanes.** Both lanes name
+  `"endpoint_name": "comfyci-cu130-nightly-weekly"`, so a nightly or weekly
+  run never takes a worker from a per-commit run. Lanes that share an
+  endpoint (the same `endpoint_name` or the same `endpoint_id`) must say the
+  same `image`, `endpoint_name`, `workers_max`, `disk_gb`, `idle_timeout_s`
+  and `env`, and one name cannot stand for two ids: `validate` checks it.
+  `runpod_endpoints.py set-image` sends such an endpoint one PATCH, and
+  `create` refuses to make it twice.
+- **Each lane job** runs the steps of the per-commit lane job (a test holds
+  the two files to the same text), with one more before the suite: `status
+  --lane <lane> --restore-workers`. There is no "All lanes" job and no PR
+  comment. The "All lanes" summary of every per-commit run shows where these
+  lanes stand (see [What a run shows](#what-a-run-shows)).
+- **A commit is tested once per lane**, by the rule of the per-commit lanes
+  (see [Verdicts](#verdicts)). A night without a new commit tests nothing and
+  shows the published result.
+- **Who is told.** GitHub mails a failed scheduled run to one person: whoever
+  last changed the `cron` lines of the workflow file.
+
+To start a run by hand:
+
+```
+gh workflow run nightly-weekly.yml --repo Comfy-Org/comfyci-runpod-worker \
+    -f cadence=nightly [-f commit=<sha>] [-f workflows=<ids>] [-f lane=<lane id>] \
+    [-f publish=false]
+```
+
+`workflows` and `publish` work as on **GPU regression**: a run that names its
+workflows is a re-test or a first look, and with `publish` off nothing is
+written. To show a published result of one of these lanes again without
+testing, dispatch **GPU regression** with `report_only: true` and
+`lane=<the lane>`: it lists every lane of the registry.
+
+The keys a lane may add. Every one is optional, and `validate` checks its
+type:
+
+| Key | Read by | Meaning |
+|---|---|---|
+| `endpoint_name` | `runpod_endpoints.py create`, `validate` | the endpoint's name on RunPod (default `comfyci-<image>`). Lanes with the same name share one endpoint |
+| `workers_max` | `runpod_endpoints.py create`, `status` | the endpoint's largest number of workers (default `endpoint_defaults.workers.max`, 3) |
+| `disk_gb` | `runpod_endpoints.py create`, `status` | container disk of the endpoint's workers (default `endpoint_defaults.disk_gb`, 40) |
+| `idle_timeout_s` | `runpod_endpoints.py create`, `status` | how long a worker stays up after a job (default `endpoint_defaults.workers.idleTimeout`, 20) |
+| `env` | `runpod_endpoints.py create` | environment variables of the endpoint, on top of `endpoint_defaults.env` |
+| `timeout_minutes` | `lanes.py cadence`, `nightly-weekly.yml` | the time limit of the lane's job (default 360, GitHub's own) |
+| `max_in_flight` | nothing yet | how many jobs a run may have on the endpoint at once. A run submits all its jobs at once today |
+| `model_storage` | the manifest lint | `"job"`: the lane's models are not on the network volume, so they do not count against its size. Nothing fetches models for a job yet, so such a lane cannot run. Default `"volume"` |
+
+None of them is published: the run index copies a fixed list of lane keys.
 
 ### Adding a lane
 
@@ -737,7 +868,10 @@ The cu132 lane is the worked example.
 
    The request comes from `endpoint_defaults` in `lanes.json` (pool, workers,
    volume, data center, registry credential, timeouts) plus the lane's CUDA
-   floor; `--dry-run` prints it, `--write` records the new id as the lane's
+   floor and the endpoint keys the lane names (`endpoint_name`,
+   `workers_max`, `disk_gb`, `idle_timeout_s`, `env`, see
+   [Nightly and weekly lanes](#nightly-and-weekly-lanes)); `--dry-run` prints
+   it, `--write` records the new id as the lane's
    `endpoint_id`. Commit that. The account has a 10-worker quota across all
    endpoints; if the create is refused, give the lane `"workers_max": 2`.
    From then on `build-image.yml` repoints the lane at each new sha tag
@@ -756,6 +890,41 @@ The cu132 lane is the worked example.
    `endpoint_id` is skipped), and ci.comfy.org lists it in the lane selector
    after the first publish.
 
+**A nightly or weekly lane** takes the same steps, with these differences:
+
+1. It runs an image that exists, so there is nothing to build: add only the
+   lane, with `"cadence": "nightly"` or `"weekly"`, the cadence as the first
+   word of its `label`, and its own `prefix`. The merge builds and repoints
+   nothing.
+2. Give it an endpoint of its own, not a per-commit lane's: name it with
+   `endpoint_name`, and put the endpoint's settings on the lane
+   (`workers_max`, `disk_gb`, `idle_timeout_s`, `env`) and the job's
+   `timeout_minutes`. Two lanes that share the endpoint carry the same
+   `endpoint_name` and the same settings.
+3. Create the endpoint once, for one of the lanes, from the tag the primary
+   lane's endpoint runs (`status` prints it). Look at the request first:
+
+   ```
+   python scripts/runpod_endpoints.py create --lane <lane id> \
+       --tag <image>-<sha> --dry-run
+   RUNPOD_API_KEY=... python scripts/runpod_endpoints.py create \
+       --lane <lane id> --tag <image>-<sha> --write
+   ```
+
+   A lane that shares the endpoint gets the same `endpoint_id` by hand.
+   Every variable in `env` that reads a RunPod secret needs that secret to
+   exist first. Count the workers before: the account's quota of 10 is over
+   all its endpoints, each of today's endpoints takes 3, and a retired
+   endpoint counts until it is at 0. If the create is refused, give the
+   lanes of the endpoint `"workers_max": 2`. Create it on the day the first
+   workflow of the cadence merges: RunPod lowers the workers of an endpoint
+   nobody uses, and until a first run nobody restores them.
+4. A reference-level workflow needs its golden on the lane (see
+   [Lanes](#lanes)). A smoke-level one needs nothing.
+5. Its cron picks the lane up from the first night or Sunday on which it has
+   an endpoint and an enabled workflow of its cadence. Until then
+   `python scripts/lanes.py cadence <cadence>` prints `[]` and says why.
+
 ### Changing the primary lane
 
 1. In `lanes.json`, set `primary` to the new lane, give it `role: primary`
@@ -771,6 +940,19 @@ The cu132 lane is the worked example.
 3. The run index (`index/lanes.json`) picks the new primary up at the next
    publish. To publish it at once, dispatch **Build run index** with
    `branch=master` and `lane=<new primary>` (CPU only).
+4. The nightly and weekly lanes follow the primary lane's image, and a lane
+   is tied to its image by its id and its prefix. So they are replaced, not
+   edited: add a `<new lane>-nightly` and a `<new lane>-weekly` lane on the
+   new image, with the endpoint keys and the `endpoint_id` of the old pair,
+   and retire the old pair (below) with `"endpoint_id": null`: the endpoint
+   is the new pair's now, and `status` holds the endpoint of a retired lane
+   to 0 workers. Point the endpoint at the new image (`runpod_endpoints.py
+   set-image --lane <new nightly lane> --tag <image>-<sha>`, one PATCH for
+   both lanes) and raise its CUDA floor in the RunPod console to the new
+   lanes' `min_cuda_driver`. No workflow
+   entry changes, except a `lanes` list that names the old nightly or weekly
+   lane. Smoke-level workflows need nothing else. Reference-level ones need
+   their goldens approved on the new lanes (see [Lanes](#lanes)).
 
 ### Retiring a lane
 

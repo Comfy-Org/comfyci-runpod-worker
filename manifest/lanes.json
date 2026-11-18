@@ -97,6 +97,55 @@
       "image": "cu132-t2150",
       "endpoint_id": null,
       "min_cuda_driver": "13.2"
+    },
+    "py313-torch2.14.1-cu130-nightly": {
+      "label": "nightly · py3.13 / torch 2.14.1 / cu130 / RTX 4090",
+      "python": "3.13",
+      "torch": "2.14.1",
+      "cuda": "13.0",
+      "gpu": "RTX 4090",
+      "cadence": "nightly",
+      "blocking": false,
+      "role": "lane",
+      "layout": 2,
+      "prefix": "regression/lanes/py313-torch2.14.1-cu130-nightly",
+      "image": "cu130-t2141",
+      "endpoint_id": null,
+      "min_cuda_driver": "13.0",
+      "endpoint_name": "comfyci-cu130-nightly-weekly",
+      "workers_max": 3,
+      "disk_gb": 120,
+      "idle_timeout_s": 60,
+      "env": {
+        "HF_TOKEN": "{{ RUNPOD_SECRET_hf_token }}"
+      },
+      "max_in_flight": 2,
+      "timeout_minutes": 120
+    },
+    "py313-torch2.14.1-cu130-weekly": {
+      "label": "weekly · py3.13 / torch 2.14.1 / cu130 / RTX 4090",
+      "python": "3.13",
+      "torch": "2.14.1",
+      "cuda": "13.0",
+      "gpu": "RTX 4090",
+      "cadence": "weekly",
+      "blocking": false,
+      "role": "lane",
+      "layout": 2,
+      "prefix": "regression/lanes/py313-torch2.14.1-cu130-weekly",
+      "image": "cu130-t2141",
+      "endpoint_id": null,
+      "min_cuda_driver": "13.0",
+      "endpoint_name": "comfyci-cu130-nightly-weekly",
+      "workers_max": 3,
+      "disk_gb": 120,
+      "idle_timeout_s": 60,
+      "env": {
+        "HF_TOKEN": "{{ RUNPOD_SECRET_hf_token }}"
+      },
+      "max_in_flight": 2,
+      "timeout_minutes": 350,
+      "model_storage": "job"
     }
   }
 }

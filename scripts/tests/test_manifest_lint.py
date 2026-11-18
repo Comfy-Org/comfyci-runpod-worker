@@ -206,12 +206,15 @@ def _literal_dynamic_inputs(wf: dict) -> list[str]:
 def _volume_files(manifest: dict, lanes: dict) -> dict[str, int]:
     """directory/name -> bytes of every file the volume has to hold: the models
     and input files of every workflow, enabled or not (the sync fetches both),
-    that runs on a lane whose models are on the volume. Each file counts once."""
+    that runs on a lane whose models are on the volume. Each file counts once.
+    A workflow runs on the lanes of its own cadence, so one that only the
+    weekly lane runs, whose models each job fetches, takes no room here."""
     files: dict[str, int] = {}
     for lane_id, lane in lanes["lanes"].items():
         if lanes_mod.is_retired(lane) or lane.get("model_storage") == "job":
             continue
-        for wf_id in lanes_mod.workflows_for_lane(manifest, lane_id, enabled_only=False):
+        for wf_id in lanes_mod.workflows_for_lane(manifest, lane_id, enabled_only=False,
+                                                  lane=lane):
             for m in manifest["workflows"][wf_id]["models"]:
                 files[f"{m['directory']}/{m['name']}"] = m["bytes"]
     return files
@@ -425,19 +428,28 @@ def test_the_volume_rule_counts_each_file_once_and_stops_at_90_percent():
 
     lanes = {"endpoint_defaults": {"volume_gb": 10}, "lanes": {
         "volume": {"cadence": "per-commit"}, "old": {"cadence": "retired"},
+        "night": {"cadence": "nightly"},
         "fetch": {"cadence": "weekly", "model_storage": "job"}}}
     manifest = {"workflows": {
-        "a": {"enabled": True, "models": [model("shared", 4 * 10**9), model("a", 3 * 10**9)]},
+        "a": {"enabled": True, "models": [model("shared", 4 * 10**9), model("a", 2 * 10**9)]},
         "b": {"enabled": False, "models": [model("shared", 4 * 10**9), model("b", 2 * 10**9)]},
+        # A nightly workflow: the nightly lane keeps its models on the volume too.
+        "n": {"enabled": True, "cadence": "nightly", "models": [model("n", 10**9)]},
         # Fetched by each job, or only on a lane that runs nothing: not on the volume.
-        "c": {"enabled": True, "lanes": ["fetch"], "models": [model("c", 50 * 10**9)]},
-        "d": {"enabled": True, "lanes": ["old"], "models": [model("d", 50 * 10**9)]}}}
-    assert _volume_files(manifest, lanes) == {"vae/shared": 4 * 10**9, "vae/a": 3 * 10**9,
-                                              "vae/b": 2 * 10**9}
+        "c": {"enabled": True, "cadence": "weekly", "lanes": ["fetch"],
+              "models": [model("c", 50 * 10**9)]},
+        "d": {"enabled": True, "lanes": ["old"], "models": [model("d", 50 * 10**9)]},
+        # A weekly workflow names no lane: its cadence alone keeps it off the volume.
+        "w": {"enabled": True, "cadence": "weekly", "models": [model("w", 50 * 10**9)]}}}
+    assert _volume_files(manifest, lanes) == {"vae/shared": 4 * 10**9, "vae/a": 2 * 10**9,
+                                              "vae/b": 2 * 10**9, "vae/n": 10**9}
     assert _volume_problems(manifest, lanes) == []  # 9.0 of 10 GB: at the limit
+    # The weekly lane with its models on the volume: its workflows count.
+    on_volume = {**lanes, "lanes": {**lanes["lanes"], "fetch": {"cadence": "weekly"}}}
+    assert _volume_files(manifest, on_volume)["vae/w"] == 50 * 10**9
     manifest["workflows"]["b"]["models"][1]["bytes"] += 1
     assert _volume_problems(manifest, lanes) == [
-        "the model files need 9.0 GB, and the 10 GB volume may hold 9.0 GB (90 %): 3 files, "
+        "the model files need 9.0 GB, and the 10 GB volume may hold 9.0 GB (90 %): 4 files, "
         "the largest is vae/shared with 4.0 GB"]
     for size in (None, 0, -5, "200", 200.0, True):
         said = _volume_problems(manifest, {**lanes, "endpoint_defaults": {"volume_gb": size}})

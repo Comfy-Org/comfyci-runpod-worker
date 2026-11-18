@@ -1,10 +1,12 @@
 """regression_skip: when the cron tests a commit on a lane, and when it leaves it alone."""
 import json
 import re
+import textwrap
 from pathlib import Path
 
 import pytest
 
+import lanes as lanes_mod
 import regression_skip
 from conftest import workflow_steps
 
@@ -302,3 +304,192 @@ def test_the_commit_is_resolved_once_to_a_full_sha():
     assert "commit: ${{ steps.commit.outputs.commit }}" in text
     # No lane job reads the raw input as the commit to test or report.
     assert "COMMIT: ${{ inputs.commit }}" not in text.replace("INPUT_COMMIT: ", "")
+
+
+# -- the nightly and weekly workflow -----------------------------------------------------
+PER_COMMIT_FILE = ".github/workflows/regression.yml"
+LONG_FILE = ".github/workflows/nightly-weekly.yml"
+
+
+def block(step: str, key: str) -> str:
+    """What a step says under `key` (`run`, `env`, `with`): the rest of its
+    line, or the indented lines below it, without their indentation."""
+    lines = step.split("\n")
+    at = next(i for i, line in enumerate(lines) if re.fullmatch(rf" +{key}:( .*)?", line))
+    indent, value = re.fullmatch(rf"( +){key}:(?: (.*))?", lines[at]).groups()
+    if value not in (None, "|"):
+        return value
+    body = []
+    for line in lines[at + 1:]:
+        if line.strip() and len(line) - len(line.lstrip()) <= len(indent):
+            break
+        body.append(line)
+    return textwrap.dedent("\n".join(body)).strip("\n")
+
+
+def settings(step: str, key: str) -> str:
+    """`block` without the comment lines: what the step sets, not why."""
+    return "\n".join(line for line in block(step, key).split("\n")
+                     if not line.lstrip().startswith("#"))
+
+
+def lane_job_steps(path: str) -> list[tuple[str, str]]:
+    """The named steps of the job that tests a lane, in order."""
+    steps = workflow_steps(path)
+    names = [name for name, _ in steps]
+    first = names.index("Skip if already tested on this lane")
+    return steps[first:names.index("Report", first) + 1]
+
+
+def test_the_nightly_and_the_weekly_cron_are_told_apart_by_their_strings():
+    """A cron run has no inputs: the plan knows the cadence only from the cron
+    string that started the run, and the run's name in the Actions list from
+    the same string. Three places, one test."""
+    text = (ROOT / LONG_FILE).read_text(encoding="utf-8")
+    crons = re.findall(r"^    - cron: '([^']+)'$", text, flags=re.M)
+    assert crons == ["17 1 * * *", "17 3 * * 0"]
+    plan = dict(workflow_steps(LONG_FILE))["plan"]
+    assert block(plan, "env").split("\n") == [
+        "CADENCE: ${{ inputs.cadence }}", "LANE: ${{ inputs.lane }}",
+        "EVENT_SCHEDULE: ${{ github.event.schedule }}",
+        f"NIGHTLY_CRON: '{crons[0]}'", f"WEEKLY_CRON: '{crons[1]}'"]
+    script = block(plan, "run")
+    nightly = 'if [ "$EVENT_SCHEDULE" = "$NIGHTLY_CRON" ]; then CADENCE=nightly; fi\n'
+    weekly = 'if [ "$EVENT_SCHEDULE" = "$WEEKLY_CRON" ]; then CADENCE=weekly; fi\n'
+    matrix = 'matrix=$(python lanes.py cadence "${CADENCE:-nightly}" "${only[@]}")\n'
+    assert script.index(nightly) < script.index(weekly) < script.index(matrix)
+    # A cron string the plan does not know must not run as a nightly run by default.
+    unknown = re.search(r'\nif \[ -n "\$EVENT_SCHEDULE" \] && \[ -z "\$CADENCE" \]; then\n'
+                        r'  echo "::error::.+"\n  exit 1\nfi\n', script)
+    assert unknown and script.index(weekly) < unknown.start() < script.index(matrix)
+    assert 'if [ -n "$LANE" ]; then only=(--only "$LANE"); fi\n' in script
+    assert script.endswith('echo "matrix=$matrix" >> "$GITHUB_OUTPUT"\n'
+                           'echo "$matrix" | python -m json.tool')
+    name = re.search(r"^run-name: (.+)$", text, flags=re.M).group(1)
+    assert name == ("GPU regression · ${{ inputs.cadence || (github.event.schedule == "
+                    f"'{crons[1]}' && 'weekly' || 'nightly') }}}}")
+    # A dispatch says the cadence itself, and may only say one that has a matrix.
+    assert re.search(r"\n      cadence:\n        description: .+\n        type: choice\n"
+                     r"        options: \[nightly, weekly\]\n        default: nightly\n", text)
+    assert lanes_mod.LONG_CADENCES == ("nightly", "weekly")
+    # Neither is the per-commit cron, which stays where it is.
+    per_commit = (ROOT / PER_COMMIT_FILE).read_text(encoding="utf-8")
+    assert re.findall(r"^    - cron: '([^']+)'$", per_commit, flags=re.M) == ["*/5 * * * *"]
+    assert "lanes.py cadence" not in per_commit and "lanes.py per-commit" not in text
+    # The README tells people the same two times.
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert f"| nightly | `{crons[0]}`, every day at 01:17 |" in readme
+    assert f"| weekly | `{crons[1]}`, Sunday at 03:17 |" in readme
+
+
+def test_nightly_and_weekly_runs_wait_in_a_group_of_their_own():
+    """No per-commit tick replaces a waiting nightly or weekly run, the two
+    cadences never run at once (they share one endpoint), and the run's page
+    has its own name."""
+    text = (ROOT / LONG_FILE).read_text(encoding="utf-8")
+    assert "\nname: GPU regression (nightly and weekly)\n" in text
+    assert ("\nconcurrency:\n  group: gpu-nightly-weekly\n  cancel-in-progress: false\n"
+            "  queue: max\n") in text
+    per_commit = (ROOT / PER_COMMIT_FILE).read_text(encoding="utf-8")
+    assert "gpu-nightly-weekly" not in per_commit and "\nname: GPU regression\n" in per_commit
+    assert "\npermissions:\n  contents: write\n" in text
+    # The lane job: one per row of the plan, none for an empty plan, and each
+    # with its lane's own time limit, which the plan's rows carry.
+    assert ("  regression:\n    needs: lanes\n    if: needs.lanes.outputs.matrix != '[]'\n"
+            "    runs-on: ubuntu-latest\n") in text
+    assert "\n    timeout-minutes: ${{ matrix.timeout_minutes }}\n" in text
+    assert "        include: ${{ fromJson(needs.lanes.outputs.matrix) }}\n" in text
+    assert "    name: ${{ matrix.lane }} · ${{ needs.lanes.outputs.short }}\n" in text
+    row = lanes_mod.cadence_matrix({"lanes": {"n": {"cadence": "nightly", "endpoint_id": "e"}}},
+                                   "nightly")[0]
+    for key in re.findall(r"\$\{\{ matrix\.(\w+) \}\}", text):
+        assert key in row, key
+    # No "All lanes" job and no PR comment: the per-commit pages carry both.
+    assert re.findall(r"^  (\w+):$", text, flags=re.M) == ["schedule", "workflow_dispatch",
+                                                           "lanes", "regression"]
+    assert "notify_pr" not in text and "overview" not in text
+    # Nor a report-only run: "GPU regression" shows any lane's published result.
+    assert "inputs.report_only" not in text and "report_only:" not in text
+    for name in ("commit", "workflows", "lane"):
+        assert f"\n      {name}:\n        description: " in text
+    assert re.search(r"\n      publish:\n        description: .+\n        type: boolean\n"
+                     r"        default: true\n", text)
+    # A lane report prints a command that dispatches this file to test one commit
+    # of a range: the file's name and the inputs the command sets must exist.
+    report = (ROOT / "scripts" / "run_report.py").read_text(encoding="utf-8")
+    at = report.index(f"gh workflow run {LONG_FILE.rsplit('/', 1)[1]} --repo ")
+    flags = re.findall(r"-f (\w+)=", report[at:at + 200])
+    assert flags == ["cadence", "commit", "workflows"]
+    for flag in flags:
+        assert f"\n      {flag}:\n        description: " in text, flag
+    # An edit of either workflow file alone runs these tests.
+    tests = (ROOT / ".github" / "workflows" / "scripts-tests.yml").read_text(encoding="utf-8")
+    for path in (PER_COMMIT_FILE, LONG_FILE):
+        assert tests.count(f"'{path}'") == 2, path
+
+
+def test_the_lane_job_of_the_nightly_and_weekly_workflow_is_that_of_the_per_commit_one():
+    """The steps are copied, not shared through a reusable workflow (that
+    would change the job names on every run page). Copies drift apart: this
+    holds the two files to the same text."""
+    ours, theirs = lane_job_steps(LONG_FILE), lane_job_steps(PER_COMMIT_FILE)
+    assert [name for name, _ in theirs] == [
+        "Skip if already tested on this lane", "Install the suite's packages",
+        "Run regression suite", "Attach the run's files", "Report"]
+    # One step more, before the suite and after the packages it needs.
+    assert [name for name, _ in ours] == [
+        "Skip if already tested on this lane", "Install the suite's packages",
+        "Restore the endpoint's workers", "Run regression suite", "Attach the run's files",
+        "Report"]
+    ours, theirs = dict(ours), dict(theirs)
+    for name in ("Skip if already tested on this lane", "Install the suite's packages", "Report"):
+        assert block(ours[name], "run") == block(theirs[name], "run"), name
+    for name in ("Install the suite's packages", "Report", "Attach the run's files"):
+        for key in ("if", "env", "with", "id", "uses", "continue-on-error", "timeout-minutes"):
+            if re.search(rf"\n +{key}:", theirs[name]):
+                assert block(ours[name], key) == block(theirs[name], key), (name, key)
+            else:
+                assert not re.search(rf"\n +{key}:", ours[name]), (name, key)
+    plan = dict(workflow_steps(LONG_FILE)), dict(workflow_steps(PER_COMMIT_FILE))
+    for key in ("run", "env", "id"):
+        assert block(plan[0]["Resolve target commit"], key) == block(
+            plan[1]["Resolve target commit"], key), key
+    # The skip step: the same but for report-only runs, which this file does not have.
+    skip = "Skip if already tested on this lane"
+    assert settings(ours[skip], "env") == settings(theirs[skip], "env").replace(
+        REPORT_ONLY, "REPORT_ONLY: 'false'")
+    assert "id: target" in ours[skip]
+    # The suite: the script becomes the step's own process, so it is the one that
+    # gets the signals GitHub sends when a run is stopped. Nothing may follow it.
+    suite, base = block(ours["Run regression suite"], "run"), block(
+        theirs["Run regression suite"], "run")
+    command = 'python scripts/run_regression.py "${args[@]}"'
+    assert suite == base.replace(command, "exec " + command) != base
+    assert suite.endswith("\nexec " + command)
+    # The lane names its endpoint: no secret names one for it.
+    assert settings(ours["Run regression suite"], "env") == "\n".join(
+        line for line in settings(theirs["Run regression suite"], "env").split("\n")
+        if "RUNPOD_ENDPOINT_ID" not in line)
+    assert "RUNPOD_ENDPOINT_ID" not in (ROOT / LONG_FILE).read_text(encoding="utf-8")
+
+
+def test_the_workers_of_the_endpoint_are_restored_before_a_nightly_or_weekly_run():
+    """RunPod sets an endpoint without requests to fewer workers, to none in
+    the end. A week without a run would leave every job of the next run
+    waiting in the queue."""
+    steps = dict(lane_job_steps(LONG_FILE))
+    restore = steps["Restore the endpoint's workers"]
+    assert block(restore, "run") == (
+        'python scripts/runpod_endpoints.py status --lane "$LANE" --restore-workers')
+    assert block(restore, "env") == ("RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}\n"
+                                     "LANE: ${{ matrix.lane }}")
+    # Only a run that tests touches the endpoint or needs the key.
+    tests = "steps.target.outputs.skip != 'true'"
+    for name in ("Install the suite's packages", "Restore the endpoint's workers",
+                 "Run regression suite"):
+        assert block(steps[name], "if") == tests, name
+    assert block(steps["Attach the run's files"], "if") == "always() && " + tests
+    assert sorted(name for name, step in steps.items() if "RUNPOD_API_KEY" in step) == [
+        "Restore the endpoint's workers", "Run regression suite"]
+    # It is not a step that may fail quietly: a refused raise stops the run.
+    assert "continue-on-error" not in restore

@@ -3863,3 +3863,231 @@ def test_the_nightly_and_weekly_table_shows_each_lanes_last_full_run():
     odd = {**full, "t": "soon", "prev": EVIL, "range": "x", "run": None}
     row = run_report.long_lanes_block([_night_column([odd])], runs, now=night)[4]
     assert f"| time not recorded | [`e9afbcc`]({COMFY}/commit/{LAST}) | ❌ 1 of 3 failed |" in row
+
+
+# -- cadences: the nightly and weekly lanes in the reports -----------------------------------
+WEEKLY = "py313-torch2.14.1-cu130-weekly"
+# A nightly lane that runs, and a weekly lane that is declared before its endpoint exists.
+LONG_LANES = {"primary": LANE, "lanes": {**NIGHT_LANES["lanes"], WEEKLY: {
+    "label": "weekly · py3.13 / torch 2.14.1 / cu130 / RTX 4090", "cadence": "weekly",
+    "blocking": False, "role": "lane", "layout": 2, "prefix": f"regression/lanes/{WEEKLY}",
+    "endpoint_id": None}}}
+CADENCES = {"workflows": {
+    "flux_dev_t2i": {"enabled": True},
+    "sdxl_t2i": {"enabled": True, "lanes": [LANE, OTHER]},
+    MUSIC: {"enabled": True, "level": "smoke", "cadence": "nightly"},
+    MESH: {"enabled": True, "level": "smoke", "cadence": "nightly", "lanes": [NIGHTLY]},
+    CLIP: {"enabled": True, "level": "smoke", "cadence": "weekly"},
+    "off_wf": {"enabled": False, "cadence": "nightly"}}}
+NIGHT_TS = 1794702636  # 2026-11-15 00:30 UTC
+
+
+def test_a_lane_column_knows_a_nightly_or_weekly_lane_that_can_run():
+    def column(lane):
+        return run_report.LaneColumn(lane_id="x", lane=lane, summary=None, head={}, entries=[],
+                                     references={})
+
+    for cadence in ("nightly", "weekly"):
+        lane = column({"cadence": cadence, "endpoint_id": "ep"})
+        assert lane.long_cadence and not lane.active and not lane.retired
+    # Without an endpoint nothing runs on it yet. The other cadences are not long ones.
+    for lane in ({"cadence": "nightly", "endpoint_id": None}, {"cadence": "weekly"},
+                 {"cadence": "per-commit", "endpoint_id": "ep"},
+                 {"cadence": "retired", "endpoint_id": "ep"}, {}):
+        assert not column(lane).long_cadence, lane
+    assert column({"cadence": "per-commit", "endpoint_id": "ep"}).active
+
+
+def test_the_workflows_a_lane_runs_today_follow_its_cadence():
+    lanes = LONG_LANES["lanes"]
+    today = run_report.lane_workflows
+    assert today(CADENCES, LANE, lanes[LANE]) == {"flux_dev_t2i", "sdxl_t2i"}
+    assert today(CADENCES, OTHER, lanes[OTHER]) == {"flux_dev_t2i", "sdxl_t2i"}
+    assert today(CADENCES, NIGHTLY, lanes[NIGHTLY]) == {MUSIC, MESH}
+    assert today(CADENCES, WEEKLY, lanes[WEEKLY]) == {CLIP}
+    # A retired lane, and a call without the lane's entry: the `lanes` list alone.
+    assert today(CADENCES, LEGACY, lanes[LEGACY]) == {"flux_dev_t2i", MUSIC, CLIP}
+    assert today(CADENCES, LANE) == {"flux_dev_t2i", "sdxl_t2i", MUSIC, CLIP}
+    # A report is a courtesy: a cadence nobody knows raises nothing and leaves nothing out.
+    odd = {"workflows": {"a": {"enabled": True, "cadence": "daily"},
+                         "b": {"enabled": True, "cadence": ["nightly"]}, "c": "junk"}}
+    assert today(odd, LANE, lanes[LANE]) == {"a", "b"}
+    assert today(odd, NIGHTLY, lanes[NIGHTLY]) == {"a", "b"}
+    for unknown in (None, "junk", {}, {"cadence": "hourly"}, {"cadence": ["nightly"]},
+                    {"cadence": "retired"}):
+        assert not run_report.other_cadence({"cadence": "nightly"}, unknown), unknown
+        assert today(CADENCES, LANE, unknown) == today(CADENCES, LANE)
+    assert run_report.other_cadence({"cadence": "nightly"}, lanes[LANE])
+    assert run_report.other_cadence({}, lanes[NIGHTLY])
+
+
+def test_a_workflow_of_another_cadence_is_not_listed_as_not_run():
+    """The nightly and weekly workflows are not missing from a per-commit
+    lane: they belong to other lanes. The same the other way round."""
+    not_run = "Workflows not run on this lane"
+    summary = _summary([_cell("flux_dev_t2i")])
+    for extra, kw in (({}, {"manifest": CADENCES}),
+                      ({f"{P}/manifest-snapshot/{SHA}.json": CADENCES}, {})):
+        out = _report(_tree(summary, extra=extra), **kw)
+        listed = [line for line in _section(out, not_run)[2:] if line]
+        assert len(listed) == 1 and listed[0].endswith(": `sdxl_t2i`")
+        for wf in (MUSIC, MESH, CLIP, "off_wf"):
+            assert wf not in out, wf
+    # Everything of the lane's cadence ran: no section, whatever the other lanes run.
+    full = _summary([_cell("flux_dev_t2i"), _cell("sdxl_t2i")])
+    assert not_run not in _report(_tree(full), manifest=CADENCES)
+    # The nightly lane: a nightly workflow without a result is missing, a per-commit
+    # or weekly one is not.
+    files = _smoke_files([_smoke_cell(MUSIC, [_flac()], output_kind="audio")], lane=NIGHTLY,
+                         commit=HEAD)
+    out = _smoke_report(files, lane=NIGHTLY, commit=HEAD, manifest=CADENCES)
+    listed = [line for line in _section(out, not_run)[2:] if line]
+    assert len(listed) == 1 and listed[0].endswith(f": `{MESH}`")
+    for wf in ("flux_dev_t2i", "sdxl_t2i", CLIP):
+        assert wf not in out, wf
+    # A retired lane ran what the manifest's list allowed, whatever the cadence.
+    out = _report(_tree(_summary([_cell("flux_dev_t2i")], lane=LEGACY), lane=LEGACY),
+                  lane=LEGACY, manifest=CADENCES)
+    listed = [line for line in _section(out, not_run)[2:] if line]
+    assert [line.rsplit(": ", 1)[1] for line in listed] == [
+        "`sdxl_t2i`", f"`{MESH}`", f"`{MUSIC}`, `{CLIP}`"]
+
+
+def _long_overview_files():
+    """The per-commit lanes of `_overview_files`, and a nightly lane whose
+    last run covered the 7 commits up to HEAD and found the audio silent."""
+    files = _overview_files()
+    run = {**_entry(HEAD, NIGHT_TS, {MUSIC: {"v": "fail", "l": "smoke"},
+                                     MESH: {"v": "pass", "l": "smoke"}}, run=4100, n=7),
+           "prev": LAST}
+    files[f"regression/index/master/{NIGHTLY}.json"] = _head([run], {
+        MUSIC: {"commit": HEAD, "run_ts": NIGHT_TS, "kind": "fail", "prev_good": LAST,
+                "runs": 1, "level": "smoke", "range": {"n": 7, "url": "u"}},
+        # Left from the time the lane ran it: it is a weekly workflow now.
+        CLIP: {"commit": HEAD, "run_ts": NIGHT_TS, "kind": "fail", "prev_good": LAST,
+               "runs": 1, "level": "smoke"}})
+    return files
+
+
+def test_the_overview_shows_where_the_nightly_and_weekly_lanes_stand():
+    """Every per-commit run page says where the nightly and weekly runs stand
+    and links to them. Those lanes get a table of their own, not a column: a
+    column would read "not run" on nearly every row."""
+    reader = run_report.DictReader(_long_overview_files(), RESULTS)
+    out = run_report.overview_report(reader, LONG_LANES, SHA, "master", manifest=CADENCES,
+                                     now=NIGHT_TS + 3600)
+    lines = out.split("\n")
+    assert [line for line in lines if line.startswith("### ")] == [
+        "### This commit on every lane", "### Lanes that disagree at this commit",
+        "### Nightly and weekly lanes", "### Open failures", "### Recent commits",
+        "### Other lanes"]
+    main, other = LANES["lanes"][LANE]["label"], LANES["lanes"][OTHER]["label"]
+    nightly, weekly = (LONG_LANES["lanes"][lane]["label"] for lane in (NIGHTLY, WEEKLY))
+    run_4100 = RUN_URL.replace("4242", "4100")
+    assert _section(out, "Nightly and weekly lanes")[2:] == [
+        "| Lane | Last full run | Covers | Result | Not passing | Not tested |",
+        "|---|---|---|---|---|---|",
+        f"| {nightly} | [2026-11-15 00:30 UTC]({run_4100}) | [`e9afbcc`..`05e878f`, 7 commits]("
+        f"{COMFY}/compare/{LAST}...{HEAD}) | ❌ 1 of 2 failed | `{MUSIC}` smoke check failed | 0 |",
+        ""]
+    # The page shows a smoke result, so it says what smoke level means.
+    assert lines[2] == run_report.SMOKE_NOTE
+    assert f"{run_report.LEGEND} {run_report.SMOKE_LEGEND}" in lines
+    # Its open failures are listed with those of the per-commit lanes, worded from
+    # the workflow's own range, and only for the workflows the lane runs today.
+    failures = _section(out, "Open failures")
+    assert failures[2] == f"{main}:" and failures[4].startswith("- `sdxl_t2i`: output changed, ")
+    assert failures[5:] == ["", f"{nightly}:", "", (
+        f"- `{MUSIC}`: smoke check failed, failing since [`05e878f`]({COMFY}/commit/{HEAD}) "
+        f"(a run that covered 7 commits, [compare]({COMFY}/compare/{LAST}...{HEAD})), first seen "
+        f"2026-11-15, 1 run, last passed at [`e9afbcc`]({COMFY}/commit/{LAST})"), ""]
+    assert CLIP not in out
+    # No column, no row of its own commits, and no note: it is tested.
+    matrix = _section(out, "Recent commits")
+    assert matrix[2] == f"| Commit | Subject | PR | Author | {main} | {other} | Note |"
+    assert "05e878f" not in "\n".join(matrix)
+    assert nightly not in "\n".join(_section(out, "This commit on every lane"))
+    legacy = LANES["lanes"][LEGACY]["label"]
+    assert [line[:len(line) - len(line.split(" is ", 1)[1])] for line in
+            _section(out, "Other lanes")[2:5]] == [
+        f"- {LANES['lanes'][IDLE]['label']} is ", f"- {weekly} is ", f"- {legacy} is "]
+    assert f"- {weekly} is not tested yet: it has no endpoint." in lines
+    # A cron that GitHub dropped leaves no run and no mail: the mark is its only sign.
+    stale = run_report.overview_report(reader, LONG_LANES, SHA, "master", manifest=CADENCES,
+                                       now=NIGHT_TS + 37 * 3600)
+    assert f"| [2026-11-15 00:30 UTC]({run_4100}) {run_report.WARN} no run for 37 hours |" in stale
+    assert stale.replace(f" {run_report.WARN} no run for 37 hours", "") == out
+    # Without the manifest nothing is left out, as on the per-commit lanes.
+    bare = run_report.overview_report(reader, LONG_LANES, SHA, "master", now=NIGHT_TS + 3600)
+    assert f"- `{CLIP}`: smoke check failed, failing since " in bare
+    # The clock is read when no time is given.
+    assert "### Nightly and weekly lanes" in run_report.overview_report(
+        reader, LONG_LANES, SHA, "master", manifest=CADENCES)
+
+
+def test_the_overview_reads_a_nightly_lane_from_its_last_full_run():
+    """A dispatch that tested one workflow again is newer than the lane's run
+    of the night. The row, and with it the smoke words of the page, come from
+    the run that has a result for every workflow the lane runs today."""
+    files = _overview_files()
+    again = {**_entry(SHA, NIGHT_TS + 7200, {"wan_ref": "pass"}, run=4200), "prev": HEAD}
+    night = {**_entry(HEAD, NIGHT_TS, {MUSIC: {"v": "pass", "l": "smoke"},
+                                       MESH: {"v": "pass", "l": "smoke"}, "wan_ref": "pass"},
+                      run=4100, n=7), "prev": LAST}
+    files[f"regression/index/master/{NIGHTLY}.json"] = _head([again, night])
+    manifest = {"workflows": {**CADENCES["workflows"],
+                              "wan_ref": {"enabled": True, "cadence": "nightly"}}}
+    out = run_report.overview_report(run_report.DictReader(files, RESULTS), LONG_LANES, SHA,
+                                     "master", manifest=manifest, now=NIGHT_TS + 9000)
+    row = _section(out, "Nightly and weekly lanes")[4]
+    assert f"| [2026-11-15 00:30 UTC]({RUN_URL.replace('4242', '4100')}) | " in row
+    assert row.endswith("| ✅ pass (1 reference, 2 smoke) |  | 0 |")
+    # Nothing else on the page is at smoke level: the row alone brings the words.
+    assert out.split("\n")[2] == run_report.SMOKE_NOTE and run_report.SMOKE_LEGEND in out
+    assert "smoke check failed" not in out.replace(run_report.SMOKE_LEGEND, "")
+    # Without the manifest the lane's workflows are not known: the newest entry stands.
+    bare = run_report.overview_report(run_report.DictReader(files, RESULTS), LONG_LANES, SHA,
+                                      "master", now=NIGHT_TS + 9000)
+    row = _section(bare, "Nightly and weekly lanes")[4]
+    assert f"| [2026-11-15 02:30 UTC]({RUN_URL.replace('4242', '4200')}) | " in row
+    assert row.endswith("| ✅ pass |  | 0 |") and "smoke" not in bare
+
+
+def test_a_nightly_lane_with_a_reference_level_failure_brings_no_smoke_words():
+    files = _long_overview_files()
+    files[f"regression/index/master/{NIGHTLY}.json"] = _head([
+        {**_entry(HEAD, NIGHT_TS, {MUSIC: "fail", MESH: "pass"}, run=4100, n=7), "prev": LAST}])
+    out = run_report.overview_report(run_report.DictReader(files, RESULTS), LONG_LANES, SHA,
+                                     "master", manifest=CADENCES, now=NIGHT_TS)
+    assert f"| ❌ 1 of 2 failed | `{MUSIC}` output changed | 0 |" in out
+    assert "smoke" not in out and run_report.LEGEND in out
+
+
+def test_lanes_declared_before_their_endpoint_add_a_note_each_and_nothing_else():
+    """The change that declares the nightly and the weekly lane must not move
+    a byte of the per-commit pages but for the two notes that name them."""
+    files = _overview_files()
+    before = _overview(files)
+    declared = {"primary": LANE, "lanes": {
+        **LANES["lanes"],
+        NIGHTLY: {**NIGHT_LANES["lanes"][NIGHTLY], "endpoint_id": None},
+        WEEKLY: LONG_LANES["lanes"][WEEKLY]}}
+    notes = [f"- {declared['lanes'][lane]['label']} is not tested yet: it has no endpoint."
+             for lane in (NIGHTLY, WEEKLY)]
+    for manifest in (None, MANIFEST, CADENCES):
+        after = run_report.overview_report(run_report.DictReader(files, RESULTS), declared, SHA,
+                                           "master", manifest=manifest).split("\n")
+        base = run_report.overview_report(run_report.DictReader(files, RESULTS), LANES, SHA,
+                                          "master", manifest=manifest).split("\n")
+        at = after.index(notes[0])
+        assert after[at:at + 2] == notes and after[:at] + after[at + 2:] == base
+        assert "### Nightly and weekly lanes" not in after
+    assert before == run_report.overview_report(run_report.DictReader(files, RESULTS), LANES,
+                                                SHA, "master", manifest=MANIFEST)
+    # An index of such a lane, left by a dispatch or a later change, is not shown
+    # as long as the lane has no endpoint.
+    files[f"regression/index/master/{NIGHTLY}.json"] = _long_overview_files()[
+        f"regression/index/master/{NIGHTLY}.json"]
+    after = run_report.overview_report(run_report.DictReader(files, RESULTS), declared, SHA,
+                                       "master").split("\n")
+    assert after[:at] + after[at + 2:] == before.split("\n")

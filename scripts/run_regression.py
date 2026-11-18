@@ -569,9 +569,15 @@ def main():
     # commit (the per-workflow comparisons read it again later, but they can
     # race with each other once the first workflow publishes).
     prev_commit = (store.latest_pointer(args.branch) or {}).get("commit")
-    # The index lists an open failing chain only for a workflow the lane runs today.
+    # The index lists an open failing chain only for a workflow the lane runs
+    # today: enabled, not kept to other lanes, and of the lane's cadence.
+    lane = lanes["lanes"][lane_id]
+    try:
+        active = lanes_mod.workflows_for_lane(manifest, lane_id, lane=lane)
+    except ValueError as e:
+        raise SystemExit(f"{e}; see manifest/workflows.json")
     builder = index_builder.IndexBuilder(store, args.branch, lane_id, layout, lanes,
-                                         active=lanes_mod.workflows_for_lane(manifest, lane_id))
+                                         active=active)
     # The index as it stands before this run: it also records runs that had
     # execution errors, which the pointer above skips.
     prior_entries = (store.download_json(builder.head_path()) or {}).get("entries") or []
@@ -590,12 +596,16 @@ def main():
             else wf_id in args.workflows.split(","))
     }
     # The lane filter is hard: a workflow restricted to other lanes (its packs
-    # are only baked there) is skipped even when named explicitly, and the
-    # dashboard shows its cell as not run.
-    for wf_id in [w for w, e in selected.items() if not lanes_mod.workflow_runs_on_lane(e, lane_id)]:
-        print(f"[{wf_id}] not run on lane {lane_id} (manifest lanes: "
-              f"{', '.join(selected[wf_id]['lanes'])})")
-        del selected[wf_id]
+    # are only baked there), or of another cadence than the lane's, is skipped
+    # even when named explicitly, and the dashboard shows its cell as not run.
+    for wf_id, entry in list(selected.items()):
+        try:
+            why_not = lanes_mod.why_not_on_lane(entry, lane_id, lane)
+        except ValueError as e:
+            raise SystemExit(f"[{wf_id}] {e}; see manifest/workflows.json")
+        if why_not:
+            print(f"[{wf_id}] not run on lane {lane_id} ({why_not})")
+            del selected[wf_id]
     if not selected:
         print(f"no workflows selected for lane {lane_id}; nothing to do")
         return 0

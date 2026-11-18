@@ -1,0 +1,272 @@
+# The nightly and the weekly lanes: workflows that are too slow or too many for
+# every commit run here once a night or once a week, at ComfyUI master HEAD. A
+# workflow asks for it with `"cadence": "nightly"` or `"weekly"` in
+# manifest/workflows.json, and runs on the lanes of that cadence in
+# manifest/lanes.json.
+#
+# This is a file of its own, beside regression.yml, for three reasons. Its
+# runs have their own name in the Actions list. They wait in their own
+# concurrency group, so no per-commit tick ever replaces one. And they use
+# their own endpoint, so they never take a worker from a per-commit run.
+#
+# The lane job's steps are those of regression.yml, copied: a test holds the
+# two files to the same text (scripts/tests/test_regression_skip.py). There is
+# no "All lanes" job and no PR comment. To show a published result of one of
+# these lanes again without testing, dispatch "GPU regression" with
+# report_only and the lane.
+name: GPU regression (nightly and weekly)
+# The Actions list then says which is which.
+run-name: GPU regression · ${{ inputs.cadence || (github.event.schedule == '17 3 * * 0' && 'weekly' || 'nightly') }}
+on:
+  schedule:
+    # Keep these two strings in step with NIGHTLY_CRON and WEEKLY_CRON in the
+    # plan step and with the run-name above. Both are off the top of the hour,
+    # where GitHub delays scheduled runs most. Nightly: after the American
+    # working day and before the European one. Weekly: Sunday night, two hours
+    # clear of the nightly run.
+    - cron: '17 1 * * *'
+    - cron: '17 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      cadence:
+        description: which lanes to test
+        type: choice
+        options: [nightly, weekly]
+        default: nightly
+      commit:
+        description: ComfyUI commit sha (empty = master HEAD)
+        default: ''
+      workflows:
+        description: csv of workflow ids, or 'all'
+        default: all
+      lane:
+        description: lane id from manifest/lanes.json (empty = every provisioned lane of the cadence)
+        default: ''
+      publish:
+        description: write the result to the results branch. Turn off for a first look at a new workflow (the commit is then tested whatever the lane has for it)
+        type: boolean
+        default: true
+
+# One nightly or weekly run at a time, so the two never share the endpoint's
+# workers. `queue: max` lets runs wait in line, and none is replaced. Without
+# that line the design still holds, with one rule for people: do not dispatch
+# while a nightly or weekly run is waiting. Delete the line if GitHub reports
+# this file as invalid because of it.
+concurrency:
+  group: gpu-nightly-weekly
+  cancel-in-progress: false
+  queue: max
+
+permissions:
+  contents: write
+
+jobs:
+  lanes:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      commit: ${{ steps.commit.outputs.commit }}
+      short: ${{ steps.commit.outputs.short }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # The lanes of the cadence that have an endpoint and an enabled workflow
+      # (`lanes.py cadence`). A cron has no inputs: which of the two crons
+      # started the run says the cadence. With no such lane the matrix is [] and
+      # the run ends here, so the lanes can be declared before their endpoint
+      # exists. The plan says why a lane is left out.
+      - id: plan
+        env:
+          CADENCE: ${{ inputs.cadence }}
+          LANE: ${{ inputs.lane }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
+          NIGHTLY_CRON: '17 1 * * *'
+          WEEKLY_CRON: '17 3 * * 0'
+        run: |
+          cd scripts
+          if [ "$EVENT_SCHEDULE" = "$NIGHTLY_CRON" ]; then CADENCE=nightly; fi
+          if [ "$EVENT_SCHEDULE" = "$WEEKLY_CRON" ]; then CADENCE=weekly; fi
+          if [ -n "$EVENT_SCHEDULE" ] && [ -z "$CADENCE" ]; then
+            echo "::error::the cron '$EVENT_SCHEDULE' is neither NIGHTLY_CRON nor WEEKLY_CRON"
+            exit 1
+          fi
+          only=()
+          if [ -n "$LANE" ]; then only=(--only "$LANE"); fi
+          matrix=$(python lanes.py cadence "${CADENCE:-nightly}" "${only[@]}")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "$matrix" | python -m json.tool
+      # Resolved once, here, so every lane of a run tests the same commit. The
+      # same step as in regression.yml.
+      - name: Resolve target commit
+        id: commit
+        env:
+          INPUT_COMMIT: ${{ inputs.commit }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          COMMIT="$INPUT_COMMIT"
+          if [ -n "$COMMIT" ] && ! [[ "$COMMIT" =~ ^[0-9a-f]{7,40}$ ]]; then
+            echo "::error::the commit input must be a 7-40 character hex sha"
+            exit 1
+          fi
+          # Results are stored under the full sha. An abbreviated input is
+          # expanded here: a report-only run would otherwise find nothing
+          # published, and a test run would publish under the short name.
+          if [ -n "$COMMIT" ] && [ "${#COMMIT}" -lt 40 ]; then
+            FULL=$(gh api "repos/Comfy-Org/ComfyUI/commits/$COMMIT" --jq .sha) || FULL=""
+            if ! [[ "$FULL" =~ ^[0-9a-f]{40}$ ]] || [ "${FULL:0:${#COMMIT}}" != "$COMMIT" ]; then
+              echo "::error::could not expand the commit input $COMMIT to a 40 character sha in Comfy-Org/ComfyUI (unknown or ambiguous)"
+              exit 1
+            fi
+            COMMIT="$FULL"
+          fi
+          if [ -z "$COMMIT" ]; then
+            COMMIT=$(git ls-remote https://github.com/Comfy-Org/ComfyUI refs/heads/master | cut -f1) || COMMIT=""
+            # Without this check a failed lookup left the commit empty and the run went on.
+            if ! [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::could not resolve ComfyUI master HEAD to a 40 character sha (git ls-remote failed or returned nothing)"
+              exit 1
+            fi
+          fi
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "short=${COMMIT:0:8}" >> "$GITHUB_OUTPUT"
+          echo "target commit: $COMMIT"
+
+  regression:
+    needs: lanes
+    if: needs.lanes.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+    # The lane's own limit (`timeout_minutes` in manifest/lanes.json).
+    timeout-minutes: ${{ matrix.timeout_minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.lanes.outputs.matrix) }}
+    name: ${{ matrix.lane }} · ${{ needs.lanes.outputs.short }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # The rule of regression.yml, per lane: a commit that has the lane's
+      # result is not tested again, so a night without a new commit costs
+      # nothing and shows the published result. A result with infra errors, or
+      # a start marker with no result, gets one retry. A dispatch naming a
+      # commit always runs, and so does one with `publish` off. A result of
+      # named workflows only (`scope` in the summary) does not count as tested.
+      # This file has no report-only run, so REPORT_ONLY is always false.
+      - name: Skip if already tested on this lane
+        id: target
+        env:
+          COMMIT: ${{ needs.lanes.outputs.commit }}
+          INPUT_COMMIT: ${{ inputs.commit }}
+          REPORT_ONLY: 'false'
+          PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish == true || inputs.publish == 'true' }}
+          PREFIX: ${{ matrix.prefix }}
+        run: |
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          if [ "$REPORT_ONLY" = "true" ]; then
+            echo "report only: showing what is published for $COMMIT, nothing is tested" >&2
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # What the lane already published for this commit, read straight from
+          # the results branch (raw.githubusercontent.com caches for ~5 min; git does not).
+          SUMMARY="$RUNNER_TEMP/published-summary.json"
+          ATTEMPT="$RUNNER_TEMP/published-attempt.json"
+          LATEST="$RUNNER_TEMP/published-latest.json"
+          : > "$SUMMARY"
+          : > "$ATTEMPT"
+          : > "$LATEST"
+          # The trees come with the fetch, so whether a file exists is known
+          # without the network; only its content is fetched lazily.
+          read_published() {
+            if [ -n "$(git ls-tree --name-only FETCH_HEAD -- "$1")" ]; then
+              git show "FETCH_HEAD:$1" > "$2" 2>/dev/null \
+                || git show "FETCH_HEAD:$1" > "$2" 2>/dev/null \
+                || echo '{"unreadable": true}' > "$2"
+            fi
+          }
+          if git fetch --depth 1 --filter=blob:none origin results 2>/dev/null; then
+            RUN_DIR="$PREFIX/runs/master/$COMMIT"
+            read_published "$RUN_DIR/summary.json" "$SUMMARY"
+            read_published "$RUN_DIR/attempt.json" "$ATTEMPT"
+            git show "FETCH_HEAD:$PREFIX/latest/master.json" > "$LATEST" 2>/dev/null || : > "$LATEST"
+          fi
+          args=(--commit "$COMMIT" --summary "$SUMMARY" --attempt "$ATTEMPT" --latest "$LATEST")
+          if [ -n "$INPUT_COMMIT" ]; then args+=(--explicit); fi
+          if [ "$PUBLISH" != "true" ]; then args+=(--explicit); fi
+          python scripts/regression_skip.py "${args[@]}" >> "$GITHUB_OUTPUT"
+      - name: Install the suite's packages
+        if: steps.target.outputs.skip != 'true'
+        run: pip install -r scripts/requirements.txt
+      # RunPod lowers the largest number of workers of an endpoint that had no
+      # request for some days, to 0 in the end, and the jobs of this run would
+      # then only wait in the queue. This raises it to the lane's `workers_max`
+      # when it is lower. If the account's worker quota refuses the raise, the
+      # step fails with RunPod's message and the run is red.
+      - name: Restore the endpoint's workers
+        if: steps.target.outputs.skip != 'true'
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          LANE: ${{ matrix.lane }}
+        run: python scripts/runpod_endpoints.py status --lane "$LANE" --restore-workers
+      # The lane names its endpoint in manifest/lanes.json. `exec` makes the
+      # script the step's own process, so it is the one that gets the signals
+      # GitHub sends when a run is cancelled or reaches its time limit.
+      - name: Run regression suite
+        if: steps.target.outputs.skip != 'true'
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          COMMIT: ${{ steps.target.outputs.commit }}
+          WORKFLOWS: ${{ inputs.workflows || 'all' }}
+          LANE: ${{ matrix.lane }}
+          # A cron run has no inputs, and an empty input reads as false in an
+          # expression. So "publish" is "not a dispatch, or the box is ticked".
+          PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish == true || inputs.publish == 'true' }}
+        # With `publish` off nothing is written to the results branch, and the
+        # report is built from the files on the runner.
+        run: |
+          args=(--commit "$COMMIT" --branch master --lane "$LANE"
+                --workflows "$WORKFLOWS"
+                --workdir "$RUNNER_TEMP/regression-work"
+                --results-workdir "$RUNNER_TEMP/results-checkout"
+                --summary-out "$RUNNER_TEMP/summary.json")
+          if [ "$PUBLISH" != "true" ]; then args+=(--skip-publish); fi
+          exec python scripts/run_regression.py "${args[@]}"
+      # The run's own files, attached to the run: the copy to download, the only
+      # one when the publish failed, and the only place for an output file a
+      # smoke run did not publish. GitHub keeps it 90 days.
+      - name: Attach the run's files
+        id: upload
+        if: always() && steps.target.outputs.skip != 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-regression-${{ matrix.lane }}-${{ needs.lanes.outputs.short }}
+          path: |
+            ${{ runner.temp }}/regression-work
+            ${{ runner.temp }}/summary.json
+          if-no-files-found: ignore
+          overwrite: true
+      # The lane's report in the job summary. It always runs: after a test,
+      # after a failed test, and on a skipped commit (where it shows the result
+      # that is already published). It never fails the job.
+      - name: Report
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 10
+        env:
+          COMMIT: ${{ needs.lanes.outputs.commit }}
+          LANE: ${{ matrix.lane }}
+          SKIPPED: ${{ steps.target.outputs.skip }}
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+        run: |
+          args=(lane --commit "$COMMIT" --branch master --lane "$LANE"
+                --summary "$RUNNER_TEMP/summary.json"
+                --workdir "$RUNNER_TEMP/regression-work")
+          if [ "$SKIPPED" = "true" ]; then args+=(--skipped); fi
+          if [ -n "$ARTIFACT_URL" ]; then args+=(--artifact-url "$ARTIFACT_URL"); fi
+          python scripts/run_report.py "${args[@]}"

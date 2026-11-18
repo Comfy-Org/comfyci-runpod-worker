@@ -1803,8 +1803,10 @@ def test_the_index_lists_a_chain_only_for_a_workflow_the_lane_still_runs(tmp_pat
 
 
 def test_a_harness_error_cell_of_a_smoke_workflow_names_its_level(tmp_path, monkeypatch):
-    lane = LevelLane(tmp_path, monkeypatch, {"wf_img": {}, "wf_smoke": {"level": "smoke"}})
-    lane.status = {"wf_img": "harness", "wf_smoke": "harness"}
+    lane = LevelLane(tmp_path, monkeypatch, {
+        "wf_img": {}, "wf_smoke": {"level": "smoke"},
+        "wf_night": {"level": "smoke", "cadence": "nightly"}})
+    lane.status = dict.fromkeys(lane.status, "harness")
     code, summary = lane.run("c1", "main", "--skip-publish")
     assert code == 0 and summary["has_infra_error"] is True
     error = "RuntimeError('the runner lost the job')"
@@ -1817,7 +1819,59 @@ def test_a_harness_error_cell_of_a_smoke_workflow_names_its_level(tmp_path, monk
                      "prior_verdict": None, "prior_commit": None}}
     # Publishing is off: nothing was written, and a nightly lane names no bytes either.
     assert not (tmp_path / "store").exists()
-    assert "published_new_bytes" not in lane.run("c1", "nightly", "--skip-publish")[1]
+    night = lane.run("c1", "nightly", "--skip-publish")[1]
+    assert list(night["workflows"]) == ["wf_night"] and "published_new_bytes" not in night
+
+
+def test_a_lane_runs_the_workflows_of_its_own_cadence(tmp_path, monkeypatch, capsys):
+    """`all` on a lane takes the workflows of the lane's cadence. A workflow of
+    another cadence that a dispatch names is skipped with a line that says
+    why: its `lanes` is null, and joining that for the line used to be a
+    TypeError. The index keeps open failures for the lane's own workflows."""
+    import sys
+    lane = LevelLane(tmp_path, monkeypatch, {
+        "wf_img": {}, "wf_pack": {"lanes": ["main"]},
+        "wf_night": {"level": "smoke", "cadence": "nightly"},
+        "wf_week": {"level": "smoke", "cadence": "weekly"},
+        "wf_off": {"enabled": False, "cadence": "nightly"}})
+    lane.status = dict.fromkeys(lane.status, "harness")
+    builder, seen = index_builder.IndexBuilder, []
+
+    def recording(*args, **kw):
+        seen.append(kw.get("active"))
+        return builder(*args, **kw)
+    monkeypatch.setattr(run_regression.index_builder, "IndexBuilder", recording)
+
+    code, summary = lane.run("c1", "main", "--skip-publish")
+    assert code == 0 and list(summary["workflows"]) == ["wf_img", "wf_pack"]
+    out = capsys.readouterr().out
+    assert "[wf_night] not run on lane main (cadence nightly, the lane is per-commit)\n" in out
+    assert "[wf_week] not run on lane main (cadence weekly, the lane is per-commit)\n" in out
+    assert "wf_off" not in out
+    code, summary = lane.run("c1", "nightly", "--skip-publish")
+    assert list(summary["workflows"]) == ["wf_night"]
+    out = capsys.readouterr().out
+    assert "[wf_img] not run on lane nightly (cadence per-commit, the lane is nightly)\n" in out
+    # The `lanes` list is said first, as it always was.
+    assert "[wf_pack] not run on lane nightly (manifest lanes: main)\n" in out
+    assert "[wf_week] not run on lane nightly (cadence weekly, the lane is nightly)\n" in out
+    assert seen == [["wf_img", "wf_pack"], ["wf_night"]]
+
+    # Named in a dispatch on a lane of another cadence: skipped, and nothing is left to do.
+    for named, lane_id, why in (
+            ("wf_night", "main", "cadence nightly, the lane is per-commit"),
+            ("wf_off", "main", "cadence nightly, the lane is per-commit"),
+            ("wf_img", "nightly", "cadence per-commit, the lane is nightly")):
+        monkeypatch.setattr(sys, "argv", [
+            "run_regression.py", "--manifest", str(lane.manifest), "--commit", "c2",
+            "--branch", "master", "--lane", lane_id, "--workflows", named, "--skip-publish"])
+        assert run_regression.main() == 0
+        assert capsys.readouterr().out == (
+            f"[{named}] not run on lane {lane_id} ({why})\n"
+            f"no workflows selected for lane {lane_id}; nothing to do\n")
+    # A workflow that is switched off runs when a dispatch names it on a lane of its cadence.
+    code, summary = lane.run("c2", "nightly", "--workflows", "wf_off", "--skip-publish")
+    assert list(summary["workflows"]) == ["wf_off"]
 
 
 @pytest.mark.parametrize("entry, said", [

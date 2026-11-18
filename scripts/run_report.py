@@ -767,10 +767,27 @@ def open_failures(head: dict | None, entries: list[dict] | tuple = (),
     return out
 
 
-def lane_workflows(manifest: dict | None, lane_id: str) -> set[str] | None:
+def other_cadence(entry: dict, lane: dict | None) -> bool:
+    """Whether a manifest entry is of another cadence than the lane, which then
+    does not run it (lanes.why_not_on_lane). Never so for a retired lane or a
+    lane whose own cadence is not known here, and an entry whose cadence
+    cannot be read counts as the lane's own: a report leaves nothing out on a
+    guess."""
+    cadence = as_dict(lane).get("cadence")
+    if not isinstance(cadence, str) or cadence not in lanes_mod.WORKFLOW_CADENCES:
+        return False
+    try:
+        return lanes_mod.cadence_of(entry) != cadence
+    except ValueError:
+        return False
+
+
+def lane_workflows(manifest: dict | None, lane_id: str,
+                   lane: dict | None = None) -> set[str] | None:
     """The ids of the workflows the manifest runs on a lane today: switched on,
-    and not kept to other lanes. None when the manifest lists no workflow, so
-    a report made without one leaves nothing out."""
+    not kept to other lanes and, with `lane` (the lane's entry in the
+    registry), of the lane's cadence. None when the manifest lists no
+    workflow, so a report made without one leaves nothing out."""
     entries = as_dict(as_dict(manifest).get("workflows"))
     if not entries:
         return None
@@ -778,7 +795,8 @@ def lane_workflows(manifest: dict | None, lane_id: str) -> set[str] | None:
     for wf, entry in entries.items():
         entry = as_dict(entry)
         only = entry.get("lanes")
-        if entry.get("enabled") and not (isinstance(only, list) and lane_id not in only):
+        if (entry.get("enabled") and not (isinstance(only, list) and lane_id not in only)
+                and not other_cadence(entry, lane)):
             found.add(wf)
     return found
 
@@ -2713,6 +2731,10 @@ def not_run_block(d: LaneData) -> list[str]:
         entry = as_dict(entry)
         if not entry.get("enabled") or wf in ran:
             continue
+        # A workflow of another cadence belongs to other lanes. It is not
+        # missing here, so it is not listed.
+        if other_cadence(entry, d.lane):
+            continue
         only = entry.get("lanes")
         if isinstance(only, list) and d.lane_id not in only:
             lanes = ", ".join(tick(x) if isinstance(x, str) and LANE_RE.fullmatch(x)
@@ -2842,6 +2864,11 @@ class LaneColumn:
     def retired(self) -> bool:
         return lanes_mod.is_retired(self.lane)
 
+    @property
+    def long_cadence(self) -> bool:
+        """Tested once a night or once a week: that cadence and an endpoint to run on."""
+        return lanes_mod.is_long_cadence(self.lane) and bool(self.lane.get("endpoint_id"))
+
     def states(self, commit: str) -> dict[str, str]:
         """Results of `commit` on this lane, from its summary. What an old
         summary lacks (the drift class, the output sha) the index entry has."""
@@ -2876,10 +2903,11 @@ class OverviewData:
     columns: list[LaneColumn]
     head_paths: dict
     manifest: dict = field(default_factory=dict)  # today's workflows, when the caller has them
+    now: float | None = None  # when the report is made (None: the clock), for the stale mark
 
 
 def gather_overview(reader: Reader, lanes: dict, commit: str, branch: str,
-                    manifest: dict | None = None) -> OverviewData:
+                    manifest: dict | None = None, now: float | None = None) -> OverviewData:
     entries = {lane_id: as_dict(lane) for lane_id, lane in as_dict(lanes.get("lanes")).items()}
     if not entries:
         raise ReportError("manifest/lanes.json lists no lanes")
@@ -2910,7 +2938,7 @@ def gather_overview(reader: Reader, lanes: dict, commit: str, branch: str,
             references=as_dict(as_dict(registry.get(lane_id)).get("goldens"))))
     return OverviewData(commit=commit, branch=branch, reader=reader, primary=primary,
                         columns=columns, head_paths={i: p[1] for i, p in paths.items()},
-                        manifest=as_dict(manifest))
+                        manifest=as_dict(manifest), now=now)
 
 
 def disagreements(per_lane: dict[str, dict[str, str]], labels: dict[str, str]) -> list[str]:
@@ -2959,10 +2987,7 @@ def long_lanes_block(columns: list[LaneColumn], runs: dict | None = None,
     lane id to the ids of the workflows the lane runs today. "Covers" answers
     what a contributor asks: is my commit in that run? A last full run older
     than STALE_AFTER_S is marked. A cron that GitHub dropped leaves no run and
-    sends no mail, so that mark is its only sign.
-
-    render_overview does not show this section yet. No lane runs nightly or
-    weekly today: the change that adds the first one calls this for them."""
+    sends no mail, so that mark is its only sign."""
     now = time.time() if now is None else now
     rows = []
     for c in columns:
@@ -3045,10 +3070,20 @@ def render_overview(o: OverviewData, limits: Limits) -> str:
         blocks.append(["### Lanes that disagree at this commit", "", *differ])
 
     active = [c for c in o.columns if c.active]
+    # The nightly and weekly lanes: where their last run stands. They get no
+    # column further down: a column would read "not run" on nearly every row.
+    long = [c for c in o.columns if c.long_cadence]
+    # What each lane runs today, when the manifest is at hand.
+    today = {c.lane_id: lane_workflows(o.manifest, c.lane_id, c.lane) for c in active + long}
+    blocks.append(long_lanes_block(long, today, o.now))
+    for c in long:
+        shown, _ = full_run(c.entries, today[c.lane_id])
+        seen.update(entry_states(shown, c.references).values())
+
     failures = []
-    for c in active:
-        # Only for the workflows the lane runs today, when the manifest is at hand.
-        runs = lane_workflows(o.manifest, c.lane_id)
+    for c in active + long:
+        # Only for the workflows the lane runs today.
+        runs = today[c.lane_id]
         lines = open_failures(c.head, c.entries, runs)
         failures += [f"{labels[c.lane_id]}:", "", *lines, ""] if lines else []
         if any(is_smoke_chain(fb) for wf, fb in as_dict(c.head.get("first_bad")).items()
@@ -3097,7 +3132,9 @@ def render_overview(o: OverviewData, limits: Limits) -> str:
             where = f"[its run index]({url})" if url else "its run index on the results branch"
             notes.append(f"- {labels[c.lane_id]} is retired: nothing runs on it any more, and "
                          f"its history is kept in {where}.")
-        elif not c.active:
+        elif lanes_mod.is_long_cadence(c.lane) and not c.long_cadence:
+            notes.append(f"- {labels[c.lane_id]} is not tested yet: it has no endpoint.")
+        elif not (c.active or c.long_cadence):
             notes.append(f"- {labels[c.lane_id]} is not tested yet: it has no endpoint or is "
                          "not a per-commit lane.")
     if notes:
@@ -3114,11 +3151,12 @@ def render_overview(o: OverviewData, limits: Limits) -> str:
 
 
 def overview_report(reader: Reader, lanes: dict, commit: str, branch: str,
-                    manifest: dict | None = None) -> str | None:
+                    manifest: dict | None = None, now: float | None = None) -> str | None:
     """The Markdown that puts every lane side by side, within the size limit.
     With `manifest`, today's workflows, a lane's open failures are listed only
-    for the workflows it still runs."""
-    o = gather_overview(reader, lanes, commit, branch, manifest)
+    for the workflows it still runs. `now` is the time the stale mark of a
+    nightly or weekly lane is worked out from (default: the clock)."""
+    o = gather_overview(reader, lanes, commit, branch, manifest, now)
     return fit(lambda limits: render_overview(o, limits))
 
 

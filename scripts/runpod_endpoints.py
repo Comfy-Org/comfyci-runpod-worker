@@ -1,20 +1,25 @@
 """Keep the lanes' RunPod serverless endpoints in step with manifest/lanes.json.
 
-  status [--lane ID] [--strict]
+  status [--lane ID] [--strict] [--restore-workers]
       image, workers, GPU pool and CUDA floor of each provisioned lane's endpoint,
       and every setting that differs from the manifest: the largest number of
       workers, the idle timeout and the disk (a retired lane: 0 workers).
-      --strict exits 1 when one differs.
+      --strict exits 1 when one differs. --restore-workers first raises the
+      largest number of workers to the manifest's when RunPod lowered it (it
+      does that to an endpoint nobody used for some days), with one PATCH.
   set-image (--lane ID | --image IMAGE) --tag TAG [--dry-run]
       point the lane's endpoint (or every non-legacy lane on IMAGE) at
       ghcr.io/comfy-org/comfyci-runpod-worker:TAG. TAG must start with the
       lane's image id, so a lane can never be handed another torch build.
-      A retired lane is never repointed.
+      A retired lane is never repointed. Lanes that share an endpoint get one
+      PATCH between them.
   create --lane ID --tag TAG [--dry-run] [--write]
       create the lane's endpoint from `endpoint_defaults` in lanes.json plus the
-      lane's own GPU/CUDA settings, print its id, and with --write record it as
-      the lane's endpoint_id. Billable once workers run (nothing while idle at
-      workers.min 0); run it by hand, once per lane.
+      lane's own settings (GPU and CUDA, and when it names them `endpoint_name`,
+      `workers_max`, `disk_gb`, `idle_timeout_s` and `env`), print its id, and
+      with --write record it as the lane's endpoint_id. Billable once workers
+      run (nothing while idle at workers.min 0); run it by hand, once per
+      endpoint. A lane that shares the endpoint gets the id by hand.
 
 Env: RUNPOD_API_KEY. Talks to the RunPod control-plane REST API v2
 (https://api.runpod.io/v2, not the serverless job API on api.runpod.ai);
@@ -65,7 +70,10 @@ class Client:
     def patch(self, endpoint_id: str, body: dict) -> dict:
         r = requests.patch(f"{self.base}/serverless/{endpoint_id}", headers=self.headers,
                            json=body, timeout=60)
-        r.raise_for_status()
+        if r.status_code >= 400:
+            # RunPod's own words: a refused raise of the workers names the quota.
+            raise SystemExit(f"update of endpoint {endpoint_id} failed ({r.status_code}): "
+                             f"{r.text[:1500]}")
         return r.json()
 
     def create(self, body: dict) -> dict:
@@ -77,13 +85,23 @@ class Client:
 
 def endpoint_settings(lanes: dict, cfg: dict) -> tuple[dict, int]:
     """(workers, disk in GB) of a lane's endpoint: endpoint_defaults, with the
-    lane's own largest number of workers. What `create` asks for, and what
-    `status` holds the live endpoint to."""
+    lane's own largest number of workers (`workers_max`), idle timeout
+    (`idle_timeout_s`) and disk (`disk_gb`) where it names them. What `create`
+    asks for, and what `status` holds the live endpoint to."""
     d = lanes.get("endpoint_defaults") or {}
     workers = dict(d.get("workers") or {"min": 0, "max": 3, "idleTimeout": 20})
     if cfg.get("workers_max") is not None:
         workers["max"] = cfg["workers_max"]
-    return workers, int(d.get("disk_gb", 40))
+    if cfg.get("idle_timeout_s") is not None:
+        workers["idleTimeout"] = cfg["idle_timeout_s"]
+    disk = cfg["disk_gb"] if cfg.get("disk_gb") is not None else d.get("disk_gb", 40)
+    return workers, int(disk)
+
+
+def endpoint_name(cfg: dict) -> str:
+    """What a lane's endpoint is called on RunPod: the lane's `endpoint_name`,
+    else the name of its image."""
+    return cfg.get("endpoint_name") or ENDPOINT_NAME.format(image=cfg.get("image") or "")
 
 
 def endpoint_body(lanes: dict, lane_id: str, tag: str) -> dict:
@@ -95,6 +113,13 @@ def endpoint_body(lanes: dict, lane_id: str, tag: str) -> dict:
         raise SystemExit(f"lane {lane_id!r} is retired; nothing runs on it, so it gets no endpoint")
     if cfg.get("endpoint_id"):
         raise SystemExit(f"lane {lane_id!r} already has endpoint {cfg['endpoint_id']}")
+    # Lanes that share an endpoint name share one endpoint: it is created once.
+    for other_id, other in (lanes.get("lanes") or {}).items():
+        if (cfg.get("endpoint_name") and other.get("endpoint_name") == cfg["endpoint_name"]
+                and other.get("endpoint_id") and not lanes_mod.is_retired(other)):
+            raise SystemExit(f"lane {lane_id!r} shares the endpoint {cfg['endpoint_name']!r} with "
+                             f"{other_id!r}, which already has {other['endpoint_id']}: write "
+                             "that id into the lane, do not create a second endpoint")
     image_id = cfg.get("image") or ""
     check_tag(image_id, tag)
     d = lanes.get("endpoint_defaults") or {}
@@ -103,7 +128,7 @@ def endpoint_body(lanes: dict, lane_id: str, tag: str) -> dict:
         raise SystemExit(f"endpoint_defaults is missing {', '.join(missing)}")
     workers, disk = endpoint_settings(lanes, cfg)
     return {
-        "name": ENDPOINT_NAME.format(image=image_id),
+        "name": endpoint_name(cfg),
         "type": "QUEUE",
         "image": image_ref(tag),
         "registry": d["registry"],
@@ -117,7 +142,8 @@ def endpoint_body(lanes: dict, lane_id: str, tag: str) -> dict:
         "networkVolumes": list(d["network_volumes"]),
         "dataCenterIds": list(d["data_center_ids"]),
         "disk": disk,
-        "env": dict(d.get("env") or {}),
+        # The lane's own variables on top of the defaults.
+        "env": {**(d.get("env") or {}), **(cfg.get("env") or {})},
     }
 
 
@@ -146,7 +172,9 @@ def create(lanes: dict, lane_id: str, tag: str, client: Client | None, dry_run: 
 
 def plan_set_image(lanes: dict, tag: str, lane_id: str | None = None,
                    image_id: str | None = None) -> list[tuple[str, str, dict]]:
-    """(lane id, endpoint id, PATCH body) for every endpoint the tag applies to."""
+    """(lane id, endpoint id, PATCH body) for every endpoint the tag applies to.
+    One PATCH per endpoint, whatever number of lanes share it: it is listed
+    under the first of them."""
     if lane_id:
         cfg = lane_config(lanes, lane_id)
         if not cfg:
@@ -161,6 +189,7 @@ def plan_set_image(lanes: dict, tag: str, lane_id: str | None = None,
         raise SystemExit("pass --lane or --image")
     check_tag(image_id or "", tag)
     plan = []
+    planned: dict[str, str] = {}
     for target in targets:
         cfg = lane_config(lanes, target)
         if cfg.get("image") != image_id:
@@ -168,6 +197,11 @@ def plan_set_image(lanes: dict, tag: str, lane_id: str | None = None,
         if not cfg.get("endpoint_id"):
             print(f"[{target}] no endpoint yet; skipping")
             continue
+        if cfg["endpoint_id"] in planned:
+            print(f"[{target}] shares endpoint {cfg['endpoint_id']} with "
+                  f"{planned[cfg['endpoint_id']]}; repointed once")
+            continue
+        planned[cfg["endpoint_id"]] = target
         plan.append((target, cfg["endpoint_id"], {"image": image_ref(tag)}))
     return plan
 
@@ -204,7 +238,29 @@ def differences(lanes: dict, lane_id: str, ep: dict) -> list[str]:
             for name, have, want in pairs if have != want]
 
 
-def status(lanes: dict, client: Client, lane_id: str | None, strict: bool = False) -> int:
+def restore_workers(lanes: dict, client: Client, lane_id: str, ep: dict) -> dict:
+    """Raise the largest number of workers of a lane's live endpoint `ep` to
+    the manifest's when it is lower, and return the endpoint as it then is.
+    RunPod lowers the number of an endpoint without requests, to 0 in the end,
+    and the jobs of the next run would only wait in the queue. Never for a
+    retired lane, and never downwards. The PATCH carries the live `min` and
+    `idleTimeout` too, so it changes the largest number whether RunPod merges
+    a `workers` object or replaces it. A refused raise (the account's worker
+    quota) ends the command with RunPod's message."""
+    cfg = lane_config(lanes, lane_id)
+    live = ep.get("workers") or {}
+    have, want = live.get("max"), endpoint_settings(lanes, cfg)[0].get("max")
+    numbers = all(isinstance(n, int) and not isinstance(n, bool) for n in (have, want))
+    if lanes_mod.is_retired(cfg) or not numbers or have >= want:
+        return ep
+    workers = {k: live[k] for k in ("min", "idleTimeout") if isinstance(live.get(k), int)}
+    client.patch(cfg["endpoint_id"], {"workers": {**workers, "max": want}})
+    print(f"{lane_id}: workers.max was {have} on RunPod, raised to {want}")
+    return {**ep, "workers": {**live, "max": want}}
+
+
+def status(lanes: dict, client: Client, lane_id: str | None, strict: bool = False,
+           restore: bool = False) -> int:
     found = 0
     for target, cfg in (lanes.get("lanes") or {}).items():
         if lane_id and target != lane_id:
@@ -215,6 +271,8 @@ def status(lanes: dict, client: Client, lane_id: str | None, strict: bool = Fals
         if lanes_mod.is_retired(cfg):
             print(f"{target}: retired (endpoint {cfg['endpoint_id']}; keep its max workers at 0)")
         ep = client.get(cfg["endpoint_id"])
+        if restore:
+            ep = restore_workers(lanes, client, target, ep)
         gpu = ep.get("gpu") or {}
         workers = ep.get("workers") or {}
         print(f"{target}: {cfg['endpoint_id']} image={ep.get('image')} "
@@ -236,6 +294,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--lane", default=None)
     p.add_argument("--strict", action="store_true",
                    help="exit 1 when a live endpoint differs from the manifest")
+    p.add_argument("--restore-workers", action="store_true",
+                   help="raise an endpoint's largest number of workers to the manifest's "
+                        "when it is lower (RunPod lowers it on an endpoint nobody uses)")
     p = sub.add_parser("set-image")
     p.add_argument("--lane", default=None)
     p.add_argument("--image", default=None)
@@ -250,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
 
     lanes = load_lanes()
     if args.cmd == "status":
-        return status(lanes, Client(), args.lane, args.strict)
+        return status(lanes, Client(), args.lane, args.strict, args.restore_workers)
     if args.cmd == "set-image":
         client = None if args.dry_run else Client()
         return set_image(lanes, args.tag, args.lane, args.image, client, args.dry_run)

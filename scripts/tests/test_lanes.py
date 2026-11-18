@@ -143,7 +143,8 @@ def test_the_level_and_the_cadence_of_a_workflow_entry():
         with pytest.raises(ValueError, match="unknown cadence .* \\(known: per-commit, nightly, "
                                              "weekly\\)"):
             lanes_mod.cadence_of({"cadence": odd})
-    # The cadence is validated only so far: the lanes list alone decides where a workflow runs.
+    # Without the lane's entry in the registry the rule cannot know the lane's
+    # cadence: the lanes list alone decides, as it did before workflows had a cadence.
     assert lanes_mod.workflow_runs_on_lane({"cadence": "weekly"}, PRIMARY)
     # No committed entry uses a value the functions do not know.
     for wf_id, entry in MANIFEST["workflows"].items():
@@ -474,13 +475,23 @@ def test_set_image_dry_run_sends_nothing(capsys):
 
 
 class FakeEndpoints:
-    """Stands in for the RunPod client: live endpoints by id, and which were read."""
+    """Stands in for the RunPod client: live endpoints by id, which were read
+    and what was sent to change them. A change of the workers is applied, so
+    the next read sees it. `refuse` is what RunPod answers to a change it
+    does not allow."""
 
-    def __init__(self, live):
-        self.live, self.read = live, []
+    def __init__(self, live, refuse=None):
+        self.live, self.read, self.patched, self.refuse = live, [], [], refuse
 
     def get(self, endpoint_id):
         self.read.append(endpoint_id)
+        return copy.deepcopy(self.live[endpoint_id])
+
+    def patch(self, endpoint_id, body):
+        self.patched.append((endpoint_id, body))
+        if self.refuse:
+            raise SystemExit(f"update of endpoint {endpoint_id} failed (400): {self.refuse}")
+        self.live[endpoint_id]["workers"].update(body.get("workers") or {})
         return self.live[endpoint_id]
 
 
@@ -698,3 +709,495 @@ def test_a_report_only_plan_lists_every_lane(monkeypatch, capsys):
     assert {"lane": LEGACY, "prefix": "regression"} in lanes_mod.report_matrix(REGISTRY)
     regression = (ROOT / ".github" / "workflows" / "regression.yml").read_text(encoding="utf-8")
     assert 'lanes.py report "${only[@]}"' in regression
+
+
+# -- cadences: nightly and weekly lanes ------------------------------------------------
+NIGHTLY = "py313-torch2.14.1-cu130-nightly"
+WEEKLY = "py313-torch2.14.1-cu130-weekly"
+RETIRED_LANE = {"cadence": "retired", "role": "legacy", "image": "old"}
+
+
+def _cadence_registry(**week):
+    """A retired lane, the per-commit primary, a nightly lane with an endpoint
+    and a weekly lane without one (`week` overrides it)."""
+    return _registry(old=RETIRED_LANE, main={"role": "primary"},
+                     night={"cadence": "nightly", "timeout_minutes": 120},
+                     week={"cadence": "weekly", "endpoint_id": None, "timeout_minutes": 350,
+                           **week})
+
+
+CADENCE_MANIFEST = {"workflows": {
+    "image": {"enabled": True},
+    "pack": {"enabled": True, "lanes": ["main"]},
+    "mesh": {"enabled": True, "cadence": "nightly"},
+    "music": {"enabled": True, "cadence": "weekly"},
+    "off": {"enabled": False, "cadence": "nightly"}}}
+
+
+def test_the_committed_nightly_and_weekly_lanes():
+    """They follow the primary lane's image and share one endpoint, which is
+    their own: a nightly or weekly run never takes a worker from a per-commit
+    run. The label names the cadence, because the dashboard prints only the
+    label of a lane."""
+    lanes = REGISTRY["lanes"]
+    for lane_id, cadence, minutes in ((NIGHTLY, "nightly", 120), (WEEKLY, "weekly", 350)):
+        lane = lanes[lane_id]
+        assert {k: v for k, v in lane.items() if k not in ("endpoint_id", "model_storage")} == {
+            "label": f"{cadence} · py3.13 / torch 2.14.1 / cu130 / RTX 4090",
+            "python": "3.13", "torch": "2.14.1", "cuda": "13.0", "gpu": "RTX 4090",
+            "cadence": cadence, "blocking": False, "role": "lane", "layout": 2,
+            "prefix": f"regression/lanes/{lane_id}", "image": "cu130-t2141",
+            "min_cuda_driver": "13.0", "endpoint_name": "comfyci-cu130-nightly-weekly",
+            "workers_max": 3, "disk_gb": 120, "idle_timeout_s": 60,
+            "env": {"HF_TOKEN": "{{ RUNPOD_SECRET_hf_token }}"}, "max_in_flight": 2,
+            "timeout_minutes": minutes}, lane_id
+        assert lanes_mod.is_long_cadence(lane) and "endpoint_id" in lane
+        assert lane["image"] == lanes[PRIMARY]["image"]
+        assert lane["endpoint_name"] != runpod_endpoints.endpoint_name(lanes[PRIMARY])
+        # Never the endpoint of the per-commit lane on the same image.
+        assert lane["endpoint_id"] != lanes[PRIMARY]["endpoint_id"]
+    assert "model_storage" not in lanes[NIGHTLY] and lanes[WEEKLY]["model_storage"] == "job"
+    for key in lanes_mod.ENDPOINT_KEYS:
+        assert lanes[NIGHTLY][key] == lanes[WEEKLY][key], key
+    # More workers than jobs at once: a worker whose host is busy cannot start.
+    assert lanes[NIGHTLY]["workers_max"] > lanes[NIGHTLY]["max_in_flight"]
+    # Neither is a per-commit lane, whatever endpoint it has.
+    ready = copy.deepcopy(REGISTRY)
+    ready["lanes"][NIGHTLY]["endpoint_id"] = ready["lanes"][WEEKLY]["endpoint_id"] = "ep-nw"
+    assert lanes_mod.validate(ready, MANIFEST, PACKS) == []
+    assert not {NIGHTLY, WEEKLY} & {r["lane"] for r in lanes_mod.per_commit_matrix(ready)}
+    assert lanes_mod.per_commit_matrix(ready, f"{NIGHTLY},{WEEKLY}") == []
+    # They add no image to the build.
+    assert lanes_mod.image_matrix(ready) == lanes_mod.image_matrix(PENDING)
+    # The README's table of lanes names every lane of the registry with its image.
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    for lane_id, lane in lanes.items():
+        assert f"\n| `{lane_id}` | `{lane['image']}`" in readme, lane_id
+
+
+def test_a_workflow_runs_on_the_lanes_of_its_own_cadence():
+    """Each pair of workflow cadence and lane cadence, with and without a
+    `lanes` list."""
+    why, runs = lanes_mod.why_not_on_lane, lanes_mod.workflow_runs_on_lane
+    lanes = {"commit": {"cadence": "per-commit"}, "night": {"cadence": "nightly"},
+             "week": {"cadence": "weekly"}}
+    for said in (None, "per-commit", "nightly", "weekly"):
+        entry = {} if said is None else {"cadence": said}
+        own = said or "per-commit"
+        for lane_id, lane in lanes.items():
+            same = lane["cadence"] == own
+            reason = None if same else f"cadence {own}, the lane is {lane['cadence']}"
+            # No list, or null: every lane of the cadence.
+            assert why(entry, lane_id, lane) == reason
+            assert why({**entry, "lanes": None}, lane_id, lane) == reason
+            assert runs(entry, lane_id, lane) is same
+            # A list that names the lane does not put the workflow on a lane of another cadence.
+            assert why({**entry, "lanes": [lane_id, "x"]}, lane_id, lane) == reason
+            # A list that does not name it keeps the workflow off, and is said first.
+            assert why({**entry, "lanes": ["x", "y"]}, lane_id, lane) == "manifest lanes: x, y"
+            assert not runs({**entry, "lanes": ["x", "y"]}, lane_id, lane)
+    # A sentence for a mismatch with `lanes: null`, where joining the list would fail.
+    assert why({"lanes": None, "cadence": "weekly"}, "commit", lanes["commit"]) == (
+        "cadence weekly, the lane is per-commit")
+    # A retired lane runs nothing, and its references of every cadence can still be
+    # blessed: only the list counts. The same without the lane's entry in the registry.
+    for lane in ({"cadence": "retired"}, None):
+        for entry in ({}, {"cadence": "nightly"}, {"cadence": "weekly", "lanes": ["old"]}):
+            assert why(entry, "old", lane) is None
+        assert why({"cadence": "weekly", "lanes": ["x"]}, "old", lane) == "manifest lanes: x"
+    # A cadence nobody knows is an error where the cadence decides, not a quiet "no".
+    with pytest.raises(ValueError, match="unknown cadence 'daily'"):
+        why({"cadence": "daily"}, "commit", lanes["commit"])
+    assert why({"cadence": "daily", "lanes": ["x"]}, "commit", lanes["commit"]) == (
+        "manifest lanes: x")
+
+
+def test_the_workflows_of_a_lane_and_the_lanes_of_a_workflow():
+    reg, manifest = _cadence_registry(), copy.deepcopy(CADENCE_MANIFEST)
+    lanes, entries = reg["lanes"], manifest["workflows"]
+
+    def on(lane_id, **kw):
+        return lanes_mod.workflows_for_lane(manifest, lane_id, lane=lanes[lane_id], **kw)
+
+    assert on("main") == ["image", "pack"]
+    assert on("night") == ["mesh"] and on("night", enabled_only=False) == ["mesh", "off"]
+    assert on("week") == ["music"]
+    # A retired lane, and a call without the lane's entry: the list alone, as before.
+    assert on("old") == ["image", "mesh", "music"]
+    assert lanes_mod.workflows_for_lane(manifest, "night") == ["image", "mesh", "music"]
+    # The other way round. A lane without an endpoint counts, a retired lane does not.
+    assert lanes_mod.lanes_for_workflow(entries["image"], reg) == ["main"]
+    assert lanes_mod.lanes_for_workflow(entries["pack"], reg) == ["main"]
+    assert lanes_mod.lanes_for_workflow(entries["mesh"], reg) == ["night"]
+    assert lanes_mod.lanes_for_workflow(entries["music"], reg) == ["week"]
+    assert lanes_mod.lanes_for_workflow({"lanes": ["old"]}, reg) == []
+    assert lanes_mod.lanes_for_workflow({"cadence": "nightly", "lanes": ["main"]}, reg) == []
+    assert lanes_mod.lanes_for_workflow({}, {}) == []
+    # An unknown cadence names its workflow, as a log line does.
+    entries["odd"] = {"enabled": True, "cadence": "daily"}
+    with pytest.raises(ValueError, match=r"^\[odd\] unknown cadence 'daily' \(known: "):
+        on("main")
+    assert "odd" in lanes_mod.workflows_for_lane(manifest, "main")
+
+
+def test_the_per_commit_matrix_is_what_it_was_before_workflows_had_a_cadence():
+    """For today's manifest every row lists what the `lanes` list alone gave
+    it. A nightly or weekly workflow is left out of every row."""
+    provisioned = copy.deepcopy(REGISTRY)
+    provisioned["lanes"][NEW]["endpoint_id"] = "abc123"
+    rows = lanes_mod.per_commit_matrix(provisioned, manifest=MANIFEST)
+    assert [row["lane"] for row in rows] == [PRIMARY, NEW]
+    for row in rows:
+        assert list(row) == ["lane", "prefix", "endpoint_id", "workflows"]
+        by_list = [wf_id for wf_id, entry in MANIFEST["workflows"].items()
+                   if entry.get("enabled") and (entry.get("lanes") is None
+                                                or row["lane"] in entry["lanes"])
+                   and lanes_mod.cadence_of(entry) == "per-commit"]
+        assert row["workflows"] == ",".join(by_list) and by_list, row["lane"]
+    # An entry that names no cadence runs where it ran before.
+    for wf_id, entry in MANIFEST["workflows"].items():
+        if "cadence" not in entry:
+            for lane_id in (PRIMARY, NEW):
+                assert lanes_mod.workflow_runs_on_lane(
+                    entry, lane_id, REGISTRY["lanes"][lane_id]) is (
+                    entry.get("lanes") is None or lane_id in entry["lanes"]), wf_id
+    reg = _cadence_registry()
+    assert lanes_mod.per_commit_matrix(reg, manifest=CADENCE_MANIFEST) == [
+        {"lane": "main", "prefix": "regression/lanes/main", "endpoint_id": "ep-main",
+         "workflows": "image,pack"}]
+
+
+def test_the_matrix_of_a_nightly_or_weekly_run():
+    """The lanes of the cadence that have an endpoint and an enabled workflow.
+    With none the matrix is empty and the run ends after its plan, so a lane
+    can be declared before its endpoint exists."""
+    reg, manifest = _cadence_registry(), copy.deepcopy(CADENCE_MANIFEST)
+    night = {"lane": "night", "prefix": "regression/lanes/night", "endpoint_id": "ep-night",
+             "timeout_minutes": 120, "workflows": "mesh"}
+    rows = lanes_mod.cadence_matrix(reg, "nightly", manifest=manifest)
+    assert rows == [night] and list(rows[0]) == list(night)
+    assert lanes_mod.cadence_matrix(reg, "nightly", "night,main", manifest) == [night]
+    assert lanes_mod.cadence_matrix(reg, "nightly", "main", manifest) == []
+    # Without an endpoint: left out. With one: its own row and its own time limit.
+    assert lanes_mod.cadence_matrix(reg, "weekly", manifest=manifest) == []
+    assert lanes_mod.cadence_left_out(reg, "weekly", None, manifest) == [
+        "week: no endpoint_id yet"]
+    assert lanes_mod.cadence_matrix(_cadence_registry(endpoint_id="ep-night"), "weekly",
+                                    manifest=manifest) == [
+        {"lane": "week", "prefix": "regression/lanes/week", "endpoint_id": "ep-night",
+         "timeout_minutes": 350, "workflows": "music"}]
+    # With no enabled workflow: left out, and the plan says so.
+    manifest["workflows"]["mesh"]["enabled"] = False
+    assert lanes_mod.cadence_matrix(reg, "nightly", manifest=manifest) == []
+    assert lanes_mod.cadence_left_out(reg, "nightly", None, manifest) == [
+        "night: no enabled workflow with the nightly cadence"]
+    # Without the manifest the lanes are listed as they are.
+    assert lanes_mod.cadence_matrix(reg, "nightly") == [
+        {k: v for k, v in night.items() if k != "workflows"}]
+    # A lane that names no time limit gets GitHub's own.
+    del reg["lanes"]["night"]["timeout_minutes"]
+    assert lanes_mod.cadence_matrix(reg, "nightly")[0]["timeout_minutes"] == 360
+    # Why a named lane is not in the plan.
+    assert lanes_mod.cadence_left_out(reg, "nightly", "main,ghost,week,old") == [
+        "ghost: not a lane in manifest/lanes.json", "main: cadence 'per-commit', not nightly",
+        "old: cadence 'retired', not nightly", "week: cadence 'weekly', not nightly"]
+    assert lanes_mod.cadence_left_out(reg, "nightly", None, CADENCE_MANIFEST) == []
+    # Only the two long cadences have such a matrix.
+    for cadence in ("per-commit", "retired", "daily"):
+        with pytest.raises(ValueError, match="unknown cadence"):
+            lanes_mod.cadence_matrix(reg, cadence)
+
+
+def test_the_cadence_command_prints_the_matrix_and_why_a_lane_is_left_out(monkeypatch, capsys,
+                                                                         tmp_path):
+    reg = _cadence_registry()
+    manifest = tmp_path / "workflows.json"
+    manifest.write_text(json.dumps(CADENCE_MANIFEST), encoding="utf-8")
+    monkeypatch.setattr(lanes_mod, "load_lanes", lambda path=None: reg)
+    monkeypatch.setattr(lanes_mod, "MANIFEST_FILE", manifest)
+    assert lanes_mod.main(["cadence", "nightly"]) == 0
+    out = capsys.readouterr()
+    assert json.loads(out.out) == [
+        {"lane": "night", "prefix": "regression/lanes/night", "endpoint_id": "ep-night",
+         "timeout_minutes": 120, "workflows": "mesh"}]
+    assert out.out.count("\n") == 1 and out.err == ""
+    assert lanes_mod.main(["cadence", "weekly"]) == 0
+    out = capsys.readouterr()
+    assert out.out == "[]\n"
+    assert out.err == "::notice::not tested: week: no endpoint_id yet\n"
+    assert lanes_mod.main(["cadence", "weekly", "--only", "night"]) == 0
+    out = capsys.readouterr()
+    assert out.out == "[]\n" and "not tested: night: cadence 'nightly', not weekly" in out.err
+    # --only names the lanes to plan: a lane of the cadence that is not named stays out.
+    assert lanes_mod.main(["cadence", "nightly", "--only", "main,night"]) == 0
+    assert [row["lane"] for row in json.loads(capsys.readouterr().out)] == ["night"]
+    assert lanes_mod.main(["cadence", "nightly", "--only", "main"]) == 0
+    out = capsys.readouterr()
+    assert out.out == "[]\n"
+    assert out.err == "::notice::not tested: main: cadence 'per-commit', not nightly\n"
+    with pytest.raises(SystemExit):
+        lanes_mod.main(["cadence", "per-commit"])
+    capsys.readouterr()
+    # The committed files: every row has what nightly-weekly.yml reads from it.
+    monkeypatch.undo()
+    for cadence in lanes_mod.LONG_CADENCES:
+        assert lanes_mod.main(["cadence", cadence]) == 0
+        for row in json.loads(capsys.readouterr().out):
+            assert set(row) == {"lane", "prefix", "endpoint_id", "timeout_minutes", "workflows"}
+            assert REGISTRY["lanes"][row["lane"]]["cadence"] == cadence and row["workflows"]
+
+
+def test_validate_names_a_workflow_that_its_cadence_and_lanes_leave_on_no_lane():
+    """A pack workflow names its lanes. Give it another cadence and no lane
+    takes it: the per-commit lanes drop it for its cadence, the nightly lane
+    for its list. No run would turn red for a workflow that never runs."""
+    reg = _cadence_registry()
+
+    def problems(**entry):
+        return lanes_mod.validate(reg, {"workflows": {"wf": {"enabled": True, **entry}}})
+
+    assert problems(lanes=["main"], cadence="nightly") == [
+        "workflow wf: cadence 'nightly' and lanes [\"main\"] leave it on no lane: add a nightly "
+        "lane to its lanes list"]
+    assert problems(lanes=["main", "night"], cadence="nightly") == []
+    assert problems(lanes=["main"]) == [] and problems() == [] and problems(cadence="weekly") == []
+    # Only a retired lane is no lane.
+    assert problems(lanes=["old"]) == [
+        "workflow wf: cadence 'per-commit' and lanes [\"old\"] leave it on no lane: add a "
+        "per-commit lane to its lanes list"]
+    # No list, and no lane of the cadence.
+    del reg["lanes"]["week"]
+    assert problems(cadence="weekly") == [
+        "workflow wf: cadence 'weekly' and lanes null leave it on no lane: manifest/lanes.json "
+        "has no weekly lane that is not retired"]
+    # A workflow that is switched off is held to nothing, and a list that is no list
+    # or a cadence nobody knows is said once.
+    assert lanes_mod.validate(reg, {"workflows": {"wf": {"enabled": False, "cadence": "weekly"}}}) \
+        == []
+    assert problems(lanes=[]) == ["workflow wf: lanes must be null or a non-empty list"]
+    assert problems(cadence="daily") == [
+        "workflow wf: unknown cadence 'daily' (known: per-commit, nightly, weekly)"]
+    # The committed files: the same mistake on a real pack workflow.
+    manifest = copy.deepcopy(MANIFEST)
+    pack = next(wf_id for wf_id, e in MANIFEST["workflows"].items()
+                if e.get("enabled") and e.get("custom_nodes"))
+    manifest["workflows"][pack]["cadence"] = "nightly"
+    said = lanes_mod.validate(REGISTRY, manifest, PACKS)
+    assert len(said) == 1 and said[0].startswith(
+        f"workflow {pack}: cadence 'nightly' and lanes [\"{PRIMARY}\", ")
+    assert said[0].endswith("leave it on no lane: add a nightly lane to its lanes list")
+    manifest["workflows"][pack]["lanes"].append(NIGHTLY)
+    assert lanes_mod.validate(REGISTRY, manifest, PACKS) == []
+
+
+SHARED = {"endpoint_name": "comfyci-nw", "workers_max": 3, "disk_gb": 120, "idle_timeout_s": 60,
+          "env": {"HF_TOKEN": "{{ RUNPOD_SECRET_hf_token }}"}}
+
+
+def _shared_registry():
+    """A nightly and a weekly lane on one endpoint. Only the nightly has its id yet."""
+    return _registry(old=RETIRED_LANE, main={"role": "primary"},
+                     night={"cadence": "nightly", **SHARED, "endpoint_id": "ep-nw"},
+                     week={"cadence": "weekly", **SHARED, "endpoint_id": None})
+
+
+def test_validate_holds_lanes_that_share_an_endpoint_to_the_same_settings():
+    """An endpoint runs one image with one number of workers, one disk, one
+    idle time and one environment, whatever number of lanes use it."""
+    ok = _shared_registry()
+    assert lanes_mod.validate(ok) == []
+    ok["lanes"]["week"]["endpoint_id"] = "ep-nw"  # the weekly lane gets the id later
+    assert lanes_mod.validate(ok) == []
+    for key, value in (("workers_max", 2), ("disk_gb", 80), ("idle_timeout_s", 20),
+                       ("env", {}), ("image", "old"), ("endpoint_name", "comfyci-other")):
+        bad = copy.deepcopy(ok)
+        bad["lanes"]["week"][key] = value
+        assert lanes_mod.validate(bad) == [
+            f"lane week: {key} is {value!r}, but night, which shares its endpoint, says "
+            f"{ok['lanes']['night'][key]!r}"], key
+    # A key that only one of them names is a difference too.
+    bad = copy.deepcopy(ok)
+    del bad["lanes"]["week"]["workers_max"]
+    assert lanes_mod.validate(bad) == [
+        "lane week: workers_max is None, but night, which shares its endpoint, says 3"]
+    # One name cannot stand for two endpoints.
+    bad = copy.deepcopy(ok)
+    bad["lanes"]["week"]["endpoint_id"] = "ep-other"
+    assert lanes_mod.validate(bad) == [
+        "lane week: endpoint_id is 'ep-other', but night, which has the same endpoint_name, "
+        "says 'ep-nw'"]
+    # Lanes that share by the id alone are held to it as well.
+    by_id = _registry(old=RETIRED_LANE, main={"role": "primary"},
+                      night={"cadence": "nightly", "endpoint_id": "ep-main", "workers_max": 2})
+    assert lanes_mod.validate(by_id) == [
+        "lane night: workers_max is 2, but main, which shares its endpoint, says None"]
+    # A retired lane runs nothing: its settings are held to nothing.
+    retired = copy.deepcopy(ok)
+    retired["lanes"]["old"].update({**SHARED, "workers_max": 1, "endpoint_id": "ep-nw"})
+    assert lanes_mod.validate(retired) == []
+    # Lanes with their own endpoints may differ in everything.
+    apart = copy.deepcopy(ok)
+    apart["lanes"]["week"].update({"endpoint_name": "comfyci-w", "workers_max": 1,
+                                   "endpoint_id": "ep-w"})
+    assert lanes_mod.validate(apart) == []
+
+
+def test_validate_checks_the_optional_keys_of_a_lane():
+    ok = _registry(old=RETIRED_LANE, main={
+        "role": "primary", "workers_max": 2, "disk_gb": 40, "idle_timeout_s": 20,
+        "max_in_flight": 2, "timeout_minutes": 120, "model_storage": "volume",
+        "env": {"A": "b"}, "endpoint_name": "comfyci-main"})
+    assert lanes_mod.validate(ok) == []
+
+    def problems(key, value):
+        bad = copy.deepcopy(ok)
+        bad["lanes"]["main"][key] = value
+        return lanes_mod.validate(bad)
+
+    assert lanes_mod.LANE_COUNTS == ("workers_max", "disk_gb", "idle_timeout_s", "max_in_flight",
+                                     "timeout_minutes")
+    for key in lanes_mod.LANE_COUNTS:
+        for value in (0, -1, 2.5, "3", True, [3]):
+            assert problems(key, value) == [
+                f"lane main: {key} must be a whole number above 0, not {value!r}"], (key, value)
+        assert problems(key, None) == [] and problems(key, 1) == []
+    assert problems("model_storage", "job") == [] and problems("model_storage", None) == []
+    for value in ("disk", "", 1, True, ["job"]):
+        assert problems("model_storage", value) == [
+            f"lane main: model_storage must be one of volume, job, not {value!r}"]
+    assert problems("env", {}) == [] and problems("env", None) == []
+    for value in ({"A": 1}, {"A": None}, {1: "b"}, ["A=b"], "A=b"):
+        assert problems("env", value) == ["lane main: env must map variable names to strings"]
+    for value in ("", 3, ["n"]):
+        assert problems("endpoint_name", value) == [
+            f"lane main: endpoint_name must be a name, not {value!r}"]
+
+
+def test_the_endpoint_of_a_lane_is_created_from_the_lanes_own_settings():
+    """The nightly and weekly endpoint: its own name, a larger disk, a longer
+    idle time and one more variable. `status` holds the live endpoint to the
+    same numbers."""
+    reg = copy.deepcopy(REGISTRY)
+    reg["lanes"][NIGHTLY]["endpoint_id"] = reg["lanes"][WEEKLY]["endpoint_id"] = None
+    body = runpod_endpoints.endpoint_body(reg, NIGHTLY, "cu130-t2141-abc")
+    assert body["name"] == "comfyci-cu130-nightly-weekly"
+    assert body["image"] == "ghcr.io/comfy-org/comfyci-runpod-worker:cu130-t2141-abc"
+    assert body["workers"] == {"min": 0, "max": 3, "idleTimeout": 60} and body["disk"] == 120
+    assert body["env"] == {"RUNPOD_INIT_TIMEOUT": "800",
+                           "HF_TOKEN": "{{ RUNPOD_SECRET_hf_token }}"}
+    assert body["gpu"] == {"pools": ["ADA_24"], "count": 1, "minCudaVersion": "13.0"}
+    # Everything else is what every endpoint gets, and the defaults stay as they were.
+    plain = runpod_endpoints.endpoint_body(PENDING, NEW, "cu132-t2150-abc")
+    for key in ("type", "registry", "scaling", "timeout", "flashboot", "networkVolumes",
+                "dataCenterIds"):
+        assert body[key] == plain[key], key
+    assert reg["endpoint_defaults"] == REGISTRY["endpoint_defaults"]
+    assert plain["env"] == {"RUNPOD_INIT_TIMEOUT": "800"} and plain["disk"] == 40
+    # A variable of the lane wins over a default of the same name.
+    reg["lanes"][NIGHTLY]["env"] = {"RUNPOD_INIT_TIMEOUT": "900"}
+    assert runpod_endpoints.endpoint_body(reg, NIGHTLY, "cu130-t2141")["env"] == {
+        "RUNPOD_INIT_TIMEOUT": "900"}
+    assert runpod_endpoints.endpoint_settings(reg, reg["lanes"][NIGHTLY]) == (body["workers"], 120)
+    assert runpod_endpoints.differences(reg, NIGHTLY, _live(idle=60, disk=120)) == []
+    assert runpod_endpoints.differences(reg, NIGHTLY, _live()) == [
+        "workers.idleTimeout is 20 on RunPod, the manifest says 60",
+        "disk is 40 on RunPod, the manifest says 120"]
+    # One endpoint is created once: the weekly lane gets the id by hand.
+    reg["lanes"][NIGHTLY]["endpoint_id"] = "ep-nw"
+    with pytest.raises(SystemExit, match="shares the endpoint 'comfyci-cu130-nightly-weekly' "
+                                         f"with '{NIGHTLY}', which already has ep-nw"):
+        runpod_endpoints.endpoint_body(reg, WEEKLY, "cu130-t2141-abc")
+
+
+def test_set_image_sends_one_patch_to_an_endpoint_that_lanes_share(capsys):
+    reg = copy.deepcopy(REGISTRY)
+    reg["lanes"][NIGHTLY]["endpoint_id"] = reg["lanes"][WEEKLY]["endpoint_id"] = "ep-nw"
+    main = reg["lanes"][PRIMARY]["endpoint_id"]
+    assert lanes_mod.lanes_on_image(reg, "cu130-t2141") == [PRIMARY, NIGHTLY, WEEKLY]
+    image = {"image": "ghcr.io/comfy-org/comfyci-runpod-worker:cu130-t2141-abc"}
+    plan = runpod_endpoints.plan_set_image(reg, "cu130-t2141-abc", image_id="cu130-t2141")
+    assert plan == [(PRIMARY, main, image), (NIGHTLY, "ep-nw", image)]
+    assert f"[{WEEKLY}] shares endpoint ep-nw with {NIGHTLY}; repointed once\n" in (
+        capsys.readouterr().out)
+    # A lane asked for by name is repointed, shared endpoint or not.
+    assert runpod_endpoints.plan_set_image(reg, "cu130-t2141-abc", lane_id=WEEKLY) == [
+        (WEEKLY, "ep-nw", image)]
+    client = FakeEndpoints({main: _live(), "ep-nw": _live()})
+    assert runpod_endpoints.set_image(reg, "cu130-t2141-abc", None, "cu130-t2141", client,
+                                      False) == 0
+    assert client.patched == [(main, image), ("ep-nw", image)]
+
+
+def test_status_restores_the_workers_runpod_took_from_an_idle_endpoint(capsys):
+    """RunPod lowers the largest number of workers of an endpoint without
+    requests, to 2 after some days and to 0 in the end. The jobs of the next
+    run would then only wait in the queue."""
+    reg = _status_registry()
+    client = FakeEndpoints({"ep-main": _live(workers_max=2), "ep-old": _live(workers_max=0)})
+    # Without the flag the command only reads.
+    assert runpod_endpoints.status(reg, client, "main") == 0
+    assert "main: differs: workers.max is 2 on RunPod, the manifest says 3\n" in (
+        capsys.readouterr().out)
+    assert client.patched == []
+    # With it: one PATCH, which names the two numbers it must not change.
+    assert runpod_endpoints.status(reg, client, "main", strict=True, restore=True) == 0
+    assert client.patched == [("ep-main", {"workers": {"min": 0, "idleTimeout": 20, "max": 3}})]
+    out = capsys.readouterr().out
+    assert "main: workers.max was 2 on RunPod, raised to 3\n" in out
+    assert "workers=0-3 idle=20s" in out and "differ" not in out
+    # The endpoint is as the manifest says now: the next run sends nothing.
+    assert runpod_endpoints.status(reg, client, None, strict=True, restore=True) == 0
+    assert len(client.patched) == 1 and client.live["ep-old"]["workers"]["max"] == 0
+    # From 0, and to the lane's own number.
+    reg["lanes"]["main"]["workers_max"] = 2
+    for have in (0, 1):
+        client = FakeEndpoints({"ep-main": _live(workers_max=have)})
+        assert runpod_endpoints.status(reg, client, "main", restore=True) == 0
+        assert client.patched == [("ep-main", {"workers": {"min": 0, "idleTimeout": 20,
+                                                           "max": 2}})]
+    # Never downwards, never for a retired lane, and nothing else is changed:
+    # those stay differences that the command reports.
+    client = FakeEndpoints({"ep-main": _live(workers_max=5, idle=5, disk=30),
+                            "ep-old": _live(workers_max=3)})
+    capsys.readouterr()
+    assert runpod_endpoints.status(reg, client, None, strict=True, restore=True) == 1
+    assert client.patched == []
+    out = capsys.readouterr().out
+    assert "main: differs: workers.max is 5 on RunPod, the manifest says 2\n" in out
+    assert "old: differs: workers.max is 3 on RunPod, the manifest says 0" in out
+    assert "4 of the settings above differ" in out
+    # An answer without the number, or with something that is no number, sends
+    # nothing either and raises nothing.
+    for value in (None, "1", True, 1.5):
+        odd = _live(workers_max=value)
+        if value is None:
+            del odd["workers"]["max"]
+        client = FakeEndpoints({"ep-main": odd})
+        assert runpod_endpoints.status(reg, client, "main", restore=True) == 0
+        assert client.patched == [], value
+
+
+def test_a_refused_restore_ends_the_step_with_runpods_message(monkeypatch, capsys):
+    """The account has a worker quota. A raise it refuses must stop the run
+    before it submits jobs that no worker would take."""
+    reg, real_client = _status_registry(), runpod_endpoints.Client
+    client = FakeEndpoints({"ep-main": _live(workers_max=0)},
+                           refuse='{"error": "max workers quota exceeded"}')
+    monkeypatch.setattr(runpod_endpoints, "load_lanes", lambda: reg)
+    monkeypatch.setattr(runpod_endpoints, "Client", lambda: client)
+    with pytest.raises(SystemExit, match=r"update of endpoint ep-main failed \(400\): .*quota"):
+        runpod_endpoints.main(["status", "--lane", "main", "--restore-workers"])
+    assert len(client.patched) == 1 and "raised" not in capsys.readouterr().out
+    # The flag belongs to the command, and without it nothing is sent.
+    assert runpod_endpoints.main(["status", "--lane", "main"]) == 0
+    assert len(client.patched) == 1
+
+    # The real client quotes RunPod's answer, for a repoint as for a restore.
+    class Refused:
+        status_code, text = 400, '{"error": "max workers quota exceeded"}'
+
+    monkeypatch.setattr(runpod_endpoints.requests, "patch", lambda *a, **kw: Refused())
+    with pytest.raises(SystemExit) as stop:
+        real_client("key", "https://runpod.invalid").patch("ep-1", {"workers": {}})
+    assert str(stop.value) == ('update of endpoint ep-1 failed (400): {"error": "max workers '
+                               'quota exceeded"}')

@@ -271,11 +271,17 @@ def main():
         if (args.workflows == "all" and e.get("enabled")) or wf_id in args.workflows.split(",")
     }
     # A golden only means something on a lane the workflow runs on: the lane
-    # filter applies to generating, promoting and blessing alike.
-    for wf_id in [w for w, e in selected.items() if not lanes_mod.workflow_runs_on_lane(e, lane)]:
-        print(f"[{wf_id}] not run on lane {lane} (manifest lanes: "
-              f"{', '.join(selected[wf_id]['lanes'])}); skipped")
-        del selected[wf_id]
+    # filter applies to generating, promoting and blessing alike. It knows the
+    # cadence too, so `all` on a lane takes that lane's workflows. On a retired
+    # lane only the manifest's `lanes` list counts.
+    for wf_id, e in list(selected.items()):
+        try:
+            why_not = lanes_mod.why_not_on_lane(e, lane, lanes["lanes"][lane])
+        except ValueError as err:
+            raise SystemExit(f"[{wf_id}] {err}; see manifest/workflows.json")
+        if why_not:
+            print(f"[{wf_id}] not run on lane {lane} ({why_not}); skipped")
+            del selected[wf_id]
     # A smoke-level workflow is not compared, so it has no golden to generate,
     # promote or bless: `all` leaves it out, and naming it is a mistake.
     at_smoke = []

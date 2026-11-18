@@ -208,6 +208,44 @@ def test_lane_filter_skips_workflows_restricted_to_other_lanes(tmp_path, capsys)
     assert "[flux] not run on lane legacy (manifest lanes: elsewhere); skipped" in capsys.readouterr().out
 
 
+def test_the_lane_filter_knows_the_cadence(tmp_path, capsys):
+    """A reference lives under a lane's prefix, so it only means something on
+    a lane of the workflow's cadence: `all` takes that lane's workflows, and
+    one of another cadence is skipped with a line that says why (its `lanes`
+    is null, and joining that for the line used to be a TypeError). A retired
+    lane keeps the references of every cadence it once ran."""
+    remote = _remote(tmp_path)
+    root = _manifest(tmp_path)
+
+    def write(name, data):
+        (root / "manifest" / name).write_text(json.dumps(data))
+
+    manifest = json.loads((root / "manifest" / "workflows.json").read_text())
+    manifest["workflows"]["flux"]["cadence"] = "nightly"
+    write("workflows.json", manifest)
+    for n, named in enumerate((("--workflows", "flux"), ())):
+        with pytest.raises(SystemExit, match="no workflows selected for lane legacy"):
+            _run_main(tmp_path / f"skip{n}", remote, root, "--ref", "v0.33.2", "--bless-only",
+                      *named)
+        assert ("[flux] not run on lane legacy (cadence nightly, the lane is per-commit); "
+                "skipped\n") in capsys.readouterr().out
+    # The same workflow on a lane of its cadence, and on a retired lane.
+    for n, cadence in enumerate(("nightly", "retired")):
+        lanes = json.loads(json.dumps(LANES))
+        lanes["lanes"]["legacy"]["cadence"] = cadence
+        write("lanes.json", lanes)
+        assert _run_main(tmp_path / f"bless{n}", remote, root, "--ref", "v0.33.2",
+                         "--bless-only", "--reason", cadence) == 0
+        assert "not run on lane" not in capsys.readouterr().out
+    # A cadence nobody knows is a mistake in the manifest.
+    write("lanes.json", LANES)
+    manifest["workflows"]["flux"]["cadence"] = "daily"
+    write("workflows.json", manifest)
+    with pytest.raises(SystemExit, match=r"^\[flux\] unknown cadence 'daily' \(known: per-commit, "
+                                         r"nightly, weekly\); see manifest/workflows.json$"):
+        _run_main(tmp_path / "odd", remote, root, "--ref", "v0.33.2", "--bless-only")
+
+
 def test_a_retired_lane_can_be_blessed_but_not_generated(tmp_path):
     """Generating dispatches GPU work, which a retired lane never gets;
     blessing and promoting only touch storage, so its goldens stay manageable."""
