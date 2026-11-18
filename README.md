@@ -55,38 +55,245 @@ pick with `--storage` / `REGRESSION_STORAGE`):
 ## Adding a workflow
 
 Templates are the corpus's main source: a template that stops producing its
-image is a release blocker, and the comparison here is what notices. One PR to
-this repo per template.
+output is a release blocker, and the suite is what notices. One command and
+one pull request per template:
 
-1. Dump `/object_info` from the ComfyUI version the corpus runs against, with
-   the template's models present so their combo values resolve, and import the
-   template from a [workflow_templates](https://github.com/Comfy-Org/workflow_templates)
-   checkout:
+```
+python scripts/import_template.py audio_ace_step_1_5_checkpoint --id ace_step_15_t2a \
+    --server http://127.0.0.1:8188 --cadence nightly --timeout-s 900 \
+    --set 94.duration=30 --set 98.seconds=30 --expect seconds=30
+```
+
+`scripts/import_template.py` converts the template, has a ComfyUI check the
+prompt, writes `manifest/workflows/<id>_api.json`, adds the entry to
+`manifest/workflows.json` and runs the manifest lint. It needs two things:
+
+- **A running ComfyUI of the current version**, named with `--server`. Any
+  will do: the model and input files do not have to be there. Without one,
+  `--object-info FILE` takes a saved dump (`curl -s
+  http://127.0.0.1:8188/object_info > object_info.json`). The prompt check is
+  then skipped, and the command says so.
+- **pytest**, for the lint: `pip install pytest`. It is not in
+  `scripts/requirements.txt`. Without it the command says so and stops
+  before it writes anything.
+
+The template is fetched from
+[workflow_templates](https://github.com/Comfy-Org/workflow_templates) by its
+name, at `--templates-ref` (default `main`). The branch is resolved to a
+commit first, so the URLs of the input files in the entry do not move.
+`--templates-dir` reads the `templates/` folder of a checkout, and pins the
+input files to the checkout's commit.
+
+### A smoke-level workflow
+
+A smoke-level workflow only has to finish and to write usable files (see
+[Smoke level](#smoke-level)). It needs no reference, so the pull request is
+all there is.
+
+1. **Look first.** The same command with `--dry-run` prints the converted
+   nodes (id, class, literal inputs), the entry and the result of the prompt
+   check, and writes nothing. That is where the ids 94 and 98 of the example
+   come from, and where one sees that two inputs hold the length. A refusal
+   prints the same list. What the lint would refuse in the new entry is
+   refused here too (see the list below). A rule that adds up the whole
+   manifest, like the room on the volume, is the lint's alone, and the lint
+   runs after the write. Make the run small with `--set`: 30 seconds of audio,
+   25 frames, a mesh at a lower resolution. The worker sends a run's files in
+   the job's answer, and a file over its size limit is only listed.
+2. **Run the command.** It
+   - converts the template and applies the `--set` values;
+   - posts the prompt to the server and reads ComfyUI's answer. It passes
+     when ComfyUI names no node error, or only says that it does not have a
+     model or input file of the entry ("value not in list", or "invalid
+     image file" from `LoadImage`, `LoadAudio` and `LoadVideo`). Any other
+     error stops the import with ComfyUI's message. A server that has the
+     files accepts the prompt: the command takes it out of the queue at once
+     and interrupts it, so nothing is generated on that machine;
+   - writes the workflow file, adds the entry at the end of `workflows` with
+     `"level": "smoke"` and `"enabled": true`, and runs the whole manifest
+     lint. No other line of the manifest changes, and both files keep the
+     manifest's line ends. It writes over no workflow file: one that is
+     already there stops it before it writes, and so does an id that differs
+     from another by case only. When the lint fails, the command ends with an
+     error and says what to take back.
+3. **Open the pull request.** **Script tests** runs the lint again.
+4. **A first look, before the merge**, when the lane has its endpoint.
+   Someone with write access dispatches the one workflow from the pull
+   request's branch, with `publish` off:
 
    ```
-   curl -s http://127.0.0.1:8188/object_info > object_info.json
-   python scripts/import_template.py image_pixeldit_t2i \
-       --templates-dir ../workflow_templates/templates \
-       --object-info object_info.json --id pixeldit_t2i
+   gh workflow run nightly-weekly.yml --repo Comfy-Org/comfyci-runpod-worker \
+       --ref <branch> -f cadence=nightly -f workflows=<id> -f publish=false
    ```
 
-   That writes `manifest/workflows/<id>_api.json` and prints the manifest entry.
-   It converts the template the way the frontend's Export (API) does, picks the
-   branch a constant switch selects (so the other branch's models never have to
-   be synced), drops preview nodes, normalises the output to a `SaveImage` PNG
-   prefixed with the workflow id, and fills `models` from the download links in
-   the template's own model-links note, with the sha256 ComfyUI publishes.
+   The result is on that run's page and in its attached files. Nothing is
+   written to the results branch. The models have to be on the volume first:
+   dispatch **Sync models** from the branch. The merge runs it again from
+   main. A dispatch needs a branch of this repository, so for a pull request
+   from a fork the reviewer pushes its commits to one first.
+5. **Merge.** **Sync models** puts the models on the volume, triggered by the
+   merge. The workflow runs with the lane's next run. A run that starts
+   before the sync has ended cannot test it: its cell says that the models
+   are not on the volume yet (`missing_model`).
 
-   It refuses rather than guess. A template whose widget layout lives on the
-   node instance, or one that needs custom nodes, has to be exported by hand
-   from ComfyUI (**Workflow → Export (API)**) instead; `scripts/tests/test_template_api_export.py`
-   documents which conversion rules are covered. A loader whose models/
-   subdirectory it does not know is also a refusal, not a guess: add the
-   `(class_type, input name)` pair to `DIRECTORY_BY_LOADER_INPUT`. A template
-   whose result is text is refused too: see "A text workflow" below.
+A workflow that fails its first run reads "first run" in the report (see
+[Smoke level](#smoke-level)). It is red, because someone has to fix it, and
+it does not read like a regression in the commits the run covered.
 
-2. Paste the entry under `workflows` in `manifest/workflows.json` and choose a
-   `timeout_s` the model can finish in. Leave `"enabled": false`.
+### A reference-level workflow
+
+A reference-level workflow is compared with an approved reference. One
+command and one pull request too, then one approval that costs no GPU time.
+
+1. The same command with `--level reference --cadence per-commit`.
+2. Open the pull request and merge. The entry is `"enabled": true` from the
+   start. Until the workflow has a reference its verdict is `no_baseline`: a
+   warning, not a failure, and no PR comment.
+3. After two runs, look at the output on the run page. When the second run's
+   output is the same as the first's, approve it: **Golden baselines** with
+   `from_run=master/<full sha>`, `workflows=<id>`, `lane=<lane id>`,
+   `bless=true` and a `reason` (see
+   [Accepting an intentional change](#accepting-an-intentional-change-re-bless)).
+   For a text workflow, read the text before you approve it: a useless answer
+   would pass from then on.
+
+What is given up against a reference from two fresh runs: its own noise
+measurement. The two real runs before the approval replace it. For a workflow
+that is known not to repeat bit for bit, the two-run route stays: **Golden
+baselines** with a release tag and `workflows=<id>`, inspect, bless, and
+explicit `thresholds` in the entry. Audio has no reference level yet: nothing
+compares it, and the command says so.
+
+### Where a workflow runs
+
+`--cadence` has no default: where a workflow runs decides what it costs and
+where its models live.
+
+- `per-commit`: on every ComfyUI commit. Keep a per-commit lane under 30
+  workflows of today's average length, and put a workflow that runs longer
+  than 2 minutes on the nightly lane. Each workflow there is paid for on every
+  commit.
+- `nightly`: once a night, with its models on the volume. The lint adds up
+  what the volume has to hold and fails at 90 % of it.
+- `weekly`: refused while no weekly lane in `manifest/lanes.json` has an
+  endpoint ("the weekly lane is not switched on yet: use --cadence nightly").
+  The weekly lane keeps no models on the volume (`"model_storage": "job"`),
+  so it is switched on when a job can fetch its own.
+
+A lane without an endpoint tests nothing yet (see
+[Nightly and weekly lanes](#nightly-and-weekly-lanes)). The command takes the
+workflow and prints a note.
+
+### What the command does to a template
+
+| Flag | What it does |
+|---|---|
+| `--id` | the workflow id: the key in the manifest and the prefix of the output files. Letters, digits, `_`, `.` and `-` |
+| `--server URL`, `--object-info FILE` | where the node definitions come from, and with `--server` who checks the prompt |
+| `--templates-dir DIR`, `--templates-ref REF` | where the template comes from |
+| `--cadence`, `--level` | the entry's `cadence` (required) and `level` (default `smoke`) |
+| `--set <node>.<input>=<value>` | overrides a literal input. The value is JSON: `30`, `true`, `'"euler"'`. An unknown node or input stops the command and prints the node list |
+| `--expect key=number` | fills `expect`: `width`, `height`, `frames`, `seconds`, `min_chars` |
+| `--timeout-s N` | the entry's `timeout_s`. Absent: null, the manifest default of 600 |
+| `--keep-sampling` | leaves text generation sampled, at smoke level. Refused for now, see below |
+| `--dry-run` | prints, writes nothing |
+| `--print` | writes the workflow file and prints the entry. The manifest stays as it is and no lint runs |
+| `--skip-sha` | asks no model host. The entry then has no `sha256` and no `bytes`, and the lint asks for the sizes |
+
+It converts the template the way the frontend's Export (API) does, and picks
+the branch a constant switch selects, so the other branch's models are never
+synced. Then:
+
+- **Outputs.** Each save node is made one the suite has a check for, and
+  named after the workflow:
+
+  | The template ends in | The workflow file gets | Kind |
+  |---|---|---|
+  | `SaveImage` or `SaveImageAdvanced`, one or more | a `SaveImage` for each, prefixed with the workflow id. A `SaveImageAdvanced` that does not write 8-bit sRGB PNG is refused | image |
+  | only `PreviewImage` | the last `PreviewImage` that nothing reads becomes that `SaveImage` | image |
+  | `SaveAnimatedWEBP`, `SaveAnimatedPNG` | a `SaveImage` of the last frame (`ImageFromBatch`). The animated file is not written | image |
+  | `SaveVideo` | the node, with `format` `mp4`, codec `h264` and prefix `<id>_video`, and a `SaveImage` of the last frame as the main output | image |
+  | `SaveGLB` fed by a mesh | the node, with prefix `<id>_mesh`, and a `RenderMesh` (1024 px, no camera) with a `SaveImage` as the main output | image |
+  | `SaveGLB` fed by a 3D file, `Save3DAdvanced` | refused: "no mesh link to render: add a SaveGLB and a RenderMesh by hand" | |
+  | `SaveAudioAdvanced`, `SaveAudio`, `SaveAudioMP3`, `SaveAudioOpus` | `SaveAudioAdvanced` with `format` `flac`, prefixed with the workflow id | audio |
+  | `SaveText`, or one final `PreviewAny` fed by a link, and no other save node | one `SaveText` with `format` `txt`, prefixed with the workflow id | text |
+
+  With outputs of several kinds, the first of video, mesh, audio, image and
+  text names the kind. Every save node of that kind gets the workflow id as
+  its prefix, and every other one `<id>_<type>` (`<id>_audio`, `<id>_text`).
+  The lint holds a workflow to the same rule. Preview nodes are dropped. So
+  is any other node that only shows something (`ImageCompare`), and the
+  command names it.
+- **Text generation.** Every `TextGenerate` node is set to `sampling_mode`
+  `"off"` and `mtp` `"off"`, at both levels.
+- **Models.** Read from `properties.models` of the loader nodes that are left
+  (name, URL, folder), with the `sha256` and the size Hugging Face publishes.
+  A loader that lists nothing falls back to the links in the template's
+  notes. A file whose host publishes no sha256 is downloaded once and hashed.
+  `HF_TOKEN` from the environment is sent to huggingface.co, over https
+  only: a gated repository answers nothing without it. A gated file is the
+  only one written without its sha256, with a note. A host that is busy, a
+  file that is not there and a download that is a web page stop the import.
+- **A file the manifest already lists.** The volume holds one file per folder
+  and name, and the lint wants one URL and one sha256 for it. The gallery
+  serves the same file from several repositories. When the sha256 says it is
+  the same file (the size, where the manifest has no sha256), the entry gets
+  the model as the manifest has it, and the command prints a note. Another
+  file under the same name is refused.
+- **Input files.** A file name on `LoadImage`, `LoadAudio` or `LoadVideo`
+  becomes a `models` entry with `"directory": "input"`, the URL of the file
+  in the templates repository at the pinned commit, its sha256 and its size,
+  and the entry gets `"comfy_flags": ["--input-directory",
+  "/runpod-volume/models/input"]`.
+- **Seeds.** Every literal `seed` and `noise_seed` gets a seed override with
+  the template's value. A seed that another node feeds is pinned on that
+  node: the `value` of a `PrimitiveInt`.
+
+It refuses and does not guess. What it refuses today:
+
+- **A template whose widget layout lives on the node instance**
+  (`CustomCombo`), and one that needs nodes the server does not have (custom
+  nodes). Export such a workflow by hand, see below.
+- **A template that calls a paid service** through a partner node. Such a
+  node needs an account key and credits, and the worker has neither.
+- **A workflow with a literal sub-input of a dynamic combo**, like
+  `format.codec` of `SaveVideo` or `sampling_mode.temperature` of a sampled
+  text generation. The worker drops such an input before it queues the
+  prompt, and the lint refuses a workflow that has one until the image that
+  runs keeps it. The command holds the lint's rule, and a test holds the two
+  together. Until the rule goes a template that saves a clip is refused, and
+  so is `--keep-sampling`.
+- **An input the node of this ComfyUI does not have**: the template was made
+  for another version of the node, and the run would go on without the value.
+- **A save node no check reads** (`SaveWEBM`), and a template that saves
+  nothing.
+- **A loader whose models/ folder it does not know** and that lists no file
+  itself: add the `(class_type, input name)` pair to
+  `DIRECTORY_BY_LOADER_INPUT`.
+- **A model folder the worker does not search**: one that
+  `docker/extra_model_paths.yaml` does not map.
+- **A download link that is not https.**
+- **A file input the entry cannot list**: a file of ComfyUI's temp or output
+  folder, which only the machine the template was made on has, and a file
+  on any node but `LoadImage`, `LoadAudio` and `LoadVideo` (the mask of a
+  `Painter`).
+- **A seed whose number it cannot find**: one fed by a node that has no
+  whole number of its own, or several.
+
+`scripts/tests/test_template_api_export.py` documents which conversion rules
+are covered.
+
+### A workflow written by hand
+
+A template the command refuses, or a workflow that is no template (the pack
+workflows), is written by hand. The rules are the ones the command follows.
+
+1. Export the workflow from ComfyUI (**Workflow → Export (API)**) to
+   `manifest/workflows/<id>_api.json`, or convert a template with
+   `scripts/template_api_export.py`.
+
+2. Write the entry under `workflows` in `manifest/workflows.json`, with a
+   `timeout_s` the model can finish in.
 
    `output_kind` says what the workflow's main output is, and so how it is
    compared. An entry without the key is an image workflow: its `SaveImage`
@@ -123,12 +330,13 @@ this repo per template.
    `"per-commit"`), `"nightly"` or `"weekly"`. It runs on the lanes of that
    cadence and on no other (see [Lanes](#lanes)).
 
-   For a hand-exported workflow, the entry needs the same shape: `workflow_path`,
+   The entry has the shape the command writes: `enabled`, `workflow_path`,
    `seed_overrides` (node id → input patch, belt-and-braces for the seed),
    `models` (name + download url + ComfyUI models subdirectory, plus `sha256`
-   when the host publishes one), and optionally `gpu_type`, `thresholds`,
-   `comfy_flags`. Input images for `LoadImage` nodes (and clips for
-   `VHS_LoadVideo`) are listed under `models` too, with `"directory": "input"`
+   when the host publishes one), `gpu_type`, `timeout_s`, `thresholds`,
+   `golden_tag`, and optionally `comfy_flags`. Input files of `LoadImage`,
+   `LoadAudio` and `LoadVideo` nodes (and clips for `VHS_LoadVideo`) are
+   listed under `models` too, with `"directory": "input"`
    (pin the url to a commit, not a branch), and the entry sets
    `"comfy_flags": ["--input-directory", "/runpod-volume/models/input"]` so
    ComfyUI reads them from the volume. A model that lives in a subfolder of a
@@ -161,9 +369,8 @@ this repo per template.
    puts on the volume passes. The rule goes when jobs can fetch models.
 
    **A text workflow** (a model that answers in text, like the
-   `llm_qwen38_27b_t2t` entry) is written by hand: the importer only writes
-   image workflows and stops on a text template with what to do. Convert the
-   template with `scripts/template_api_export.py`, then make sure of this:
+   `llm_qwen38_27b_t2t` entry) has rules of its own. The command writes one
+   from a template. Written by hand, make sure of this:
 
    - The entry says `"output_kind": "text"`.
    - The graph ends in one `SaveText` node with `filename_prefix` equal to the
@@ -250,12 +457,11 @@ this repo per template.
 4. Merge. `sync-models.yml` downloads the new models onto the network volume
    automatically, through a one-shot job on the primary lane's endpoint (every
    lane shares the volume, so one sync serves them all).
-5. Generate + bless a golden for it: run the **Golden baselines** workflow with
-   the current release tag and `workflows: <id>`, inspect, bless. For a text
-   workflow, read `golden/<id>/<tag>/outputs/<id>_00001.txt` before you bless
-   it: a useless answer would pass from then on. An empty one is refused, and
-   so is a text golden whose two runs differ (see [Verdicts](#verdicts)).
-6. Flip `"enabled": true` in a follow-up PR.
+5. A reference-level workflow gets its reference the way
+   [A reference-level workflow](#a-reference-level-workflow) says: its verdict
+   is `no_baseline` until a run of it is approved. An empty text is not
+   approved, and with the two-run route neither is a text golden whose two
+   runs differ (see [Verdicts](#verdicts)).
 
 ## Verdicts
 

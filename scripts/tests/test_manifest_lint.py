@@ -601,6 +601,59 @@ def test_referenced_files_helper():
                                      "clip.mp4", "bbox/face.pt"}
 
 
+# The importer lists the sound a LoadAudio reads and the clip a LoadVideo
+# reads as input files, next to the pictures. Unknown here, such a file would
+# be "in the models list but never loaded".
+INPUT_FILE_BY_NODE.update({"LoadAudio": "audio", "LoadVideo": "file"})
+
+
+def test_the_lint_knows_the_input_files_the_importer_lists():
+    import import_template
+
+    assert import_template.INPUT_FILE_BY_NODE.items() <= INPUT_FILE_BY_NODE.items()
+    assert import_template.INPUT_DIR == INPUT_DIR
+    assert set(import_template.KEPT_SAVES) <= OUTPUT_NODES
+    wf = {
+        "1": {"class_type": "LoadAudio", "inputs": {"audio": "voice_demo.mp3"}},
+        "2": {"class_type": "LoadVideo", "inputs": {"file": "warrior.mov [input]"}},
+        "3": {"class_type": "LoadVideo", "inputs": {"file": ["9", 0]}},
+        # Only the node's own file input names a file.
+        "4": {"class_type": "LoadAudio", "inputs": {"file": "not_a_file", "audio": ["9", 0]}},
+        "5": {"class_type": "SaveVideo", "inputs": {"file": "x", "audio": "y", "video": ["2", 0]}},
+    }
+    assert _referenced_files(wf) == {"voice_demo.mp3", "warrior.mov"}
+    assert import_template.input_names(wf) == ["voice_demo.mp3", "warrior.mov"]
+
+
+def test_the_importer_refuses_what_these_rules_refuse():
+    """The importer holds some of these rules itself, so that it says before
+    it writes what this lint would say after. This test holds each pair
+    together: a rule that changes or goes here takes the importer's with it."""
+    import import_template
+
+    # Dotted literals. The rule goes once the image that runs keeps them:
+    # take `dotted_literals` out of the importer's `finish_prompt` then.
+    assert "test_no_input_the_worker_would_strip" in globals()
+    clip = {"1": {"class_type": "SaveVideo", "inputs": {
+        "format": "mp4", "format.codec": "h264", "video": ["2", 0], "format.audio": ["3", 0]}},
+        "2": {"class_type": "TextGenerate", "inputs": {"sampling_mode.seed": 1, "mtp": "off"}}}
+    assert _literal_dynamic_inputs(clip) == ["1:SaveVideo.format.codec",
+                                             "2:TextGenerate.sampling_mode.seed"]
+    for wf in (clip, *(_load_workflow(entry) for entry in WORKFLOWS.values())):
+        assert import_template.dotted_literals(wf) == _literal_dynamic_inputs(wf)
+    # The model folders the worker searches, read from the same file.
+    assert import_template.model_folders() == _model_folders()
+    # One folder and name is one file: the importer looks a file up by that key.
+    listed = {f"{m['directory']}/{m['name']}" for e in WORKFLOWS.values() for m in e["models"]}
+    assert set(import_template.manifest_files(MANIFEST)) == listed
+    # A seed that a link feeds gets an override the seed rule takes.
+    wf = {"1": {"class_type": "PrimitiveInt", "inputs": {"value": 7}},
+          "2": {"class_type": "KSampler", "inputs": {"seed": ["1", 0]}}}
+    pins = import_template.seed_overrides(wf)
+    assert _has_seed(wf) and pins == {"1": {"value": 7}}
+    assert all(name in wf[nid]["inputs"] for nid, patch in pins.items() for name in patch)
+
+
 def test_output_ancestors_helper():
     wf = {
         "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
