@@ -40,7 +40,7 @@ pick with `--storage` / `REGRESSION_STORAGE`):
 | Path | What |
 |---|---|
 | `Dockerfile`, `docker/` | Worker image: CUDA + torch + pre-cloned ComfyUI. Commit under test is checked out per request. |
-| `src/` | RunPod handler (`handler.py`), commit checkout, workflow runner, volume model sync |
+| `src/` | RunPod handler (`handler.py`), commit checkout, workflow runner, volume model sync, the model fetch of a job (see [Models that a job fetches](#models-that-a-job-fetches)) |
 | `manifest/workflows.json` | Single source of truth: workflows, models, seeds, thresholds (staged workflow JSONs not yet in the manifest live in `manifest/workflows/`) |
 | `manifest/lanes.json` | Environment lanes (python / torch / cuda / GPU, cadence, storage prefix) published to the dashboard through the run index |
 | `manifest/custom_nodes.json` | Custom-node packs (repo, pinned commit) the pack workflows install on the worker, baked into the images CI builds (see [Custom-node packs](#custom-node-packs)) |
@@ -211,7 +211,7 @@ this repo per template.
 | `fail` | metrics exceed thresholds vs golden | **red** |
 | `execution_error` | workflow errored on the commit under test, or a custom-node pack it requested did not import (worker status `custom_node_error`) | **red** |
 | `no_baseline` | no blessed golden yet | warning, green |
-| `infra_error` | RunPod/queue/checkout/model-volume/pack-install problem (after 1 retry) | warning, green |
+| `infra_error` | RunPod/queue/checkout/model-volume/model-download/pack-install problem (after 1 retry) | warning, green |
 
 That is what the verdicts mean at reference level (the main tests), where an
 output is compared with its golden. A workflow at smoke level uses the same
@@ -546,6 +546,15 @@ it cannot hold up the commits that wait for the run to end.
   (see [Results layout](#results-layout)) is not linked: the report points
   to the files attached to the run. The legend explains the two smoke
   labels. A page without a smoke-level result reads as it always did;
+- for a lane whose jobs fetch their models, two more columns in the table
+  of workflows: **Models GB**, what the job downloaded (and what it found on
+  its worker from an earlier job), and **Fetch s (MB/s)**, how long its
+  models took it and how fast the download was. The facts table adds a
+  **Model downloads** row with the run's total and, when a worker had no
+  Hugging Face token, a warning that names the workflows. A workflow whose
+  model the host refused says what to do about it: accept a licence, check
+  the token, or correct a URL. A page of a lane with its models on the volume
+  has none of this;
 - every output file, a link to each `run.json`, schema notes, the status of
   custom-node packs, and the workflows that did not run on the lane;
 - the lane's newest 20 commits with their results, each linked to the run that
@@ -724,7 +733,7 @@ Today's lanes:
 | `py313-torch2.14.1-cu130` | `cu130-t2141` | primary, blocking | per-commit |
 | `py313-torch2.15.0-cu132` | `cu132-t2150` | lane, informational | per-commit (from its first endpoint) |
 | `py313-torch2.14.1-cu130-nightly` | `cu130-t2141` | lane, informational | nightly (from its first endpoint) |
-| `py313-torch2.14.1-cu130-weekly` | `cu130-t2141` | lane, informational | weekly (from its first endpoint, and for workflows with models once those are fetched for each job) |
+| `py313-torch2.14.1-cu130-weekly` | `cu130-t2141` | lane, informational | weekly (from its first endpoint). Its jobs fetch their models |
 | `py312-torch2.11.0-cu128` | `cu128-t2110` (never rebuilt) | legacy | retired: history only |
 
 - **Role**: exactly one lane is `primary`, the one `primary` names. It is the
@@ -995,9 +1004,140 @@ type:
 | `network_volumes` | `runpod_endpoints.py create`, `status`, `validate`, the manifest lint | the network volumes the workers mount (default `endpoint_defaults.network_volumes`: the model volume). `[]` means no volume: the lane must then say `"model_storage": "job"`, and a workflow that runs only on such lanes does not count against the volume's size |
 | `timeout_minutes` | `lanes.py cadence`, `nightly-weekly.yml`, `run_regression.py`, `validate` | the time limit of the lane's job (default 360, GitHub's own). On a nightly or weekly lane the run's own deadline is this minus 25, so `validate` asks for more than 25 there, and for every enabled workflow of the lane that its `timeout_s` plus 2,100 seconds is under that deadline |
 | `max_in_flight` | `run_regression.py` | how many jobs a run has on the endpoint at once (default: all of them, as on the per-commit lanes). `--max-in-flight` overrides it |
-| `model_storage` | the manifest lint, `sync_models.py` | `"job"`: the lane's models are not on the network volume. The model sync leaves out a workflow that runs only on such lanes, and the lint does not count it against the volume's size. Nothing fetches models for a job yet, so such a workflow ends as `missing_model` unless another lane's workflow puts the same files on the volume. The lint fails for an enabled one that does not find every file there. Default `"volume"` |
+| `model_storage` | `run_regression.py`, `golden_baseline.py`, `sync_models.py`, `validate`, the manifest lint | `"job"`: the lane's models are not on the network volume, and each job downloads what the volume does not hold (see [Models that a job fetches](#models-that-a-job-fetches)). Of a workflow that runs only on such lanes the model sync sends the input files alone, and the lint counts no more against the volume's size. Default `"volume"` |
 
 None of them is published: the run index copies a fixed list of lane keys.
+
+### Models that a job fetches
+
+The network volume holds the models of what runs on every commit and every
+night. A lane can leave its models off the volume: with
+`"model_storage": "job"` each of its jobs downloads the models it needs to the
+worker's own disk, where they are gone when the worker stops. The weekly lane
+works that way.
+
+**What a job does** (`src/model_sync.py`, `fetch_local`). The runner sends
+`"fetch_missing": true` with the job. After the commit checkout the worker
+looks which of the job's models the volume does not hold, and fetches those
+into ComfyUI's own models folder: `/comfyui/models/<directory>/<name>`.
+ComfyUI searches that folder for every model folder it knows, so such a model
+needs no line in `docker/extra_model_paths.yaml`. The steps, in order:
+
+1. **Clean up.** Every `*.part` file goes: a download that was killed left it.
+   So does every file in the models folder that git does not track and the
+   worker's own list (`models/.comfyci-fetched.json`) does not name: an
+   earlier workflow downloaded it by itself. The files ComfyUI tracks there
+   stay. When git cannot say what it tracks, only the part files go.
+2. **Reuse.** A file stays when the list has it with the same URL and sha256
+   and its size is the recorded one. A worker keeps its disk only while it is
+   up, so this is a bonus and nothing counts on it.
+3. **Make room.** The files to download plus 5 GB must be free. Fetched files
+   this job does not need are removed first, the one used longest ago first,
+   then `~/.cache/huggingface`. When that is not enough the job ends before
+   any download: "disk full: 12.3 GB free, 65.0 GB needed".
+4. **Download.** Four files at once. Each goes to `<name>.part`, is hashed
+   while it is written, and gets its name when the sha256 matches. A file has
+   3 tries. After an HTTP 429 the worker waits the seconds the host's
+   `RateLimit` header gives, 300 at most. A wrong sha256 gets no second try,
+   nor does an HTTP 401, 403 or 404. The first file that fails for good stops
+   the others: the job is over then, and its time is billed.
+
+To try another number of files at once, a run can say it:
+`python scripts/run_regression.py ... --fetch-streams 1` puts `fetch_streams`
+(1 to 16) into the job input.
+
+**Input files are not fetched.** A file with `"directory": "input"` is read
+from the volume on every lane (`--input-directory`). The model sync puts the
+input files of such a workflow there and leaves its models out. A lane
+without a volume cannot run a workflow that loads an input file.
+
+**The token.** The worker reads `HF_TOKEN` from its environment. On the
+nightly and weekly endpoint that is a RunPod secret
+(`"env": {"HF_TOKEN": "{{ RUNPOD_SECRET_hf_token }}"}` on the lane), so the
+token rides in no job. It is sent to `https://huggingface.co` and to no other
+host: not to the storage host a download is redirected to, and not to a host
+that only has the name in it. The volume sync holds to the same rule. Without
+a token public files still download, on a limit that every user of the
+worker's address shares, and the report says that there was none.
+
+**Two worker statuses** say that a model did not arrive. Both are
+`infra_error`: the workflow was not tested.
+
+| `worker_status` | Meaning | Tried again |
+|---|---|---|
+| `model_fetch_error` | a download failed: the network, HTTP 5xx or 429, a wrong sha256, a full disk | yes: right away on a per-commit lane, in the pass at the end of a nightly or weekly run |
+| `model_access_error` | the model host answered 401, 403 or 404: no token, a licence that is not accepted, a file that moved | no. A person has to act. The job's `failure` names the host, the repository and the answer (`host`, `repo`, `http_status`), and the report says what to do |
+
+**What the runner does** (`scripts/submit_and_poll.py`,
+`scripts/run_regression.py`). On such a lane it tells each job to fetch and
+waits longer for it: the bytes of the workflow's models at 25 MB a second,
+which is slower than any download measured. A nightly or weekly run counts
+that time when it asks whether a job still fits before its deadline, and
+`validate` when it asks whether a job can ever start. **Golden baselines**
+tells its two runs the same. The job input and the run record of a lane with
+its models on the volume are what they always were.
+
+**What is recorded.** The `run.json` of a job that fetched has `model_fetch`:
+`files`, `reused` and `evicted` (how many), `bytes` and `seconds` of the
+downloads with `mb_per_s`, `reused_bytes`, `streams`, and `token` (whether
+the worker had one). `timings.model_fetch_s` is the whole step, apart from
+`prompt_exec_s`. The lane's report then has the columns **Models GB** and
+**Fetch s (MB/s)** and a **Model downloads** row in its facts. That is the
+standing measurement of download speed.
+
+**What the lint asks** of a workflow that runs on such a lane, switched on or
+not (`scripts/tests/test_manifest_lint.py`):
+
+- every model that is no input file says its `bytes` and its `sha256`;
+- its `directory` is one of the 25 model folders ComfyUI knows. A model on
+  the volume needs a folder that `docker/extra_model_paths.yaml` maps: those
+  25, the older names `clip` and `unet`, and the detector folders of a pack;
+- the models are at most the lane's `disk_gb` minus 20 GB;
+- its `timeout_s`, the download at 25 MB a second and 300 seconds fit the
+  3,600 seconds RunPod gives a job;
+- an enabled workflow that loads an input file runs on no lane without a
+  volume.
+
+Moving a workflow from the weekly to the nightly cadence makes the next sync
+put its models on the volume, and the 90 % rule then counts them. The move
+back leaves the files there: nothing deletes from the volume.
+
+### When the worker image is rebuilt
+
+A push to main that changes the `Dockerfile`, `src/`, `docker/` or
+`manifest/custom_nodes.json` starts **Build worker images**. It builds every
+image CI builds and points each provisioned lane on it at the new `-<sha>`
+tag. Nothing asks first: the merge is the yes.
+
+A golden is valid for a lane's image. A rebuild keeps torch and CUDA, which
+are pinned, and installs again whatever the pins leave open. The Dockerfile
+declares `IMAGE_SHA` below its installs, so a rebuild that changes only
+`src/` or `docker/` takes the install layers from the registry cache and
+installs nothing again. A change above them in the Dockerfile, to the pack
+registry or to `src/custom_nodes.py` installs afresh from there on, and so
+does a build that finds no cache. The layers that are reused hold the
+ComfyUI clone and its requirements as the last full build left them: a commit
+whose `requirements.txt` differs from those gets its install at job time, as
+it always did (`pip_s` in a run's timings).
+
+After the build:
+
+1. Wait for **Build worker images** to finish. Flush the stale workers of
+   every endpoint: max workers 0, then back to its value (see
+   [Adding a lane](#adding-a-lane), step 3). Do one endpoint at a time,
+   because raising the number passes RunPod's quota check.
+2. Dispatch **GPU regression** with `commit=<the newest commit that is green
+   on the lane>`, between two test runs (see [Verdicts](#verdicts)).
+3. Every workflow must pass as bit-identical, and `env.image_sha` in the
+   summary must be the merge commit. That is the whole check. A workflow
+   whose `env.image_sha` is another one ran on a stale worker: flush again
+   and dispatch again.
+4. A workflow that drifted: look at its numbers. When the change is rounding
+   noise, approve the new output with `from_run` and a reason that names the
+   rebuild. When it is not, the rebuild found a real dependency change: pin
+   the package in the Dockerfile and rebuild.
+
+A smoke-level workflow has no golden, so a rebuild cannot break it that way.
 
 ### Adding a lane
 
@@ -1157,9 +1297,10 @@ leaves out keeps the default. A weekly lane for models that need more than
   centers runs without it: `"network_volumes": []`. `validate` then asks for
   `"model_storage": "job"`, the lint does not count a workflow that runs only
   on such lanes against the volume, and the model sync does not download its
-  models. Nothing fetches models for a job yet, so such a lane cannot run
-  until that exists, and the lint fails for an enabled workflow with models
-  of its own on it.
+  models: each job fetches them (see
+  [Models that a job fetches](#models-that-a-job-fetches)). An input file is
+  never fetched, so the lint fails for an enabled workflow that loads one and
+  runs on such a lane.
 - **Another volume.** A lane may name a volume in its own data center
   instead. The model sync fills only the volume of the primary lane's
   endpoint, so the models have to be copied there by hand, and the lint
@@ -1672,6 +1813,11 @@ workflow has. A reference-level image workflow's files do not change at all:
   commit takes it away. `latest`, in the index head and in the lane's
   `branches` in `index/lanes.json`, is the newest entry without it, and null
   when the lane has no such entry.
+- The `run.json` of a job that fetched its models (a lane with
+  `"model_storage": "job"`) has `model_fetch`, after `custom_nodes`, and
+  `model_fetch_s` in its `timings`, which the summary cell copies (see
+  [Models that a job fetches](#models-that-a-job-fetches)). No other
+  `run.json` and no other cell has either.
 
 ## Notes
 
@@ -1682,6 +1828,18 @@ workflow has. A reference-level image workflow's files do not change at all:
 - Custom-node pins are part of the image too: a bump in
   `manifest/custom_nodes.json` rebuilds the baking images and moves the pack
   workflows' outputs, so re-bless them (`blessed.json` records the pins).
+- Output files travel inside the worker's answer, and RunPod allows the
+  answer of a job 10 MB. The worker sends files up to 7 MiB in all (9.8 MB as
+  base64), the smallest first, and lists every file in name order. So a large
+  clip or mesh never holds back the picture. A file that was not sent says
+  `truncated` in `run.json`. A run whose files fit is answered as it always
+  was.
+- An input named `a.b` in a workflow file is a sub-input of the input `a`:
+  the codec of a `SaveVideo` format, the seed of a sampling mode. The worker
+  keeps a literal one when `a` is an input of the node. Before, it removed
+  every one, and ComfyUI then refused the prompt. The lint still refuses
+  them (`test_no_input_the_worker_would_strip`) until the image with that
+  change is live on every endpoint.
 - Local dry run without publishing anything:
   `python scripts/run_regression.py --commit <sha> --branch test --skip-publish`
 - Script tests (run on every PR by the *Script tests* workflow):

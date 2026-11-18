@@ -222,13 +222,14 @@ def _volume_files(manifest: dict, lanes: dict) -> dict[str, int]:
     and input files of every workflow, enabled or not (the sync fetches both),
     that runs on a lane whose models are on the volume. Each file counts once.
     A workflow runs on the lanes of its own cadence, so one that only the
-    weekly lane runs, whose models each job fetches, takes no room here. Nor
-    does one that runs only on lanes without the volume (an empty
-    `network_volumes`). Which workflows those are is `lanes.volume_workflows`,
-    the rule sync_models.py downloads by: the lint counts what the sync sends."""
+    weekly lane runs, whose models each job fetches, has only its input files
+    here. One that runs only on lanes without the volume (an empty
+    `network_volumes`) takes no room at all. Which files those are is
+    `lanes.volume_models`, the rule sync_models.py downloads by: the lint
+    counts what the sync sends."""
     files: dict[str, int] = {}
-    for wf_id in lanes_mod.volume_workflows(manifest, lanes):
-        for m in manifest["workflows"][wf_id]["models"]:
+    for models in lanes_mod.volume_models(manifest, lanes).values():
+        for m in models:
             files[f"{m['directory']}/{m['name']}"] = m["bytes"]
     return files
 
@@ -249,28 +250,113 @@ def _volume_problems(manifest: dict, lanes: dict) -> list[str]:
             f"{largest} with {files[largest] / 1e9:.1f} GB"]
 
 
-def _off_volume_problems(manifest: dict, lanes: dict) -> list[str]:
-    """The enabled workflows that would end as `missing_model` in every run:
-    no lane that reads its models from the volume runs them, so the model sync
-    leaves their models out (`lanes.volume_workflows`), and they load a file
-    that is not among the volume's. A workflow whose files another workflow
-    puts on the volume is fine. One that no lane runs has no job at all, and
-    `lanes.validate` names it.
+# -- models that a job fetches for itself ------------------------------------------------
+# On a lane with `"model_storage": "job"` each job downloads its models to the
+# worker's own disk (src/model_sync.py, fetch_local). They go into ComfyUI's
+# own models folder, so any folder ComfyUI knows will do: the 25 of its
+# folder_paths.py. The volume is searched for the same folders and some more
+# (docker/extra_model_paths.yaml).
+COMFY_MODEL_FOLDERS = frozenset({
+    "checkpoints", "configs", "loras", "vae", "text_encoders", "diffusion_models", "clip_vision",
+    "style_models", "embeddings", "diffusers", "vae_approx", "controlnet", "gligen",
+    "upscale_models", "latent_upscale_models", "hypernetworks", "photomaker", "classifiers",
+    "model_patches", "audio_encoders", "background_removal", "frame_interpolation",
+    "geometry_estimation", "optical_flow", "detection"})
+# GB of a worker's disk that the models of one job leave free: ComfyUI, the
+# custom-node packs, the job's outputs and the 5 GB a download keeps spare.
+FETCH_DISK_RESERVE_GB = 20
+# Seconds a job takes besides its download and its workflow: the commit
+# checkout, the server start, the answer.
+FETCH_JOB_OVERHEAD_S = 300
 
-    This rule goes when jobs can fetch models: `"model_storage": "job"` then
-    is a way to run a workflow, and no longer a way to lose its models."""
-    synced = set(lanes_mod.volume_workflows(manifest, lanes))
-    files = _volume_files(manifest, lanes)
+
+def _fetch_lanes(entry: dict, lanes: dict) -> list[str]:
+    """The lanes that run a workflow and whose jobs fetch their models."""
+    return [lane_id for lane_id in lanes_mod.lanes_for_workflow(entry, lanes)
+            if lanes_mod.fetches_models(lanes["lanes"][lane_id])]
+
+
+def _allowed_folders(wf_id: str, entry: dict, manifest: dict, lanes: dict) -> set[str]:
+    """The `directory` a model of a workflow may have. A workflow whose models
+    are on the volume: a folder that docker/extra_model_paths.yaml maps. One
+    whose jobs fetch them: a model folder ComfyUI knows by itself. A workflow
+    of both kinds needs a folder that is both."""
+    mapped = _model_folders()
+    if not _fetch_lanes(entry, lanes):
+        return mapped
+    on_volume = wf_id in lanes_mod.volume_workflows(manifest, lanes)
+    return COMFY_MODEL_FOLDERS & mapped if on_volume else set(COMFY_MODEL_FOLDERS)
+
+
+def _job_limit_s(lanes: dict) -> int:
+    """Seconds after which RunPod ends a job of the suite's endpoints."""
+    limit_ms = (lanes.get("endpoint_defaults") or {}).get("timeout_ms")
+    known = isinstance(limit_ms, int) and not isinstance(limit_ms, bool) and limit_ms > 0
+    return limit_ms // 1000 if known else ENDPOINT_EXEC_TIMEOUT_S
+
+
+def _job_fetch_problems(manifest: dict, lanes: dict) -> list[str]:
+    """What keeps the jobs of a lane from fetching a workflow's models, for
+    every workflow that runs on such a lane, enabled or not. Four rules:
+
+    - each model that is no input file says its `bytes` and its `sha256`: the
+      job makes room by the first and trusts a download by the second;
+    - its folder is one ComfyUI knows (`_allowed_folders`);
+    - the models fit the lane's disk, with FETCH_DISK_RESERVE_GB left free;
+    - the download at 25 MB/s, the workflow's `timeout_s` and
+      FETCH_JOB_OVERHEAD_S fit the time RunPod gives a job."""
+    problems = []
+    limit_s = _job_limit_s(lanes)
+    for wf_id, entry in manifest["workflows"].items():
+        on = _fetch_lanes(entry, lanes)
+        if not on:
+            continue
+        folders = _allowed_folders(wf_id, entry, manifest, lanes)
+        for m in lanes_mod.fetched_models(entry):
+            key = f"{m.get('directory')}/{m.get('name')}"
+            size, sha = m.get("bytes"), m.get("sha256")
+            if not (isinstance(size, int) and not isinstance(size, bool) and size > 0
+                    and isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{64}", sha)):
+                problems.append(f"{wf_id}: {key} needs bytes and sha256: each job of lane "
+                                f"{on[0]} downloads it and checks what it got")
+            if m.get("directory") not in folders:
+                problems.append(f"{wf_id}: {key}: ComfyUI knows no model folder "
+                                f"{m.get('directory')!r}, and a job of lane {on[0]} puts the "
+                                "file into ComfyUI's own models folder")
+        size = lanes_mod.fetch_bytes(entry)
+        timeout_s = entry.get("timeout_s") or (manifest.get("defaults") or {}).get("timeout_s", 0)
+        fetch_s = lanes_mod.fetch_allowance_s(entry)
+        for lane_id in on:
+            disk_gb = lanes_mod.endpoint_settings_of(lanes, lanes["lanes"][lane_id])["disk_gb"]
+            if size > (disk_gb - FETCH_DISK_RESERVE_GB) * 10**9:
+                problems.append(
+                    f"{wf_id}: its models are {size / 1e9:.1f} GB, and a worker of lane "
+                    f"{lane_id} has a disk of {disk_gb} GB, of which {FETCH_DISK_RESERVE_GB} "
+                    "stay free")
+        if timeout_s + fetch_s + FETCH_JOB_OVERHEAD_S > limit_s:
+            problems.append(
+                f"{wf_id}: its job can take {timeout_s + fetch_s + FETCH_JOB_OVERHEAD_S:g} s "
+                f"(timeout_s {timeout_s:g}, {fetch_s} s to download {size / 1e9:.1f} GB at "
+                f"{lanes_mod.FETCH_PLAN_BYTES_PER_S // 10**6} MB/s, {FETCH_JOB_OVERHEAD_S} s "
+                f"around them), and RunPod ends a job after {limit_s} s")
+    return problems
+
+
+def _input_file_problems(manifest: dict, lanes: dict) -> list[str]:
+    """The enabled workflows that would end as `missing_model` in every run on
+    a lane: they load an input file, and the lane mounts no volume. A job
+    fetches models and never input files, which ComfyUI reads from the
+    volume (`--input-directory`)."""
     problems = []
     for wf_id, entry in manifest["workflows"].items():
-        if not entry.get("enabled") or wf_id in synced:
+        inputs = sorted(m["name"] for m in entry["models"]
+                        if m["directory"] == lanes_mod.INPUT_DIRECTORY)
+        if not entry.get("enabled") or not inputs:
             continue
-        if not lanes_mod.lanes_for_workflow(entry, lanes):
-            continue
-        missing = sorted({f"{m['directory']}/{m['name']}" for m in entry["models"]} - set(files))
-        if missing:
-            problems.append(f"{wf_id}: its models are on no volume: nothing fetches models for a "
-                            f"job yet ({', '.join(missing)})")
+        for lane_id in lanes_mod.lanes_for_workflow(entry, lanes):
+            if lanes_mod.without_volume(lanes, lanes["lanes"][lane_id]):
+                problems.append(f"{wf_id}: lane {lane_id} has no volume to read its input "
+                                f"files from ({', '.join(inputs)})")
     return problems
 
 
@@ -373,7 +459,7 @@ def test_every_synced_file_is_loaded(wf_id):
 @pytest.mark.parametrize("wf_id", sorted(WORKFLOWS))
 def test_model_entries(wf_id):
     entry = WORKFLOWS[wf_id]
-    folders = _model_folders() | {"input"}
+    folders = _allowed_folders(wf_id, entry, MANIFEST, LANES) | {"input"}
     for m in entry["models"]:
         assert {"name", "url", "directory"} <= set(m), m
         assert m["url"].startswith("https://"), m["url"]
@@ -529,52 +615,176 @@ def test_a_workflow_only_on_lanes_without_the_volume_does_not_count_against_it()
     assert _volume_files(manifest, none) == {"vae/huge": 60 * 10**9}
 
 
-def test_every_enabled_workflow_finds_its_models_on_the_volume():
-    assert _off_volume_problems(MANIFEST, LANES) == []
+def test_the_committed_manifest_passes_the_rules_for_fetched_models():
+    assert _job_fetch_problems(MANIFEST, LANES) == []
+    assert _input_file_problems(MANIFEST, LANES) == []
+    # The rules plan with the numbers the runner and the endpoints use.
+    assert lanes_mod.FETCH_PLAN_BYTES_PER_S == 25_000_000
+    assert _job_limit_s(LANES) == ENDPOINT_EXEC_TIMEOUT_S == 3600
+    assert _job_limit_s({}) == 3600 and _job_limit_s({"endpoint_defaults": {
+        "timeout_ms": 1_800_000}}) == 1800
+    # Every folder ComfyUI knows is searched on the volume too.
+    assert len(COMFY_MODEL_FOLDERS) == 25 and COMFY_MODEL_FOLDERS <= _model_folders()
 
 
-def test_a_workflow_whose_models_reach_no_volume_is_a_problem():
-    """`validate` and the size rule accepted an enabled weekly workflow with
-    models of its own while the weekly lane says `"model_storage": "job"`.
-    The model sync left its models out, and nothing fetches models for a job
-    yet: it would have ended as missing_model in every weekly run, with one
-    line in the log of the sync job as the only word about it before."""
-    def model(name, size=10**9):
-        return {"name": name, "url": "https://x/" + name, "directory": "vae", "bytes": size}
+def _fetched(name, size=10**9, directory="vae", **extra):
+    return {"name": name, "url": "https://huggingface.co/o/r/resolve/main/" + name,
+            "directory": directory, "bytes": size, "sha256": "ab" * 32, **extra}
 
-    lanes = {"endpoint_defaults": {"volume_gb": 200, "network_volumes": ["vol"]}, "lanes": {
-        "main": {"cadence": "per-commit"}, "old": {"cadence": "retired"},
-        "week": {"cadence": "weekly", "model_storage": "job"}}}
-    manifest = {"workflows": {
-        "a": {"enabled": True, "models": [model("shared"), model("a")]},
-        "big": {"enabled": True, "cadence": "weekly",
-                "models": [model("shared"), model("big", 100 * 10**9), model("big2")]}}}
-    assert "vae/big" not in _volume_files(manifest, lanes)
-    assert _volume_problems(manifest, lanes) == []
-    assert _off_volume_problems(manifest, lanes) == [
-        "big: its models are on no volume: nothing fetches models for a job yet "
-        "(vae/big, vae/big2)"]
 
-    def problems(**entry):
-        changed = {"workflows": {**manifest["workflows"],
-                                 "big": {**manifest["workflows"]["big"], **entry}}}
-        return _off_volume_problems(changed, lanes)
+FETCH_LANES = {"endpoint_defaults": {"volume_gb": 200, "network_volumes": ["vol"],
+                                     "disk_gb": 40, "timeout_ms": 3600000},
+               "lanes": {"main": {"cadence": "per-commit"}, "old": {"cadence": "retired"},
+                         "week": {"cadence": "weekly", "model_storage": "job", "disk_gb": 120},
+                         "bare": {"cadence": "weekly", "model_storage": "job",
+                                  "network_volumes": []}}}
 
-    # Every file it loads is on the volume for another workflow, or it loads none.
-    assert problems(models=[model("shared"), model("a")]) == []
-    assert problems(models=[]) == []
-    # Switched off, it has no job. So has one that only a retired lane runs,
-    # which `validate` names.
-    assert problems(enabled=False) == []
-    assert problems(cadence="per-commit", lanes=["old"]) == []
-    # On a lane that reads its models from the volume, the sync sends them.
-    assert problems(cadence="per-commit") == []
-    volume = {**lanes, "lanes": {**lanes["lanes"], "week": {"cadence": "weekly"}}}
-    assert _off_volume_problems(manifest, volume) == []
-    # A lane without any volume is no better than one that leaves it unread.
-    apart = {**lanes, "lanes": {**lanes["lanes"], "week": {
-        "cadence": "weekly", "model_storage": "job", "network_volumes": []}}}
-    assert len(_off_volume_problems(manifest, apart)) == 1
+
+def _fetch_manifest(**entry):
+    return {"defaults": {"timeout_s": 600}, "workflows": {
+        "a": {"enabled": True, "timeout_s": None, "models": [_fetched("shared")]},
+        "big": {"enabled": True, "cadence": "weekly", "lanes": ["week"], "timeout_s": 900,
+                "models": [_fetched("shared"), _fetched("big", 50 * 10**9)], **entry}}}
+
+
+def test_a_weekly_workflow_with_models_of_its_own_is_fetched_by_its_jobs():
+    """Before jobs could fetch, such a workflow failed the lint: "its models
+    are on no volume". Now the weekly lane's jobs download them, and the
+    volume holds none of them."""
+    manifest = _fetch_manifest()
+    assert _job_fetch_problems(manifest, FETCH_LANES) == []
+    assert _input_file_problems(manifest, FETCH_LANES) == []
+    assert _volume_files(manifest, FETCH_LANES) == {"vae/shared": 10**9}
+    # Nor does `validate` find anything in the two workflows.
+    assert lanes_mod.validate(FETCH_LANES, manifest) == lanes_mod.validate(
+        FETCH_LANES, {"workflows": {}})
+    # The same on the committed lanes: the weekly lane is ready for it.
+    weekly = {"defaults": {"timeout_s": 600}, "workflows": {
+        "big": {"enabled": True, "cadence": "weekly", "timeout_s": 900,
+                "models": [_fetched("big", 60 * 10**9)]}}}
+    assert _job_fetch_problems(weekly, LANES) == []
+    assert lanes_mod.validate(LANES, weekly) == []
+    assert _volume_files(weekly, LANES) == {}
+    # A workflow that no lane fetches for is not held to these rules.
+    volume_only = {"defaults": {}, "workflows": {
+        "a": {"enabled": True, "timeout_s": 3000,
+              "models": [{"name": "x", "directory": "nowhere", "url": "u"}]}}}
+    assert _job_fetch_problems(volume_only, FETCH_LANES) == []
+
+
+def test_a_fetched_model_says_its_size_and_its_sha256():
+    for broken in ({"sha256": None}, {"sha256": "abc"}, {"bytes": None}, {"bytes": 0},
+                   {"bytes": True}, {"bytes": "60"}):
+        model = {**_fetched("big", 50 * 10**9), **broken}
+        manifest = _fetch_manifest(models=[_fetched("shared"), model])
+        assert _job_fetch_problems(manifest, FETCH_LANES) == [
+            "big: vae/big needs bytes and sha256: each job of lane week downloads it and "
+            "checks what it got"], broken
+    # A model on the volume may still do without a sha256, and an input file
+    # of a fetched workflow too: nothing downloads it for a job.
+    plain = {k: v for k, v in _fetched("cat.png", 2000, "input").items() if k != "sha256"}
+    manifest = _fetch_manifest(models=[_fetched("big"), plain])
+    del manifest["workflows"]["a"]["models"][0]["sha256"]
+    assert _job_fetch_problems(manifest, FETCH_LANES) == []
+    # A switched-off workflow is held to the rule as well: it is fixed before it is enabled.
+    manifest = _fetch_manifest(enabled=False, models=[{**_fetched("big"), "sha256": None}])
+    assert len(_job_fetch_problems(manifest, FETCH_LANES)) == 1
+
+
+def test_a_fetched_model_goes_into_a_folder_comfyui_knows():
+    # A folder the volume does not map is fine for a fetched model, once the
+    # image searches it. `detection` is one the yaml gained with the others.
+    for folder in ("detection", "optical_flow", "audio_encoders", "checkpoints"):
+        manifest = _fetch_manifest(models=[_fetched("m", directory=folder)])
+        assert _job_fetch_problems(manifest, FETCH_LANES) == [], folder
+        assert folder in _allowed_folders("big", manifest["workflows"]["big"], manifest,
+                                          FETCH_LANES)
+    # The older names and a pack's folders are the volume's alone.
+    for folder in ("unet", "clip", "ultralytics", "sams", "custom_nodes", "../x"):
+        manifest = _fetch_manifest(models=[_fetched("m", directory=folder)])
+        assert _job_fetch_problems(manifest, FETCH_LANES) == [
+            f"big: {folder}/m: ComfyUI knows no model folder {folder!r}, and a job of lane "
+            "week puts the file into ComfyUI's own models folder"], folder
+    entry = _fetch_manifest()["workflows"]
+    assert _allowed_folders("a", entry["a"], _fetch_manifest(), FETCH_LANES) == _model_folders()
+    assert "unet" in _allowed_folders("a", entry["a"], _fetch_manifest(), FETCH_LANES)
+    assert _allowed_folders("big", entry["big"], _fetch_manifest(),
+                            FETCH_LANES) == COMFY_MODEL_FOLDERS
+    # A workflow that one lane reads from the volume and another fetches needs both.
+    both = {**FETCH_LANES, "lanes": {**FETCH_LANES["lanes"], "week2": {"cadence": "weekly"}}}
+    manifest = _fetch_manifest(lanes=None)
+    assert _allowed_folders("big", manifest["workflows"]["big"], manifest,
+                            both) == COMFY_MODEL_FOLDERS & _model_folders()
+
+
+def test_fetched_models_fit_the_disk_of_the_lanes_workers():
+    def problems(size, registry=FETCH_LANES, **entry):
+        manifest = _fetch_manifest(models=[_fetched("big", size)], timeout_s=60, **entry)
+        return _job_fetch_problems(manifest, registry)
+
+    # 120 GB of disk, 20 stay free: 100 GB of models at most. The time rule
+    # would catch such a file first, so the endpoint's limit is raised here.
+    slow = {**FETCH_LANES, "endpoint_defaults": {**FETCH_LANES["endpoint_defaults"],
+                                                 "timeout_ms": 36_000_000}}
+    assert problems(100 * 10**9, slow) == []
+    assert problems(100 * 10**9 + 1, slow) == [
+        "big: its models are 100.0 GB, and a worker of lane week has a disk of 120 GB, of "
+        "which 20 stay free"]
+    # A lane that names no disk has the default's 40 GB: 20 GB of models.
+    assert problems(20 * 10**9, lanes=None) == []
+    assert problems(21 * 10**9, lanes=None) == [
+        "big: its models are 21.0 GB, and a worker of lane bare has a disk of 40 GB, of which "
+        "20 stay free"]
+    # Each lane that fetches for it is asked. An input file takes no room there.
+    assert len(problems(101 * 10**9, slow, lanes=None)) == 2
+    manifest = _fetch_manifest(models=[_fetched("big", 100 * 10**9),
+                                       _fetched("clip.mp4", 10**9, "input")], timeout_s=60)
+    assert _job_fetch_problems(manifest, slow) == []
+
+
+def test_a_fetch_and_its_workflow_fit_the_time_runpod_gives_a_job():
+    def problems(size, timeout_s):
+        manifest = _fetch_manifest(models=[_fetched("big", size)], timeout_s=timeout_s)
+        return _job_fetch_problems(manifest, FETCH_LANES)
+
+    # 60 GB at 25 MB/s are 2,400 s. With 300 s around them, 900 s are left.
+    assert lanes_mod.fetch_allowance_s({"models": [_fetched("big", 60 * 10**9)]}) == 2400
+    assert problems(60 * 10**9, 900) == []
+    assert problems(60 * 10**9, 901) == [
+        "big: its job can take 3601 s (timeout_s 901, 2400 s to download 60.0 GB at 25 MB/s, "
+        "300 s around them), and RunPod ends a job after 3600 s"]
+    assert problems(60 * 10**9 + 1, 900) != []
+    # Without a timeout of its own the manifest's default counts.
+    assert problems(67 * 10**9, None) == []      # 2,680 + 600 + 300
+    assert len(problems(68 * 10**9, None)) == 1  # 2,720 + 600 + 300
+    # The allowance rounds up, counts every model once and no input file.
+    allowance = lanes_mod.fetch_allowance_s
+    assert allowance({"models": [_fetched("a", 1), _fetched("b", 25_000_000)]}) == 2
+    assert allowance({"models": [_fetched("clip.mp4", 10**9, "input")]}) == 0
+    assert allowance({"models": []}) == allowance({}) == allowance(None) == 0
+    assert allowance({"models": [{"name": "x", "directory": "vae", "bytes": None}]}) == 0
+
+
+def test_an_input_file_needs_a_lane_with_a_volume():
+    """A job fetches models. An input file it reads from the volume, so an
+    enabled workflow that loads one cannot run on a lane without a volume: it
+    would end as missing_model in every run."""
+    picture = _fetched("cat.png", 2000, "input")
+    manifest = _fetch_manifest(models=[_fetched("big"), picture], lanes=["bare"])
+    assert _input_file_problems(manifest, FETCH_LANES) == [
+        "big: lane bare has no volume to read its input files from (cat.png)"]
+    assert _job_fetch_problems(manifest, FETCH_LANES) == []
+    # On the lane with the volume the sync puts the file there, and counts it.
+    manifest = _fetch_manifest(models=[_fetched("big"), picture])
+    assert _input_file_problems(manifest, FETCH_LANES) == []
+    assert _volume_files(manifest, FETCH_LANES) == {"vae/shared": 10**9, "input/cat.png": 2000}
+    # Without an input file, switched off, or on a lane nobody runs: no problem.
+    assert _input_file_problems(_fetch_manifest(lanes=["bare"]), FETCH_LANES) == []
+    off = _fetch_manifest(models=[picture], lanes=["bare"], enabled=False)
+    assert _input_file_problems(off, FETCH_LANES) == []
+    retired = _fetch_manifest(models=[picture], lanes=["old"], cadence="per-commit")
+    assert _input_file_problems(retired, FETCH_LANES) == []
+    assert _volume_files(retired, FETCH_LANES) == {"vae/shared": 10**9}
 
 
 def test_builtin_loader_values_need_no_model_entry():
