@@ -528,3 +528,109 @@ def test_a_summary_without_text_renders_the_body_it_always_did():
         "",
         notify_pr.FOOTER,
         notify_pr.MARKER])
+
+
+# -- smoke-level workflows ------------------------------------------------------------
+def _smoke(verdict="fail", prior="pass", **kw):
+    """The cell of a smoke-level workflow: nothing is compared, `smoke` holds
+    what its checks found."""
+    problems = [{"file": "music_00001.flac", "check": "silent",
+                 "text": f"silent or constant {HOSTILE}"}] if verdict == "fail" else []
+    return _wf(verdict, None, prior, vs_golden=None, level="smoke",
+               smoke={"files": [{"name": HOSTILE, "type": "audio", "bytes": 11040}],
+                      "problems": problems, "notes": [HOSTILE]}, **kw)
+
+
+def test_a_new_smoke_failure_gives_one_row_that_says_smoke_check_failed():
+    s = _summary({"music": _smoke(), "sdxl_t2i": _wf("pass"), "mesh": _smoke("pass")})
+    assert notify_pr.change_kind(s["workflows"]["music"]) == "new_error"
+    assert notify_pr.decide(s) == "changed"
+    lines = notify_pr.render_changed(s, None).splitlines()
+    # Neither a changed output nor an execution error: the headline says what it is.
+    assert lines[0] == f"**(PULSE)** GPU workflow failed · `{SHA[:7]}`"
+    # Nothing was compared, so the three metric columns hold the mark of a missing number.
+    assert [line for line in lines if "music" in line] == [
+        f"| `music` | smoke check failed | new | {NONE} | {NONE} | {NONE} | 41.2 | 21.0 GB |"]
+    assert f"| `mesh` | smoke pass | {NONE} | {NONE} | {NONE} | {NONE} | 41.2 | 21.0 GB |" in lines
+    assert f"| `sdxl_t2i` | match | {NONE} | identical | 0 | {NONE} | 41.2 | 21.0 GB |" in lines
+    # File names and problem sentences come from the worker: none enters a comment.
+    body = "\n".join(lines)
+    assert "evil" not in body and "comfyanonymous" not in body and "silent" not in body
+    assert "- Text" not in body
+
+
+def test_which_smoke_results_are_worth_a_comment(tmp_path, monkeypatch, env, gh):
+    kind = notify_pr.change_kind
+    # Only a failed check where the checks passed the time before.
+    assert kind(_smoke("fail", "pass")) == "new_error"
+    for prior in ("fail", "execution_error", None):
+        assert kind(_smoke("fail", prior)) is None
+    assert kind(_smoke("pass", "fail")) is None and kind(_smoke("infra_error")) is None
+    # `detail` is for compared outputs: a smoke cell that carried one would not count as drift.
+    assert kind({**_smoke("fail", "fail"), "detail": "new_drift"}) is None
+    # A smoke workflow that does not finish is an execution error like any other.
+    assert kind(_smoke("execution_error", "pass")) == "new_error"
+    assert notify_pr.decide(_summary({"music": _smoke("fail", "fail")})) is None
+    assert notify_pr.decide(_summary({"music": _smoke("pass"), "x": _wf("pass")})) == "clean"
+    # A standing smoke failure next to a new change reads "inherited", as a standing
+    # reference failure does.
+    body = notify_pr.render_changed(_summary({**DRIFT, "music": _smoke("fail", "fail")}), None)
+    assert body.splitlines()[0] == f"**(PULSE)** GPU output changed vs golden · `{SHA[:7]}`"
+    assert (f"| `music` | smoke check failed | inherited | {NONE} | {NONE} | {NONE} | 41.2 "
+            "| 21.0 GB |") in body
+    # Next to a new execution error of a reference workflow the headline covers both.
+    both = {"music": _smoke(), "wan": _wf("execution_error", prior="pass", vs_golden=None)}
+    assert notify_pr.render_changed(_summary(both), None).startswith(
+        "**(PULSE)** GPU workflow failed · ")
+    # A smoke workflow that merely passes, or already failed, leaves the headline alone.
+    quiet = {"mesh": _smoke("pass"), "music": _smoke("fail", "fail"),
+             "wan": _wf("execution_error", prior="pass", vs_golden=None)}
+    assert notify_pr.render_changed(_summary(quiet), None).startswith(
+        "**(PULSE)** GPU workflow execution error · ")
+    assert f"| `wan` | error | new | {NONE} |" in notify_pr.render_changed(_summary(quiet), None)
+    # Posted like any other change, and resolved by a clean run of the same commit.
+    on(monkeypatch)
+    assert run(tmp_path, _summary({"music": _smoke(), "sdxl_t2i": _wf("pass")})) == (
+        "created on #16488")
+    assert run(tmp_path, _summary({"music": _smoke("pass"), "sdxl_t2i": _wf("pass")})) == (
+        "updated on #16488")
+    body = gh.writes()[-1][3]["body"]
+    assert (f"Re-checked at `{SHA[:7]}`: all 2 workflows pass: 1 compared with the golden (a "
+            "match, or no golden yet) and 1 checked at smoke level. The earlier report on this "
+            "PR no longer applies.") in body.splitlines()
+    only = notify_pr.render_resolved(_summary({"a": _smoke("pass"), "b": _smoke("pass")}), None)
+    assert f"Re-checked at `{SHA[:7]}`: all 2 workflows passed their smoke checks. The" in only
+
+
+def test_a_body_without_smoke_cells_is_byte_for_byte_what_it_was():
+    """Headline included: an execution error keeps its own, and a clean run
+    its resolved note."""
+    lanes = {"primary": LANE, "lanes": {LANE: {"cuda": "13.0", "gpu": "RTX 4090"}}}
+    wfs = {"sdxl_t2i": _wf("pass"), "wan": _wf("execution_error", prior="pass", vs_golden=None),
+           "old": _wf("fail", "inherited")}
+    tail = ["",
+            "Lane: python 3.13.11 · torch 2.14.1+cu130 · CUDA 13.0 · NVIDIA GeForce RTX 4090",
+            f"[Run details](https://ci.comfy.org/regression/master/{SHA})", "", notify_pr.FOOTER,
+            notify_pr.MARKER]
+    assert notify_pr.render_changed(_summary(wfs), lanes) == "\n".join([
+        f"**(PULSE)** GPU workflow execution error · `{SHA[:7]}`",
+        "",
+        "| Workflow | Verdict | New / inherited | PSNR dB | Mean MSE | Pixels changed "
+        "| Exec s | Peak VRAM |",
+        "|---|---|---|---|---|---|---|---|",
+        "| `old` | changed | inherited | 42.76 | 3.442 | 69.99% | 41.2 | 21.0 GB |",
+        f"| `sdxl_t2i` | match | {NONE} | identical | 0 | {NONE} | 41.2 | 21.0 GB |",
+        f"| `wan` | error | new | {NONE} | {NONE} | {NONE} | 41.2 | 21.0 GB |",
+        *tail])
+    assert notify_pr.render_resolved(_summary({"sdxl_t2i": _wf("pass"), "x": _wf("no_baseline")}),
+                                     lanes) == "\n".join([
+        f"**(PULSE)** No GPU output changes vs golden · `{SHA[:7]}`",
+        "",
+        f"Re-checked at `{SHA[:7]}`: all 2 workflows match the golden (or have no golden yet). "
+        "The earlier report on this PR no longer applies.",
+        *tail])
+    # A cell that names the reference level, or a level nobody knows, is no smoke cell.
+    for level in ("reference", None, ["smoke"], "SMOKE"):
+        cell = _wf("fail", "new_drift", level=level)
+        assert notify_pr.change_kind(cell) == "new_drift"
+        assert notify_pr._row("x", cell).startswith("| `x` | changed | new | 42.76 |")

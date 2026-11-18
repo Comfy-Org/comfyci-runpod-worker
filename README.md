@@ -87,11 +87,34 @@ this repo per template.
 2. Paste the entry under `workflows` in `manifest/workflows.json` and choose a
    `timeout_s` the model can finish in. Leave `"enabled": false`.
 
-   `output_kind` says what the workflow's output is, and so how it is
+   `output_kind` says what the workflow's main output is, and so how it is
    compared. An entry without the key is an image workflow: its `SaveImage`
    PNGs are compared pixel by pixel. `"output_kind": "text"` makes it a text
-   workflow: its `.txt` file is compared with the reference text. No other
-   value exists, and an unknown one stops a run before any GPU job starts.
+   workflow: its `.txt` file is compared with the reference text.
+   `"output_kind": "audio"` is a sound workflow: a FLAC file written by
+   `SaveAudioAdvanced` with `format` `"flac"`. Nothing compares audio yet, so
+   such an entry must be at smoke level (next paragraph). An unknown value
+   stops a run before any GPU job starts, and so does an audio entry that is
+   not at smoke level. A 3D or a video workflow is an image workflow: it
+   saves a picture under the workflow id, and its mesh (`SaveGLB`) or clip
+   (`SaveVideo`) is a second file, prefixed `<id>_`.
+
+   `level` says how the workflow is checked. An entry without the key is at
+   **reference level (the main tests)**: its output is compared with an
+   approved reference, the golden. `"level": "smoke"` puts it at **smoke
+   level**: it only has to finish and to write usable files (see
+   [Smoke level](#smoke-level)). A smoke-level entry has no golden, so its
+   `thresholds` and `golden_tag` are null and step 5 falls away. Use it where
+   an output cannot be the same on every run, or where nothing can compare
+   it yet. It does not catch a wrong but plausible output.
+
+   A smoke-level entry can say what its author knows about the output in
+   `expect`. Every key is optional: `width` and `height` (the PNG files),
+   `frames` (the video), `seconds` (the audio, within 5 % and never tighter
+   than 0.5 s) and `min_chars` (the text). For example
+   `"expect": {"width": 1024, "height": 1024, "seconds": 30}`. An unknown
+   key, a value that is not a number above 0, or `expect` on a
+   reference-level entry stops a run before any GPU job starts.
 
    For a hand-exported workflow, the entry needs the same shape: `workflow_path`,
    `seed_overrides` (node id → input patch, belt-and-braces for the seed),
@@ -168,6 +191,11 @@ this repo per template.
 | `execution_error` | workflow errored on the commit under test, or a custom-node pack it requested did not import (worker status `custom_node_error`) | **red** |
 | `no_baseline` | no blessed golden yet | warning, green |
 | `infra_error` | RunPod/queue/checkout/model-volume/pack-install problem (after 1 retry) | warning, green |
+
+That is what the verdicts mean at reference level (the main tests), where an
+output is compared with its golden. A workflow at smoke level uses the same
+five names, and its `pass` and `fail` mean something else: see
+[Smoke level](#smoke-level).
 
 Thresholds come from the manifest entry if set, otherwise from the manifest
 defaults loosened to 3× the golden's own re-run noise floor
@@ -265,6 +293,62 @@ its most recent red or green verdict before this commit, read from the run
 index, which (unlike the previous-run pointer) includes runs that had
 execution errors.
 
+### Smoke level
+
+A workflow whose entry says `"level": "smoke"` is not compared with anything.
+It passes when it finished, every save node wrote its file, and every file
+passes the checks of its type. It has no golden and no bless step: **Golden
+baselines** leaves it out of `workflows=all` and refuses it when it is named.
+
+| Verdict | Meaning at smoke level | CI effect |
+|---|---|---|
+| `pass` | it finished, every expected file is there and passes its checks | green |
+| `fail` | it finished, and a file is missing or does not pass. Also when it wrote no file at all (worker status `no_outputs`) | **red** |
+| `execution_error` | the workflow did not finish, as at reference level | **red** |
+| `infra_error` | not tested, as at reference level | warning, green |
+| `no_baseline` | never: there is no reference to miss | |
+
+The checks are in `scripts/smoke.py`. They run on the CI runner, on the files
+the worker sent back. A file's type comes from its extension, and a file of
+another extension is listed and not checked.
+
+| Type | File | It passes when |
+|---|---|---|
+| image | `.png` | it decodes fully, each side has at least 64 px, it is not blank (the grey image has a standard deviation of at least 1.0) and not one flat colour with a speck (at most 99.5 % of the pixels share one grey level) |
+| text | `.txt` | it is UTF-8 and at most 1 MiB, has at least 8 characters that are not blank and 4 different ones, and with 20 words or more no word is more than half of them |
+| audio | `.flac` | it is a FLAC file that ends with a whole frame, 8,000 to 192,000 Hz, 1 to 8 channels, at least 1.0 s long, and not silent: at least 4,000 bytes of audio frames a second (FLAC stores silence in a few bytes) |
+| mesh | `.glb` | it is a GLB whose first primitive has positions, with at least 100 vertices and 100 faces, every position finite, and a bounding box larger than 0.0001 in at least two directions |
+| video | `.mp4` | it is an MP4 with a video track, at least 2 frames, each side at least 64 px, and not blank: at least 1,500 bytes a frame for each megapixel |
+
+- **A file that cannot be read fails.** A cut or broken file is a problem of
+  that file (check `decode`), never a crash of the run.
+- **`expect`** in the entry adds what its author knows: `width` and `height`
+  (PNG), `frames` (video), `seconds` (audio), `min_chars` (text).
+- **Which files must be there** comes from the workflow's own save nodes:
+  `SaveImage` a `.png`, `SaveText` a `.txt`, `SaveAudioAdvanced` a `.flac`,
+  `SaveGLB` a 3D file and `SaveVideo` an `.mp4`, each named with the node's
+  `filename_prefix`. A node that wrote nothing is a `missing` problem.
+- **A file the worker did not send** (it is over the worker's size limit)
+  cannot be opened. It passes on its size alone from 1,024 bytes, and the
+  report says "not sent, checked by size only".
+- **New, inherited or first run.** Nothing is compared, so a failed check is
+  placed by the workflow's own last verdict (`prior_verdict`): new when it
+  passed before, inherited when it already failed, and "first run" when it
+  has no earlier result on the lane. A workflow that fails its first run is a
+  problem of the workflow, and is not worded like a change in a commit.
+- **PULSE** comments on a smoke failure only when the workflow passed its
+  checks the time before. The row reads `smoke check failed`.
+
+Smoke level does not catch a wrong but plausible output: half a picture, a
+quiet hiss where music should be, a mesh of the wrong object. That is what
+reference level is for. To move a workflow there, remove `"level"` from its
+entry and approve a published run as its reference (`from_run`, see
+[Accepting an intentional change](#accepting-an-intentional-change-re-bless)).
+Until then its verdict is `no_baseline`. A run that holds an output file
+which was not published (see [Results layout](#results-layout)) is refused
+as a reference. Approve the second of two runs with the same output: all of
+its files are published.
+
 ## What a run shows
 
 Everything a run found is on the run's own page. Nobody needs ci.comfy.org to
@@ -286,7 +370,10 @@ it cannot hold up the commits that wait for the run to end.
   "new in this run": the change is in one of them;
 - the commit, its parent and pull request, when it was tested, how many
   commits the run covers, the lane, the branch and the environment (GPU,
-  driver, Python, torch, CUDA, ComfyUI version, worker image, baked packs);
+  driver, Python, torch, CUDA, ComfyUI version, worker image, baked packs).
+  On a lane with the `nightly` or `weekly` cadence a run covers many commits:
+  its title names the range (`e9afbcc..05e878f (7 commits)`), and the table
+  says how much new data the run published;
 - "What needs attention", one block per workflow that did not pass. For a
   changed output: each metric next to its limit, the comparison with the
   previous tested commit, where the reference (the golden) came from, the diff
@@ -327,6 +414,28 @@ it cannot hold up the commits that wait for the run to end.
   file over 256 KB is linked, not shown. Generated text is model output: it
   appears only inside `<pre>` blocks, escaped, and is never printed to the
   job log;
+- for a workflow at smoke level, what was checked where a reference-level
+  workflow has what was compared. Its result reads "smoke pass" or "smoke
+  check failed", and one sentence under the headline says what that is
+  worth: such a workflow is only checked to finish and to write a usable
+  file. Its row has a **Checked** cell with its files by type ("2 images
+  1024x1024 · mesh 35,781 vertices", "30.0 s · 48000 Hz · stereo") and
+  nothing in the three reference columns. A lane of smoke-level workflows
+  alone has no reference columns, and a lane without one has no Checked
+  column. The Output cell is a thumbnail when the run wrote a PNG, else a
+  link named after the kind. The file list says what was measured on each
+  file. A failed check has a block under "What needs attention": each
+  problem with its file, the files with what was measured, and where the
+  failure started: "new at this commit", "new since `<sha>`, N commits",
+  "inherited" or "first run". No command approves anything there. A text
+  that passed its checks is shown under "Generated text", marked "smoke
+  level, not compared". One that failed is shown in its block. The headline
+  counts smoke passes apart from matches with a reference, and the roll-up
+  of a lane reads "smoke pass", or "pass (13 reference, 2 smoke)" when it
+  holds both. An output file that a smoke run kept off the results branch
+  (see [Results layout](#results-layout)) is not linked: the report points
+  to the files attached to the run. The legend explains the two smoke
+  labels. A page without a smoke-level result reads as it always did;
 - every output file, a link to each `run.json`, schema notes, the status of
   custom-node packs, and the workflows that did not run on the lane;
 - the lane's newest 20 commits with their results, each linked to the run that
@@ -334,7 +443,9 @@ it cannot hold up the commits that wait for the run to end.
 
 **The "All lanes" summary** shows the commit on every lane, the workflows the
 lanes disagree on, each lane's open failures, and the newest 25 commits as a
-table with one column per lane.
+table with one column per lane. An open failure is listed only for a workflow
+the lane still runs: one that was renamed, moved or switched off while it was
+red is left out.
 
 **A commit that was already tested.** A cron tick that finds the commit
 tested on a lane tests nothing there. Its summary shows the published result
@@ -441,10 +552,13 @@ lasts. A summary without a run has only the page, as "Run details".
 
 - **When**: a workflow's outputs changed at this commit (`detail: new_drift`),
   or it hit an execution error while its prior run (`prior_verdict`) produced
-  outputs. Never for pass, inherited drift, infra errors, missing goldens, a
-  workflow with no prior run, a re-test of a commit older than the previous
-  run, or a run that covered several new commits (the change cannot be pinned
-  on one PR).
+  outputs, or a smoke-level workflow failed its checks while its prior run
+  passed them. That last case has the headline "GPU workflow failed" and the
+  verdict `smoke check failed`, with no numbers: nothing was compared. Never
+  for pass, inherited drift, a smoke failure that was already there, infra
+  errors, missing goldens, a workflow with no prior run, a re-test of a
+  commit older than the previous run, or a run that covered several new
+  commits (the change cannot be pinned on one PR).
 - **One comment per PR**: found again by the hidden marker
   `<!-- pulse-regression:v1 -->` and the token owner's login, and edited in
   place, so reruns never add a second one. A later clean run of the same
@@ -974,6 +1088,60 @@ workflow's in these keys, and an image workflow's files do not change at all:
   that one rule, so approving a changed text closes its failing chain.
 - A cell in the run index has `"k": "text"`; its `mse`, `psnr`, `pct` and
   `th` are null.
+
+A smoke-level workflow (`"level": "smoke"`, see [Smoke level](#smoke-level))
+publishes the same files, with new keys after the ones a reference-level
+workflow has. A reference-level image workflow's files do not change at all:
+
+- Its cell in `summary.json` and its `comparison.json` end with
+  `"level": "smoke"` and `smoke` (after `output_kind`, when the kind is not
+  image). `detail`, `vs_golden`, `vs_previous`, `thresholds_used`,
+  `golden_tag` and the `previous_*` keys are null, and `figures` is false.
+  A cell of a workflow that did not finish has the three lists of `smoke`
+  empty.
+- `smoke.files` lists the output files, at most 50: `name`, `type` (`image`,
+  `text`, `audio`, `mesh`, `video`, or null for an extension that is not
+  checked), `bytes` and `sha256` as the worker reported them, `sent: false`
+  for a file the worker listed and did not send, `published: false` for a
+  file that is not on the results branch, and what was measured. Image:
+  `width`, `height`, `std`, `flat_share`. Text: `chars`, `words`. Audio:
+  `sample_rate`, `channels`, `bits`, `seconds`, `bytes_per_second`,
+  `pcm_md5`. Mesh: `vertices`, `faces`, `extent`. Video: `width`, `height`,
+  `frames`, `seconds`, `bytes_per_frame_mp`.
+- `smoke.problems` lists why the run does not pass, at most 20:
+  `{"file": name or null, "check": id, "text": sentence}`. The check ids are
+  `missing`, `decode`, `size`, `expect`, `blank`, `flat`, `empty`, `repeat`,
+  `duration`, `silent`, `nonfinite`, `geometry` and `frames`. The verdict is
+  `pass` when the workflow finished and this list is empty. `smoke.notes`
+  holds sentences that are not failures. File names come from the worker:
+  escape them, and the sentences that quote them.
+- `output_sha256` is the sha256 of the main output: the first PNG by name
+  for an image workflow, the text rule above for a text workflow, and for an
+  audio workflow the first `.flac` by name that starts with the workflow id.
+  `thumbnail` is set whenever the run wrote a PNG.
+- **Which output files are published.** A smoke-level output need not repeat
+  from run to run, and the results branch only stays small because equal
+  files are stored once. So an output file of a smoke run is published when
+  it is at most 1 MiB, or when it has the sha256 the same file name had in
+  the workflow's previous result on the lane. A file that repeats is stored
+  from its second run on, and one that never repeats is never stored. Any
+  other file stays in the run's artifact, which GitHub keeps 90 days, and
+  its entry says `"published": false`. `run.json`, `comparison.json`, the
+  thumbnails and the measured facts are always published.
+- A cell in the run index has `"l": "smoke"`, after `k`. Its `mse`, `psnr`,
+  `pct`, `pv` and `g` are null, and `d` is `"inherited"` for a failure of a
+  workflow whose last verdict was already `fail`.
+- An open failing chain (`first_bad` in the index head) that a smoke cell
+  started carries `"level": "smoke"`. The lane's `goldens` in
+  `index/lanes.json` hold no entry for a smoke workflow, and a chain is
+  listed only for a workflow that is enabled on the lane.
+- A summary of a lane with the `nightly` or `weekly` cadence can carry
+  `published_new_bytes`: the bytes of the output files the run published
+  that the previous result had not. Its report shows the number. An index
+  entry can carry `wr`, per workflow `{"n", "url"}`: the commits between the
+  workflow's own last result and this one, copied from the summary's
+  `ranges`. A chain that started in such an entry carries that as `range`.
+  Nothing writes `ranges` yet.
 
 ## Notes
 

@@ -2921,3 +2921,945 @@ def test_a_similarity_that_is_not_a_share_of_words_says_what_it_is():
     assert "| 50.0 % similar by lines · differs from line 2 |" in out
     # Too many words to mark one by one as well: the title is the one of a line diff.
     assert LINE_TITLE + ", long lines folded, cut to its first 8000 characters:" in out
+
+
+# -- smoke level -----------------------------------------------------------------------------
+NIGHTLY = "py313-torch2.14.1-cu130-nightly"
+NP = f"regression/lanes/{NIGHTLY}"
+# A registry with a lane that runs once a night, as a later change adds one.
+NIGHT_LANES = {"primary": LANE, "lanes": {**LANES["lanes"], NIGHTLY: {
+    "label": "nightly · py3.13 / torch 2.14.1 / cu130 / RTX 4090", "cadence": "nightly",
+    "blocking": False, "role": "lane", "layout": 2, "prefix": NP, "endpoint_id": "ep-night"}}}
+LAST, HEAD = "e9afbcc" + "0" * 33, "05e878f" + "3" * 33
+ARTIFACT = RUN_URL + "/artifacts/99"
+SILENT = "silent or constant: 138 bytes of audio a second, under 4000"
+MUSIC, MESH, CLIP = "ace_step_15_t2a", "hunyuan3d_2_1_t23d", "wan_clip"
+FLAC = f"{MUSIC}_00001.flac"
+# The two names as inline Markdown shows them: every underscore escaped.
+FLAC_MD, MESH_MD = FLAC.replace("_", "\\_"), MESH.replace("_", "\\_")
+SMOKE_HEADER = ("| Workflow | Result | Output | Checked | Exec s (usual range) | Server start s "
+                "(checkout s) | Peak VRAM GB | Peak RSS GB | Output sha256 |")
+MIXED_HEADER = SMOKE_HEADER.replace("| Checked |", "| vs reference | vs previous | Reference | "
+                                                   "Checked |")
+FILES_HEADER = ["| File | Type | Size | Measured |", "|---|---|---|---|"]
+
+
+def _png(name, **kw):
+    return {"name": name, "type": "image", "bytes": 156156, "sha256": "9f" * 32, "width": 1024,
+            "height": 1024, "std": 69.17, "flat_share": 0.6409, **kw}
+
+
+def _glb(name, **kw):
+    return {"name": name, "type": "mesh", "bytes": 1292352, "sha256": "c4" * 32,
+            "vertices": 35781, "faces": 71836, "extent": [1.3743, 1.5627, 1.2226], **kw}
+
+
+def _flac(name=FLAC, **kw):
+    return {"name": name, "type": "audio", "bytes": 3528044, "sha256": "10" * 32,
+            "sample_rate": 48000, "channels": 2, "bits": 16, "seconds": 30.0,
+            "bytes_per_second": 117330, "pcm_md5": "0005ea55925db0b0cece53ae24268b4f", **kw}
+
+
+def _smoke_cell(wf, files=(), problems=(), verdict=None, notes=(), **kw):
+    """The summary cell of a smoke-level workflow, shaped as run_regression
+    builds it: nothing is compared, and `level` and `smoke` say what was checked."""
+    verdict = verdict or ("fail" if problems else "pass")
+    names = sorted(f["name"] for f in files)
+    main = next((f for f in files if f["name"].endswith((".png", ".flac", ".txt"))), {})
+    thumb = next((n[:-4] + ".webp" for n in names if n.endswith(".png")), None)
+    return _cell(wf, verdict, **{
+        "vs_golden": None, "vs_previous": None, "thresholds_used": None, "golden_tag": None,
+        "previous_commit": None, "previous_verdict": None, "output_sha256": main.get("sha256"),
+        "thumbnail": thumb, "level": "smoke",
+        "smoke": {"files": list(files), "problems": list(problems), "notes": list(notes)}, **kw})
+
+
+def _silent(**kw):
+    """An audio workflow that wrote 30 s of silence."""
+    quiet = _flac(bytes=11040, bytes_per_second=138)
+    return _smoke_cell(MUSIC, [quiet], [{"file": FLAC, "check": "silent", "text": SILENT}],
+                       output_kind="audio", **kw)
+
+
+def _smoke_run(cell):
+    """The run record behind a smoke cell: the output files the worker listed."""
+    files = [f for f in (cell.get("smoke") or {}).get("files") or []
+             if isinstance(f, dict) and isinstance(f.get("name"), str)]
+    return _run(cell["workflow_id"], cell["worker_status"], outputs=[
+        {"filename": f["name"], "bytes": f.get("bytes"), "sha256": f.get("sha256"),
+         **({"truncated": True} if f.get("sent") is False else {})} for f in files])
+
+
+def _index_cell(cell):
+    out = {"v": cell["verdict"], "d": cell.get("detail"), "sha": cell.get("output_sha256"),
+           "exec": (cell.get("timings") or {}).get("prompt_exec_s"), "g": cell.get("golden_tag")}
+    return {**out, "l": "smoke"} if cell.get("level") == "smoke" else out
+
+
+def _smoke_files(cells, lane=LANE, commit=SHA, before=None, first_bad=None, extra=None, **kw):
+    """The results tree of a run with smoke-level workflows. `before` holds
+    the lane's earlier index entries (default: one, where everything passed)."""
+    summary = _summary(cells, lane=lane, commit=commit, **kw)
+    run_dir = f"{NIGHT_LANES['lanes'][lane]['prefix']}/runs/master/{commit}"
+    files = {f"{run_dir}/summary.json": summary}
+    for cell in cells:
+        files[f"{run_dir}/{cell['workflow_id']}/run.json"] = _smoke_run(cell)
+    rng = summary.get("tested_range") or {}
+    this = {**_entry(commit, 1794702636, {c["workflow_id"]: _index_cell(c) for c in cells},
+                     run=4242, n=rng.get("commits_between") or 1), "prev": rng.get("prev")}
+    if before is None:
+        before = [_entry(rng.get("prev") or PREV, 1794700000,
+                         {c["workflow_id"]: {**_index_cell(c), "v": "pass"} for c in cells},
+                         pr=17753)]
+    files[f"regression/index/master/{lane}.json"] = _head([this, *before], first_bad)
+    files["regression/index/lanes.json"] = {"lanes": {lane: {"goldens": {}}}}
+    files.update(extra or {})
+    return files
+
+
+def _smoke_report(files, lane=LANE, commit=SHA, **kw):
+    reader = run_report.DictReader(files, RESULTS)
+    return run_report.lane_report(reader, NIGHT_LANES, commit, "master", lane, **kw)
+
+
+def _nightly(cells, **kw):
+    """A report of a nightly run that covers 7 commits since LAST."""
+    rng = {"prev": LAST, "commits_between": 7, "compare_url": f"{COMFY}/compare/{LAST}...{HEAD}"}
+    files = _smoke_files(cells, lane=NIGHTLY, commit=HEAD, tested_range=rng, **kw)
+    return _smoke_report(files, lane=NIGHTLY, commit=HEAD)
+
+
+def _block(out, wf):
+    """The lines of one workflow's block under "What needs attention"."""
+    lines = _section(out, "What needs attention")
+    start = next(i for i, line in enumerate(lines) if line.startswith(f"#### ❌ `{wf}`"))
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("#### ")),
+               len(lines))
+    return [line for line in lines[start:end] if line]
+
+
+def test_a_lane_of_smoke_passes_reads_smoke_pass_and_has_nothing_not_passing():
+    mesh = _smoke_cell(MESH, [_png(f"{MESH}_00001_.png"), _png(f"{MESH}_00002_.png"),
+                              _glb(f"{MESH}_mesh_00001_.glb")])
+    music = _smoke_cell(MUSIC, [_flac()], output_kind="audio")
+    out = _smoke_report(_smoke_files([mesh, music]))
+    lines = out.split("\n")
+    assert lines[0] == ("## ✅ GPU regression · py3.13 / torch 2.14.1 / cu130 / RTX 4090 · "
+                        "`cccccccc`")
+    # The sentence that says what a smoke pass is worth stands right under the headline.
+    assert lines[2:5] == ["All 2 workflows passed their smoke checks.", "",
+                          run_report.SMOKE_NOTE]
+    assert "What needs attention" not in out
+    assert lines[lines.index("### All workflows (2)") + 2] == SMOKE_HEADER
+    run_dir = f"{RAW}/{P}/runs/master/{SHA}"
+    assert (f'| `{MESH}` | ✅ smoke pass | <a href="{run_dir}/{MESH}/outputs/{MESH}_00001_.png">'
+            f'<img src="{run_dir}/{MESH}/outputs/thumbs/{MESH}_00001_.webp" width="96" '
+            f'alt="{MESH} output"></a> | 2 images 1024x1024 · mesh 35,781 vertices | 98.1 | 12.4 '
+            "| 21.3 | 33.7 | `9f9f9f9f9f9f` |") in lines
+    # No PNG: a link named after what the output is.
+    assert (f"| `{MUSIC}` | ✅ smoke pass | [audio]({run_dir}/{MUSIC}/outputs/{FLAC}) | 30.0 s · "
+            "48000 Hz · stereo | 98.1 | 12.4 | 21.3 | 33.7 | `101010101010` |") in lines
+    # The file list says what was measured on each file.
+    assert (f"| `{MUSIC}` | [{FLAC_MD}]({run_dir}/{MUSIC}/outputs/{FLAC}) | 3.36 MB | "
+            f"`{'10' * 32}` | 30.0 s · 48000 Hz · 2 channels · 117,330 bytes/s |") in lines
+    assert (f"| `{MESH}` | [{MESH_MD}\\_mesh\\_00001\\_.glb]({run_dir}/{MESH}/outputs/"
+            f"{MESH}_mesh_00001_.glb) | 1.23 MB | `{'c4' * 32}` | 35,781 vertices · 71,836 faces "
+            "· box 1.37 x 1.56 x 1.22 |") in lines
+    history = _section(out, "Recent commits on this lane")
+    assert next(row for row in history if "**this report**" in row).endswith(
+        "| ✅ smoke pass |  |")
+    assert f"{run_report.LEGEND} {run_report.SMOKE_LEGEND}" in lines
+    assert "reference level (the main tests)" in run_report.SMOKE_LEGEND
+    # Nothing offers to approve an output: a smoke-level workflow has no reference.
+    assert "golden-baseline.yml" not in out
+    assert "The workflow passed its smoke checks." in _smoke_report(_smoke_files([music]))
+
+
+def test_a_page_without_a_smoke_result_is_the_page_it_was():
+    out = _report(_tree(_summary([_cell("flux_dev_t2i"), _cell("sdxl_t2i")])))
+    lines = out.split("\n")
+    assert run_report.LEGEND in lines and run_report.legend() == run_report.LEGEND
+    assert "smoke" not in out and "Checked" not in out and "first run" not in out
+    assert lines[2:4] == ["All 2 workflows match their reference.", ""]
+    assert lines[4].startswith("|  |  |")
+    overview = _overview(_overview_files())
+    assert run_report.LEGEND in overview.split("\n") and "smoke" not in overview
+
+
+def test_the_headline_counts_smoke_passes_apart_and_failures_by_where_they_started():
+    image = [_cell("flux_dev_t2i"), _cell("sdxl_t2i")]
+    mesh = _smoke_cell(MESH, [_png(f"{MESH}_00001_.png")])
+    out = _smoke_report(_smoke_files([*image, mesh]))
+    assert "No failures: 2 match their reference, 1 passed its smoke checks." in out.split("\n")
+    # The roll-up of a mixed lane says how many of each level it stands for.
+    history = _section(out, "Recent commits on this lane")
+    assert all(row.endswith("| ✅ pass (2 reference, 1 smoke) |  |")
+               for row in history if row.startswith("| [`"))
+    assert out.startswith("## ✅ ")
+    # One reference match alone, next to a smoke failure that is new here.
+    out = _smoke_report(_smoke_files([image[0], mesh, _silent()]))
+    assert ("1 of 3 workflows failed: 1 new at this commit. 1 matches its reference, 1 passed "
+            "its smoke checks.") in out.split("\n")
+    # A changed output is compared with the previous run, so it is new at this commit
+    # whenever the run covers one commit: where its own last result stands says nothing.
+    drift = _cell("sdxl_t2i", "fail", detail="new_drift", vs_previous=DIFF, prior_commit=FIRST)
+    out = _smoke_report(_smoke_files([drift, mesh]))
+    assert "1 of 2 workflows failed: 1 new at this commit. 1 passed its smoke checks." in (
+        out.split("\n"))
+    # A nightly run: its failures by where they started, then what was not tested.
+    first = _smoke_cell("new_wf", problems=[{"file": None, "check": "missing", "text": "x"}],
+                        prior_verdict=None, prior_commit=None)
+    standing = _smoke_cell("old_wf", [_png("old_wf_00001_.png")], [
+        {"file": "old_wf_00001_.png", "check": "blank", "text": "blank"}],
+        prior_verdict="fail", prior_commit=LAST)
+    untested = _smoke_cell("slow_wf", verdict="infra_error", prior_commit=LAST)
+    before = [_entry(LAST, 1794616236, {MESH: "pass", MUSIC: "pass", "old_wf": "fail",
+                                        "slow_wf": "pass"})]
+    out = _nightly([mesh, _silent(prior_commit=LAST), standing, first, untested], before=before)
+    assert ("3 of 5 workflows failed: 1 new in this run, 1 inherited, 1 on its first run. "
+            "1 was not tested. 1 passed its smoke checks.") in out.split("\n")
+    assert out.startswith("## ❌ ")
+    out = _nightly([mesh, untested, {**untested, "workflow_id": "slower_wf"}])
+    assert "No failures: 1 passed its smoke checks. 2 were not tested." in out.split("\n")
+    assert out.startswith(f"## {run_report.WARN} ")
+
+
+def test_a_smoke_failure_shows_each_problem_the_files_and_where_it_started():
+    cell = _silent(prior_commit=LAST)
+    ranges = {MUSIC: {"prev": LAST, "commits_between": 7, "compare_url": "u"}}
+    out = _nightly([cell, _smoke_cell(MESH, [_png(f"{MESH}_00001_.png")])], ranges=ranges)
+    run_dir = f"{RAW}/{NP}/runs/master/{HEAD}"
+    last = f"[`e9afbcc`]({COMFY}/commit/{LAST})"
+    assert _block(out, MUSIC) == [
+        f"#### ❌ `{MUSIC}`: smoke check failed (new since `e9afbcc`, 7 commits)",
+        "The workflow finished, and its output did not pass the smoke checks.",
+        f"- <code>{FLAC_MD}</code>: {SILENT}",
+        *FILES_HEADER,
+        f"| [{FLAC_MD}]({run_dir}/{MUSIC}/outputs/{FLAC}) | audio | 10.8 KB "
+        "| 30.0 s · 48000 Hz · 2 channels · 138 bytes/s |",
+        f"It last passed at {last}. 7 commits since then: [compare]({COMFY}/compare/{LAST}..."
+        f"{HEAD}). To test one commit of that range (needs write access to the worker "
+        "repository):",
+        "```",
+        "gh workflow run nightly-weekly.yml --repo Comfy-Org/comfyci-runpod-worker "
+        f"-f cadence=nightly -f commit=<sha> -f workflows={MUSIC}",
+        "```"]
+    link = f"[audio]({run_dir}/{MUSIC}/outputs/{FLAC})"
+    assert f"| `{MUSIC}` | ❌ smoke check failed | {link} | 30.0 s · 48000 Hz · stereo |" in out
+    assert "golden-baseline.yml" not in out  # nothing to approve at smoke level
+    # Without a range of its own the run's range is the workflow's, when both start
+    # at the commit of its last result.
+    assert f"#### ❌ `{MUSIC}`: smoke check failed (new since `e9afbcc`, 7 commits)" in _nightly(
+        [cell])
+    # Its last result is older than the run's range: how many commits is not known.
+    older = _nightly([_silent(prior_commit=FIRST)])
+    assert f"#### ❌ `{MUSIC}`: smoke check failed (new since `aaaaaaa`)" in older
+    assert (f"It last passed at [`aaaaaaa`]({COMFY}/commit/{FIRST}). The commits since then: "
+            f"[compare]({COMFY}/compare/{FIRST}...{HEAD}). To test one commit") in older
+
+    # On the per-commit lane a run of one commit names that commit, and no command.
+    out = _smoke_report(_smoke_files([_silent()]))
+    assert _block(out, MUSIC)[0] == f"#### ❌ `{MUSIC}`: smoke check failed (new at this commit)"
+    assert _block(out, MUSIC)[-1] == f"It last passed at [`{PREV[:7]}`]({COMFY}/commit/{PREV})."
+    assert "gh workflow run" not in out
+    assert "1 of 1 workflow failed: 1 new at this commit." in out.split("\n")
+    # It did not finish before, and finishes now with a bad output: new, said as it is.
+    out = _smoke_report(_smoke_files([_silent(prior_verdict="execution_error")]))
+    assert _block(out, MUSIC)[-1] == (
+        f"Its last result before this one, at [`{PREV[:7]}`]({COMFY}/commit/{PREV}), was an "
+        "execution error: it finishes now, and its output does not pass.")
+
+
+def test_a_smoke_failure_on_the_per_commit_lane_is_placed_by_its_own_last_result():
+    """Nothing is compared with the previous run, so the run's range is the
+    failure's only when the workflow's last result stands at its start."""
+    rng = {"prev": PREV, "commits_between": 3}
+    out = _smoke_report(_smoke_files([_silent()], tested_range=rng))
+    block = _block(out, MUSIC)
+    assert block[0] == f"#### ❌ `{MUSIC}`: smoke check failed (new since `bbbbbbb`, 3 commits)"
+    assert block[-1] == (f"It last passed at [`bbbbbbb`]({COMFY}/commit/{PREV}). 3 commits since "
+                         f"then: [compare]({COMFY}/compare/{PREV}...{SHA}).")
+    assert "1 of 1 workflow failed: 1 new in this run." in out.split("\n")
+    # The command that tests one commit of a range is for a nightly or weekly lane.
+    assert "gh workflow run" not in out
+    # Its last result is older than the run's one commit: the failure may be older too.
+    out = _smoke_report(_smoke_files([_silent(prior_commit=FIRST)]))
+    assert _block(out, MUSIC)[0].endswith("smoke check failed (new since `aaaaaaa`)")
+    assert "1 of 1 workflow failed: 1 new in this run." in out.split("\n")
+    # No commit is recorded for its last result: the words of the run stand in.
+    out = _smoke_report(_smoke_files([_silent(prior_commit=None)]))
+    assert _block(out, MUSIC)[0].endswith("smoke check failed (new at this commit)")
+    assert _block(out, MUSIC)[-1].startswith("| ")  # no sentence about a commit it cannot name
+    assert "1 of 1 workflow failed: 1 new at this commit." in out.split("\n")
+    out = _smoke_report(_smoke_files([_silent(prior_commit=None)], tested_range=rng))
+    assert _block(out, MUSIC)[0].endswith("smoke check failed (new in this run)")
+    # A range the summary gives for the workflow itself wins over the run's.
+    own = {MUSIC: {"prev": FIRST, "commits_between": 5}, "other": {"commits_between": 9}}
+    out = _smoke_report(_smoke_files([_silent()], tested_range=rng, ranges=own))
+    assert _block(out, MUSIC)[0].endswith("smoke check failed (new since `aaaaaaa`, 5 commits)")
+    assert run_report.own_range({"ranges": {MUSIC: {"commits_between": 1}}}, MUSIC,
+                                {"commit": PREV}) == {"prev": PREV, "n": 1}
+    assert run_report.own_range(None, MUSIC, {}) == {"prev": None, "n": None}
+
+
+def test_a_smoke_failure_reads_no_reference_and_a_page_knows_of_older_smoke_rows():
+    class Counting(run_report.DictReader):
+        seen = []
+
+        def read_json(self, path):
+            self.seen.append(path)
+            return super().read_json(path)
+
+        def prefetch(self, paths):
+            self.seen.extend(paths)
+
+    files = _smoke_files([_silent(golden_tag="v0.42.0"), _cell("flux_dev_t2i")], extra={
+        f"{P}/golden/{MUSIC}/current.json": {"tag": "v0.42.0"}})
+    out = run_report.lane_report(Counting(files, RESULTS), NIGHT_LANES, SHA, "master", LANE)
+    assert f"#### ❌ `{MUSIC}`: smoke check failed" in out and Counting.seen
+    assert not [path for path in Counting.seen if "/golden/" in path]
+    assert "Reference:" not in out and "v0.42.0` |  | 30.0 s" not in out
+    # The level of an old cell that does not name it is the one its index cell names.
+    cell = _smoke_cell(MESH, [_png(f"{MESH}_00001_.png")])
+    files = _smoke_files([cell])
+    del files[f"{P}/runs/master/{SHA}/summary.json"]["workflows"][MESH]["level"]
+    out = _smoke_report(files)
+    assert f"| `{MESH}` | ✅ smoke pass |" in out and "The workflow passed its smoke checks." in out
+    column = run_report.LaneColumn(
+        lane_id=LANE, lane=LANES["lanes"][LANE], references={},
+        summary=files[f"{P}/runs/master/{SHA}/summary.json"],
+        head={}, entries=run_report.entries_of(files[f"regression/index/master/{LANE}.json"]))
+    assert column.states(SHA) == {MESH: "smoke_pass"}
+    # A run without a smoke row on a lane whose history has one: the page still shows
+    # the smoke words, so it explains them.
+    was_smoke = [_entry(PREV, 1794700000, {"flux_dev_t2i": {"v": "fail", "l": "smoke"}})]
+    out = _smoke_report(_smoke_files([_cell("flux_dev_t2i")], before=was_smoke))
+    lines = out.split("\n")
+    assert lines[2:5] == ["The workflow matches its reference.", "", run_report.SMOKE_NOTE]
+    assert f"{run_report.LEGEND} {run_report.SMOKE_LEGEND}" in lines
+    assert "| ❌ 1 of 1 failed | `flux_dev_t2i` smoke check failed |" in out
+    assert "Checked" not in out  # the run itself has no smoke row
+    # A run with a smoke row and no history to read explains them just the same.
+    files = _smoke_files([_smoke_cell(MESH, [_png(f"{MESH}_00001_.png")])])
+    del files[f"regression/index/master/{LANE}.json"]
+    out = _smoke_report(files)
+    assert run_report.SMOKE_NOTE in out.split("\n") and run_report.SMOKE_LEGEND in out
+    # So does a lane whose only smoke words are in an open failure.
+    chain = {"gone": {"commit": PREV, "kind": "execution_error", "level": "smoke", "runs": 3}}
+    out = _smoke_report(_smoke_files([_cell("flux_dev_t2i")], before=[], first_bad=chain))
+    assert run_report.SMOKE_NOTE in out.split("\n")
+    # A chain that a smoke-level execution error started keeps the words of its kind.
+    assert "- `gone`: execution error, failing since " in out
+    assert run_report.SMOKE_NOTE not in _smoke_report(
+        _smoke_files([_cell("flux_dev_t2i")], before=[])).split("\n")
+    # A reference row never borrows a cell from the checks, and a smoke row none from
+    # a comparison.
+    view = run_report.View(wf="wf", name="`wf`", safe=True, cell={"vs_golden": IDENT}, run={},
+                           state="smoke_pass", origin=None, prior={}, sha=None, level="smoke")
+    assert run_report.reference_cell(view) == ""
+    view.level = None
+    assert run_report.reference_cell(view) == "bit-identical"
+
+
+def test_the_files_of_a_smoke_failure_are_cut_with_the_other_file_lists():
+    names = [f"{MESH}_{i:05d}_.png" for i in range(1, 6)]
+    blank = [{"file": names[0], "check": "blank", "text": "blank"}]
+    data = run_report.gather_lane(
+        run_report.DictReader(_smoke_files([_smoke_cell(MESH, [_png(n) for n in names], blank)]),
+                              RESULTS), NIGHT_LANES, SHA, "master", LANE)
+    view = data.views[0]
+    full = run_report.smoke_block(data, view)
+    assert len([line for line in full if line.startswith(f"| [{MESH_MD}\\_0000")]) == 5
+    cut = run_report.smoke_block(data, view, run_report.Limits(files_per_workflow=3))
+    assert len([line for line in cut if line.startswith("| [")]) == 3
+    assert "2 more files are listed under Output files." in cut
+    gone = run_report.smoke_block(data, view, run_report.Limits(files_per_workflow=0))
+    assert not [line for line in gone if line.startswith("|")]
+    assert gone[2] == "- <code>hunyuan3d\\_2\\_1\\_t23d\\_00001\\_.png</code>: blank"
+    # A run that recorded a failure and no problem says so, and at most 20 are listed.
+    view.cell["smoke"]["problems"] = []
+    assert "- The run recorded no problem for this failure." in run_report.smoke_block(data, view)
+    view.cell["smoke"]["problems"] = [{"file": None, "text": f"p{i}"} for i in range(30)]
+    assert len([line for line in run_report.smoke_block(data, view)
+                if line.startswith("- p")]) == 20
+
+
+def test_a_standing_smoke_failure_is_inherited_and_names_its_chain():
+    chain = {MUSIC: {"commit": LAST, "run_ts": 1794616236, "kind": "fail", "prev_good": FIRST,
+                     "pr": 17700, "author": "kijai", "golden": None, "runs": 2,
+                     "level": "smoke", "range": {"n": 6, "url": "u"}}}
+    before = [_entry(LAST, 1794616236, {MUSIC: {"v": "fail", "l": "smoke"}}, n=6, pr=17700)]
+    out = _nightly([_silent(prior_verdict="fail", prior_commit=LAST)], before=before,
+                   first_bad=chain)
+    last = f"[`e9afbcc`]({COMFY}/commit/{LAST})"
+    # The chain's own range is named, and no pull request: 6 commits cannot be one.
+    since = (f"ailing since {last} (a run that covered 6 commits, [compare]({COMFY}/compare/"
+             f"{FIRST}...{LAST})), first seen 2026-11-14, 2 runs, last passed at [`aaaaaaa`]("
+             f"{COMFY}/commit/{FIRST})")
+    assert _block(out, MUSIC)[0] == f"#### ❌ `{MUSIC}`: smoke check failed (inherited)"
+    assert _block(out, MUSIC)[-2:] == [
+        f"It already failed at {last}: the failure is inherited from an earlier run.",
+        f"F{since}."]
+    assert "1 of 1 workflow failed: 1 inherited." in out.split("\n")
+    assert f"- `{MUSIC}`: smoke check failed, f{since}" in out.split("\n")
+    assert "17700" not in "\n".join(_block(out, MUSIC)) and "nightly-weekly.yml" not in out
+    # A chain whose own range is one commit names the pull request, as a chain always did.
+    one = {MUSIC: {**chain[MUSIC], "range": {"n": 1, "url": "u"}}}
+    assert (f"failing since {last} ([#17700]({COMFY}/pull/17700), kijai, Add a node "
+            f"(\\#{ZW}17700))") in run_report.failing_since(one[MUSIC], before)
+    # A range of unknown size (GitHub did not answer) blames no pull request either.
+    unknown = run_report.failing_since({**chain[MUSIC], "range": {"n": None}}, before)
+    assert "(a run that covered an unknown number of commits, [compare](" in unknown
+    # A chain without a range of its own is read from the run's range, as before.
+    plain = {k: v for k, v in chain[MUSIC].items() if k != "range"}
+    assert "(a run that covered 6 commits), first seen" in run_report.failing_since(plain, before)
+    # A workflow that never passed: only a smoke-level chain is worded as a first run.
+    # A reference-level chain keeps the words it had.
+    never = {"commit": LAST, "kind": "fail", "pr": 17700, "author": "kijai", "runs": 2}
+    assert run_report.failing_since(never) == (
+        f"failing since {last} ([#17700]({COMFY}/pull/17700), kijai), 2 runs")
+    assert run_report.failing_since({**never, "level": "smoke"}) == (
+        f"failing since {last} (the workflow's first run on this lane), 2 runs")
+
+
+def test_first_run_has_a_wording_of_its_own():
+    """A workflow that fails its first run is a problem of the workflow. It
+    must not read like a change in the commits the run covers."""
+    missing = [{"file": None, "check": "missing",
+                "text": "SaveVideo wrote no .mp4 file with the prefix wan_clip_video"}]
+    cell = _smoke_cell(CLIP, problems=missing, prior_verdict=None, prior_commit=None)
+    chain = {CLIP: {"commit": HEAD, "run_ts": 1794702636, "kind": "fail", "prev_good": None,
+                    "pr": 17754, "author": "kijai", "golden": None, "runs": 1,
+                    "level": "smoke"}}
+    out = _nightly([cell], before=[], first_bad=chain)
+    assert _block(out, CLIP) == [
+        f"#### ❌ `{CLIP}`: smoke check failed (first run)",
+        "The workflow finished, and its output did not pass the smoke checks.",
+        "- SaveVideo wrote no .mp4 file with the prefix wan\\_clip\\_video",
+        run_report.FIRST_RUN]
+    assert "1 of 1 workflow failed: 1 on its first run." in out.split("\n")
+    assert f"| `{CLIP}` | ❌ smoke check failed |  | no file |" in out
+    # The lane's open failures name no range and no pull request for it.
+    assert (f"- `{CLIP}`: smoke check failed, failing since [`05e878f`]({COMFY}/commit/{HEAD}) "
+            "(the workflow's first run on this lane), first seen 2026-11-15, 1 run") in out
+    assert "new at this commit" not in out.replace("new at this commit (new in this run", "")
+    assert "new in this run" not in out.replace("(new in this run, when", "")
+    # On a nightly lane an execution error with no earlier result is a first run too.
+    broken = _smoke_cell(CLIP, verdict="execution_error", prior_verdict=None, prior_commit=None)
+    out = _nightly([broken], before=[])
+    assert ("The workflow did not finish on this commit. Worker status: <code>timeout</code>. "
+            + run_report.FIRST_RUN) in out.split("\n")
+    assert "1 of 1 workflow failed: 1 on its first run." in out.split("\n")
+    # On the per-commit lane that case keeps the words it had.
+    out = _smoke_report(_smoke_files([broken], before=[]))
+    assert "it is not known whether the error is new at this commit" in out
+
+    origin = run_report.origin_of
+    assert origin("smoke_fail", {}, {}, SHA) == "first"
+    assert origin("smoke_fail", {"verdict": "pass"}, {}, SHA) == "new"
+    assert origin("smoke_fail", {"verdict": "execution_error"}, {}, SHA) == "new"
+    assert origin("smoke_fail", {"verdict": "fail"}, {}, SHA) == "inherited"
+    # A chain that started at another commit says the failure is older than this run.
+    assert origin("smoke_fail", {}, {"commit": PREV}, SHA) == "inherited"
+    assert origin("smoke_fail", {}, {"commit": SHA}, SHA) == "first"
+    assert origin("exec", {}, {}, SHA, long_cadence=True) == "first"
+    assert origin("exec", {}, {"commit": PREV}, SHA, long_cadence=True) == "inherited"
+    assert origin("exec", {"verdict": "pass"}, {}, SHA, long_cadence=True) == "new"
+    # The per-commit lane's execution errors are classified as they always were.
+    assert origin("exec", {}, {}, SHA) is None
+    assert origin("exec", {}, {"commit": SHA}, SHA) == "new"
+    assert origin("smoke_pass", {"verdict": "fail"}, {}, SHA) is None
+
+
+def test_the_checked_column_stands_where_nothing_is_compared():
+    image = _cell("flux_dev_t2i")
+    mesh = _smoke_cell(MESH, [_png(f"{MESH}_00001_.png"), _glb(f"{MESH}_mesh_00001_.glb")])
+    # A lane of smoke rows alone: Checked in place of the three reference columns.
+    out = _smoke_report(_smoke_files([mesh, _silent()]))
+    table = _section(out, "All workflows")
+    assert table[2] == SMOKE_HEADER and "vs reference" not in out
+    assert all(row.count(" | ") == 8 for row in table[4:6])
+    # A mixed lane keeps the three and adds Checked after them. A smoke row fills
+    # only Checked, a reference row leaves it empty.
+    out = _smoke_report(_smoke_files([image, mesh, _silent()]))
+    table = _section(out, "All workflows")
+    assert table[2] == MIXED_HEADER
+    cells = {row.split(" | ")[0]: row.split(" | ") for row in table[4:7]}
+    assert cells["| `flux_dev_t2i`"][3:7] == [
+        "bit-identical", f"identical to [`{PREV[:7]}`]({COMFY}/commit/{PREV})", "`v0.42.0`", ""]
+    assert cells[f"| `{MESH}`"][3:7] == ["", "", "", "1 image 1024x1024 · mesh 35,781 vertices"]
+    assert cells[f"| `{MUSIC}`"][3:7] == ["", "", "", "30.0 s · 48000 Hz · stereo"]
+    # A lane without a smoke row has no such column: its table is the one it had.
+    out = _smoke_report(_smoke_files([image]))
+    assert _section(out, "All workflows")[2] == SMOKE_HEADER.replace(
+        "| Checked |", "| vs reference | vs previous | Reference |")
+
+    def checked(*files, **kw):
+        return run_report.checked_cell(run_report.View(
+            wf="wf", name="`wf`", safe=True, run={}, state=kw.pop("state", "smoke_pass"),
+            origin=None, prior={}, sha=None, level=kw.pop("level", "smoke"),
+            cell={"smoke": {"files": list(files)}}))
+
+    video = {"name": "v.mp4", "type": "video", "bytes": 310000, "width": 640, "height": 352,
+             "frames": 25, "seconds": 1.042, "bytes_per_frame_mp": 14280}
+    text = {"name": "t.txt", "type": "text", "bytes": 1300, "chars": 1204, "words": 231}
+    assert checked(video) == "video 640x352 · 25 frames"
+    assert checked(text) == "text 1,204 characters"
+    assert checked(_flac("a.flac", channels=1)) == "30.0 s · 48000 Hz · mono"
+    assert checked(_flac("a.flac", channels=6)) == "30.0 s · 48000 Hz · 6 channels"
+    # Next to another type the audio file is named, and equal files are said once.
+    assert checked(_png("a.png"), _flac("a.flac")) == (
+        "1 image 1024x1024 · audio 30.0 s · 48000 Hz · stereo")
+    assert checked(_png("a.png"), _png("b.png", width=512)) == "2 images"
+    assert checked(_glb("a.glb"), _glb("b.glb"), _glb("c.glb", vertices=1)) == "3 meshes"
+    assert checked(_flac("a.flac"), _flac("b.flac")) == "2 audio files 30.0 s · 48000 Hz · stereo"
+    # A file of a type that has no check, and one the worker listed and did not send.
+    assert checked(_png("a.png"), {"name": "a.gif", "type": None, "bytes": 5}) == (
+        "1 image 1024x1024 · 1 other file, not checked")
+    assert checked(_png("a.png"), {**video, "sent": False, "published": False}) == (
+        "1 image 1024x1024 · 1 file not sent, checked by size only")
+    assert checked({**video, "sent": False}) == "1 file not sent, checked by size only"
+    assert checked(_flac("a.flac"), {**video, "sent": False}) == (
+        "audio 30.0 s · 48000 Hz · stereo · 1 file not sent, checked by size only")
+    # A run that wrote nothing, and one that did not get far enough to be checked.
+    assert checked(state="smoke_fail") == "no file" and checked(state="exec") == ""
+    assert checked(_png("a.png"), level=None) == ""
+    # Numbers of the wrong type are left out, never printed and never raised on.
+    assert checked({"name": "a.png", "type": "image", "width": "<b>", "height": [1]},
+                   {"name": "a.glb", "type": "mesh", "vertices": True},
+                   {"name": 7, "type": "image"}, "not a file") == "1 image · mesh"
+
+
+def test_smoke_facts_by_type():
+    facts = run_report.smoke_facts
+    assert facts(_png("a.png")) == ("1024x1024 · brightness spread 69.17 · 64.1 % of the pixels "
+                                    "have one brightness")
+    assert facts(_glb("a.glb")) == "35,781 vertices · 71,836 faces · box 1.37 x 1.56 x 1.22"
+    assert facts(_glb("a.glb", vertices=1, faces=1, extent=None)) == "1 vertex · 1 face"
+    assert facts(_flac()) == "30.0 s · 48000 Hz · 2 channels · 117,330 bytes/s"
+    assert facts({"type": "text", "chars": 1204, "words": 1}) == (
+        "1,204 non-blank characters · 1 word")
+    assert facts({"type": "video", "width": 640, "height": 352, "frames": 25, "seconds": 1.042,
+                  "bytes_per_frame_mp": 14280}) == (
+        "640x352 · 25 frames · 1.0 s · 14,280 bytes a frame for each megapixel")
+    # A file that could not be read has nothing measured. One that was not sent says so.
+    assert facts({"type": "mesh"}) == ""
+    assert facts(_png("a.png", sent=False)) == "not sent, checked by size only"
+    assert facts({"type": None}) == facts({"type": "<b>"}) == (
+        "not checked: no check for this file type")
+    assert facts({"type": None, "sent": False}) == (
+        "not sent, and not checked: no check for this file type")
+    odd = {"type": "audio", "seconds": HUGE, "sample_rate": "x", "channels": {"a": 1},
+           "bytes_per_second": [1]}
+    assert facts(odd) == ""
+
+
+def test_a_smoke_text_workflow_shows_its_text_under_generated_text():
+    wf, name = "llm_smoke", "llm_smoke_00001.txt"
+    entry = {"name": name, "type": "text", "bytes": len(T_REF), "sha256": _sha256(T_REF),
+             "chars": 173, "words": 36}
+    path = f"{P}/runs/master/{SHA}/{wf}/outputs/{name}"
+    cell = _smoke_cell(wf, [entry], output_kind="text")
+    out = _smoke_report(_smoke_files([cell, _cell("flux_dev_t2i")], extra={path: T_REF}))
+    lines = out.split("\n")
+    section = _section(out, "Generated text")
+    assert section[:5] == ["### Generated text", "", f"`{wf}`, smoke level, not compared:", "",
+                           "<details><summary>Generated text (208 characters)</summary>"]
+    assert _pre_blocks(out) == [T_REF] and "identical to its reference" not in out
+    assert f"[The whole file]({RAW}/{path})" in section
+    assert any(row.startswith(f"| `{wf}` | ✅ smoke pass | [text]({RAW}/{path}) |  |  |  | text "
+                              "173 characters |") for row in lines)
+    # One that failed its checks shows its text in its block, where the failure is read.
+    again = [{"file": name, "check": "repeat", "text": "one word is 30 of the 36 words"}]
+    out = _smoke_report(_smoke_files([_smoke_cell(wf, [entry], again, output_kind="text")],
+                                     extra={path: T_EVIL}))
+    assert "### Generated text" not in out
+    block = "\n".join(_section(out, "What needs attention"))
+    assert "<details><summary>Generated text (" in block and block.count("<pre>") == 1
+    assert "- <code>llm\\_smoke\\_00001.txt</code>: one word is 30 of the 36 words" in block
+    # Model output stays inside the <pre> block, whatever the level.
+    assert "<script>" not in out and "@octocat" not in _outside_pre(out)
+    assert not [line for line in out.split("\n") if line.startswith("::")]
+    # A text over 1 MiB fails its check and is kept off the results branch: no link
+    # says it is there.
+    big = {**entry, "bytes": 2 * 1024 * 1024, "published": False}
+    large = [{"file": name, "check": "size", "text": "2097152 bytes: a text output may have at "
+              "most 1048576"}]
+    out = _smoke_report(_smoke_files([_smoke_cell(wf, [big], large, output_kind="text")]),
+                        artifact_url=ARTIFACT)
+    assert f"| `{wf}` | ❌ smoke check failed | text, in the [attached files]({ARTIFACT}) |" in out
+    assert "The generated text is 2.00 MB, too large to show here." in out.split("\n")
+    assert f"{name})" not in out and "The whole file" not in out
+
+
+def test_a_file_that_is_not_published_is_not_linked_as_if_it_were():
+    """A smoke run keeps a file over 1 MiB off the results branch until the
+    run before wrote the same file. The report must not link what is not there."""
+    big = _png(f"{MESH}_00001_.png", bytes=1278115, published=False)
+    mesh = _smoke_cell(MESH, [big, _png(f"{MESH}_00002_.png"),
+                              _glb(f"{MESH}_mesh_00001_.glb", published=False)])
+    music = _smoke_cell(MUSIC, [_flac(published=False)], output_kind="audio")
+    clip = _smoke_cell(CLIP, [
+        _png(f"{CLIP}_00001_.png"),
+        {"name": f"{CLIP}_video_00001_.mp4", "type": "video", "bytes": 9800000,
+         "sha256": "ab" * 32, "sent": False, "published": False}],
+        notes=[f"{CLIP}_video_00001_.mp4 was not sent (over the worker's size limit): checked "
+               "by size only"])
+    files = _smoke_files([mesh, music, clip])
+    out = _smoke_report(files, artifact_url=ARTIFACT)
+    run_dir = f"{RAW}/{P}/runs/master/{SHA}"
+    # The thumbnail is always published. The full picture is in the attached files.
+    assert (f'| `{MESH}` | ✅ smoke pass | <a href="{ARTIFACT}"><img src="{run_dir}/{MESH}/outputs/'
+            f'thumbs/{MESH}_00001_.webp" width="96" alt="{MESH} output"></a> |') in out
+    assert f"| `{MUSIC}` | ✅ smoke pass | audio, in the [attached files]({ARTIFACT}) |" in out
+    held = ("not published: over 1 MiB, and the run before did not write the same file (in the "
+            f"[attached files]({ARTIFACT}))")
+    assert (f"| `{MESH}` | {MESH_MD}\\_00001\\_.png | 1.22 MB | `{'9f' * 32}` | {held}; 1024x1024 "
+            "· brightness spread 69.17 · 64.1 % of the pixels have one brightness |") in out
+    assert (f"| `{MESH}` | [{MESH_MD}\\_00002\\_.png]({run_dir}/{MESH}/outputs/{MESH}_00002_.png) "
+            "| 152.5 KB |") in out
+    for name in (f"{MESH}_00001_.png", f"{MESH}_mesh_00001_.glb", FLAC,
+                 f"{CLIP}_video_00001_.mp4"):
+        assert f"{name})" not in out and f'{name}"' not in out  # no link to it anywhere
+    # A file the worker listed and did not send: said in the row and in the file list.
+    assert "| 1 image 1024x1024 · 1 file not sent, checked by size only |" in out
+    assert (f"| `{CLIP}` | wan\\_clip\\_video\\_00001\\_.mp4 | 9.35 MB | `{'ab' * 32}` | not "
+            "published: over the worker's size limit, checked by size only |") in out
+    # A report made later knows no artifact: it points to the run that tested the commit.
+    out = _smoke_report(files)
+    assert f'<a href="{RUN_URL}"><img src="{run_dir}/{MESH}/outputs/thumbs/' in out
+    assert f"| audio, attached to [the run that tested it]({RUN_URL}) |" in out
+    # In a failure's block the file is named, and the rule is said once under the table.
+    quiet = _silent()
+    quiet["smoke"]["files"][0]["published"] = False
+    block = _block(_smoke_report(_smoke_files([quiet]), artifact_url=ARTIFACT), MUSIC)
+    assert block[3:7] == [
+        *FILES_HEADER,
+        f"| {FLAC_MD}, not published (in the [attached files]({ARTIFACT})) | audio | 10.8 KB "
+        "| 30.0 s · 48000 Hz · 2 channels · 138 bytes/s |",
+        "A file over 1 MiB is published only when the run before wrote the same file. Until "
+        "then it is in the files attached to the run, which GitHub keeps 90 days."]
+    # The link of an audio workflow goes to its main file: the first FLAC by name
+    # that starts with the workflow id, as the runner's sha rule has it.
+    two = _smoke_cell(MUSIC, [_flac("aaa_intro.flac"), _flac(f"{MUSIC}_00002.flac"), _flac()],
+                      output_kind="audio")
+    out = _smoke_report(_smoke_files([two]))
+    assert f"| [audio]({run_dir}/{MUSIC}/outputs/{FLAC}) | 3 audio files 30.0 s · 48000 Hz" in out
+    other = _smoke_cell(MUSIC, [_flac("zzz.flac"), _flac("aaa.flac")], output_kind="audio")
+    out = _smoke_report(_smoke_files([other]))
+    assert f"| [audio]({run_dir}/{MUSIC}/outputs/aaa.flac) | 2 audio files 30.0 s" in out
+    # Either mark keeps a file from being linked: not published, or not sent at all.
+    marks = run_report.View(wf="wf", name="`wf`", safe=True, run={}, state="smoke_pass",
+                            origin=None, prior={}, sha=None, level="smoke", cell={"smoke": {
+                                "files": [{"name": "a.mp4", "sent": False}, {"name": "c.png"},
+                                          {"name": "b.png", "published": False}]}})
+    assert run_report.held_back(marks) == {"a.mp4", "b.png"}
+    # Past the 50 files a run lists, only a small file is known to be published.
+    listed = {"outputs": [{"filename": "a.png", "bytes": 5, "sha256": "1" * 64},
+                          {"filename": "b.glb", "bytes": 5 * 1024 * 1024, "sha256": "2" * 64}]}
+    lane = run_report.gather_lane(run_report.DictReader({}, RESULTS), NIGHT_LANES, SHA, "master",
+                                  LANE)
+    note = run_report.smoke_file_note
+    assert note(lane, listed["outputs"][0], {}) == (True, "")
+    assert note(lane, listed["outputs"][1], {}) == (
+        False, "not linked: past the 50 files the run says it published")
+
+
+def test_hostile_names_and_problem_texts_of_a_smoke_run_stay_inert():
+    """File names, types, numbers and problem sentences of `smoke` come from
+    the worker's files. None of them may add markup, a link, a mention or a
+    workflow command."""
+    name = "evil | `x` <img src=x onerror=alert(1)> [a](https://evil.example) @octocat #1.png"
+    files = [
+        _png(name), _png("../../../../etc/passwd.png"), _png("ok dir/fine name.png"),
+        {"name": "::error::boom.glb", "type": "<b>mesh</b>", "bytes": "many", "sha256": EVIL,
+         "vertices": "<script>alert(1)</script>", "faces": EVIL, "extent": [EVIL, 1, 2]},
+        {"name": "ok.flac", "type": "audio", "bytes": 5, "sha256": "1" * 64, "seconds": HUGE,
+         "sample_rate": EVIL, "channels": {"x": 1}, "bytes_per_second": [1]},
+        {"name": ["not", "a", "name"], "type": "image"}, "not a file", None]
+    problems = [
+        {"file": name, "check": "decode", "text": EVIL},
+        {"file": "::error::boom.glb", "check": "decode",
+         "text": "::error::could not be read: JSONDecodeError: <script>alert(1)</script>"},
+        {"file": None, "check": EVIL, "text": "::warning::@octocat | a | b |"},
+        "not an object", {"file": ["a"], "text": None}, {"file": EVIL, "text": "x" * 5000}]
+    cell = _smoke_cell("hostile_wf", [f for f in files if isinstance(f, dict)
+                                      and isinstance(f.get("name"), str)], problems,
+                       notes=[EVIL, "::notice::x", 7, None], prior_commit=EVIL)
+    cell["smoke"]["files"] = files
+    out = _smoke_report(_smoke_files([cell]), artifact_url=ARTIFACT)
+    md = _outside_pre(out)
+    assert "<script" not in out and "<img src=x" not in out and "<b>" not in out
+    assert "&lt;img src=x onerror=alert(1)&gt;" in md
+    assert set(re.findall(r"</?([a-zA-Z0-9]+)", out)) <= {"a", "img", "code", "details", "summary"}
+    assert "&#124; pipe" in md and " | pipe" not in md and "evil &#124; " in md
+    assert f"@{ZW}octocat" in md and "@octocat" not in md and "#4242" not in md
+    assert "**bold**" not in md and "`tick`" not in md
+    # No line is a workflow command: each such text stands behind a list mark or in a cell.
+    assert not [line for line in out.split("\n") if line.lstrip().startswith("::")]
+    assert "- <code>::error::boom.glb</code>: ::error::could not be read: JSONDecodeError:" in md
+    assert f"- ::warning::@{ZW}octocat &#124; a &#124; b &#124;" in md
+    assert "- Note: ::notice::x" in md and "- no detail recorded" in md
+    # Links go to known hosts, and no name climbs out of the run's folder.
+    targets = (re.findall(r'(?:src|href)="([^"]*)"', out)
+               + re.findall(r"(?<!\\)\]\(([^)]*)\)", md))
+    assert targets
+    for url in targets:
+        assert re.match(r"https://(github\.com|raw\.githubusercontent\.com|ci\.comfy\.org)(/|$)",
+                        url), url
+    assert "../" not in "".join(targets) and "evil.example)" not in "".join(targets)
+    run_dir = f"{RAW}/{P}/runs/master/{SHA}/hostile_wf/outputs"
+    assert f"[ok dir/fine name.png]({run_dir}/ok%20dir/fine%20name.png)" in md
+    assert f"[::error::boom.glb]({run_dir}/%3A%3Aerror%3A%3Aboom.glb) | other |  | not " in md
+    # A type that is no known type is "other", a size that is no number is left out,
+    # and a long sentence is cut. The tables keep their shape.
+    block = _block(out, "hostile_wf")
+    rows = block[block.index(FILES_HEADER[1]) + 1:][:5]
+    assert len(rows) == 5 and all(row.count(" | ") == 3 for row in rows)
+    assert "x" * 400 not in out
+    # A last result that names no commit: the heading keeps to the run, and no
+    # sentence is built around what is not a sha.
+    assert block[0] == "#### ❌ `hostile_wf`: smoke check failed (new at this commit)"
+    assert "It last passed" not in out and "Its last result" not in out
+    table = _section(out, "All workflows")
+    assert table[4].count(" | ") == 8
+    assert "| 3 images 1024x1024 · audio · 1 other file, not checked |" in table[4]
+
+
+def test_the_title_of_a_nightly_run_names_the_commits_it_covers():
+    mesh = _smoke_cell(MESH, [_png(f"{MESH}_00001_.png")], prior_commit=LAST)
+    out = _nightly([mesh], published_new_bytes=412345)
+    lines = out.split("\n")
+    assert lines[0] == ("## ✅ GPU regression · nightly · py3.13 / torch 2.14.1 / cu130 / RTX 4090 "
+                        "· `e9afbcc`..`05e878f` (7 commits)")
+    assert "| New data published by this run | 402.7 KB |" in lines
+    assert "| New data published by this run | 0 B |" in _nightly(
+        [mesh], published_new_bytes=0).split("\n")
+    # A nightly run of one commit, and a run that has no range, name the tested commit.
+    one = _smoke_files([mesh], lane=NIGHTLY, commit=HEAD)
+    assert _smoke_report(one, lane=NIGHTLY, commit=HEAD).split("\n")[0].endswith("· `05e878f3`")
+    # A per-commit run keeps its title and its facts, however many commits it covers.
+    rng = {"prev": PREV, "commits_between": 3}
+    out = _smoke_report(_smoke_files([_cell("flux_dev_t2i")], tested_range=rng))
+    assert out.split("\n")[0].endswith("· `cccccccc`") and "New data published" not in out
+    for odd in (True, "412345", -1, None, [1]):
+        assert "New data published" not in _nightly([mesh], published_new_bytes=odd)
+
+
+def test_cell_state_and_rollup_know_the_smoke_level():
+    state = run_report.cell_state
+    assert state("pass", level="smoke") == "smoke_pass"
+    assert state("fail", level="smoke") == "smoke_fail"
+    assert state("execution_error", level="smoke") == "exec"
+    assert state("infra_error", level="smoke") == "infra"
+    # No reference can accept a smoke output, and a missing reference is no smoke result.
+    ref = {"sha": "2" * 64, "tag": "v0.43.0"}
+    assert state("fail", "new_drift", "2" * 64, "v0.42.0", ref, level="smoke") == "smoke_fail"
+    assert state("fail", "new_drift", "2" * 64, "v0.42.0", ref) == "accepted"
+    assert state("no_baseline", level="smoke") == state(["pass"], level="smoke") == "unknown"
+    for level in (None, "reference", ["smoke"], 1):
+        assert state("pass", level=level) == "pass"
+
+    rollup = run_report.rollup
+    assert rollup({"a": "smoke_pass", "b": "smoke_pass"}) == "✅ smoke pass"
+    assert rollup({"a": "pass", "b": "accepted", "c": "smoke_pass"}) == (
+        "✅ pass (2 reference, 1 smoke)")
+    assert rollup({"a": "pass"}) == "✅ pass"
+    # Red and not-tested roll-ups keep their shape.
+    assert rollup({"a": "smoke_fail", "b": "smoke_pass", "c": "pass"}) == "❌ 1 of 3 failed"
+    assert rollup({"a": "infra", "b": "smoke_pass"}) == f"{run_report.WARN} 1 of 2 infra error"
+    assert run_report.not_passing({"a": "smoke_pass", "b": "pass"}) == ""
+    assert run_report.not_passing({"a": "smoke_fail", "b": "accepted"}) == (
+        "`a` smoke check failed; `b` output changed (accepted)")
+    # Every result that needs a block has a place in the order of the blocks.
+    needs_block = set(run_report.LABELS) - set(run_report.PASSED) - {"not_run"}
+    assert needs_block == set(run_report.ATTENTION_ORDER)
+    assert set(run_report.RED) | set(run_report.GREEN) <= set(run_report.LABELS)
+
+
+def test_a_summary_rebuilt_from_the_runner_keeps_the_level_and_the_checks(tmp_path):
+    """A run that could not publish reports from its own files. The cell is
+    built from comparison.json, which names the level and holds the checks."""
+    workdir = tmp_path / "regression-work"
+    cell = _silent()
+    comparison = {**{k: cell[k] for k in ("verdict", "detail", "vs_golden", "vs_previous",
+                                          "thresholds_used", "golden_tag", "previous_commit",
+                                          "previous_verdict", "figures")},
+                  "output_kind": "audio", "level": "smoke", "smoke": cell["smoke"]}
+    record = _smoke_run(cell)
+    # A second sound file, first by name: it is not the one that identifies the run.
+    record["outputs"].insert(0, {"filename": "aaa_intro.flac", "bytes": 5, "sha256": "f" * 64})
+    for wf, files in ((MUSIC, {"run.json": record, "comparison.json": comparison}),
+                      ("flux_dev_t2i", {"run.json": _run("flux_dev_t2i"), "comparison.json": {
+                          "verdict": "pass", "vs_golden": IDENT, "vs_previous": IDENT}})):
+        (workdir / wf).mkdir(parents=True)
+        for name, data in files.items():
+            (workdir / wf / name).write_text(json.dumps(data), encoding="utf-8")
+    rebuilt = run_report.summary_from_workdir(str(workdir), SHA, "master", LANE)["workflows"]
+    assert list(rebuilt[MUSIC])[-4:] == ["custom_nodes", "output_kind", "level", "smoke"]
+    assert rebuilt[MUSIC]["smoke"] == cell["smoke"] and rebuilt[MUSIC]["level"] == "smoke"
+    # The audio file identifies the run, by the rule the runner uses.
+    assert rebuilt[MUSIC]["output_sha256"] == "10" * 32
+    assert "level" not in rebuilt["flux_dev_t2i"] and "smoke" not in rebuilt["flux_dev_t2i"]
+    assert list(rebuilt["flux_dev_t2i"])[-1] == "custom_nodes"
+    out = run_report.lane_report(run_report.Reader(), LANES, SHA, "master", LANE,
+                                 workdir=str(workdir))
+    assert f"#### ❌ `{MUSIC}`: smoke check failed (first run)" in out
+    assert f"- <code>ace\\_step\\_15\\_t2a\\_00001.flac</code>: {SILENT}" in out
+    assert MIXED_HEADER in out and "raw.githubusercontent.com" not in out
+
+    run = {"outputs": [{"filename": "other.flac", "sha256": "o"},
+                       {"filename": f"{MUSIC}_00002.flac", "sha256": "b"},
+                       {"filename": FLAC, "sha256": "a"}, {"filename": "x.png", "sha256": "p"}]}
+    assert run_report.output_sha(run, "audio", MUSIC) == "a"
+    assert run_report.output_sha(run, "image", MUSIC) == "p"
+    assert run_report.output_sha({}, "audio", MUSIC) is None
+
+
+def _smoke_overview_files():
+    mixed = [_cell("flux_dev_t2i"), _smoke_cell(MESH, [_png(f"{MESH}_00001_.png")]), _silent()]
+    files = _smoke_files(mixed, first_bad={
+        MUSIC: {"commit": SHA, "run_ts": 1794702636, "kind": "fail", "prev_good": PREV,
+                "pr": 17754, "author": "kijai", "golden": None, "runs": 1, "level": "smoke"},
+        "gone_wf": {"commit": PREV, "run_ts": 1794700000, "kind": "execution_error",
+                    "prev_good": FIRST, "pr": 17753, "author": "kijai", "runs": 2}})
+    return files
+
+
+def test_overview_words_smoke_results_and_lists_chains_of_workflows_the_lane_runs():
+    files = _smoke_overview_files()
+    reader = run_report.DictReader(files, RESULTS)
+    out = run_report.overview_report(reader, LANES, SHA, "master")
+    lines = out.split("\n")
+    main = LANES["lanes"][LANE]["label"]
+    # The sentence stands under the title, and the legend names the smoke labels.
+    assert lines[:3] == ["## GPU regression · all lanes · `cccccccc`", "", run_report.SMOKE_NOTE]
+    assert f"{run_report.LEGEND} {run_report.SMOKE_LEGEND}" in lines
+    assert (f"| {main} | primary · blocking | ❌ 1 of 3 failed | [2026-11-15 00:30 UTC]({RUN_URL}) "
+            f"| `{MUSIC}` smoke check failed |") in lines
+    matrix = _section(out, "Recent commits")
+    assert f"[❌ 1 of 3 failed]({RUN_URL}): `{MUSIC}` smoke check failed | ➖ not run |" in matrix[4]
+    assert "| ✅ pass (1 reference, 2 smoke) | ➖ not run |" in matrix[5]
+    since = f"failing since [`{SHA[:7]}`]({COMFY}/commit/{SHA})"
+    failures = _section(out, "Open failures")
+    assert failures[2:5] == [f"{main}:", "", f"- `{MUSIC}`: smoke check failed, {since} "
+                             f"([#17754]({COMFY}/pull/17754), kijai, Add a node (\\#{ZW}17754)), "
+                             "first seen 2026-11-15, 1 run, last passed at "
+                             f"[`{PREV[:7]}`]({COMFY}/commit/{PREV})"]
+    # Without the manifest every chain of the index is listed, as before.
+    assert failures[5].startswith("- `gone_wf`: execution error, failing since ")
+    # With it, only the chains of workflows the lane runs today. `gone_wf` was removed
+    # while it was red, `off_wf` is switched off, `other_wf` runs on another lane only.
+    manifest = {"workflows": {MUSIC: {"enabled": True}, MESH: {"enabled": True, "lanes": None},
+                              "flux_dev_t2i": {"enabled": True, "lanes": [LANE]},
+                              "off_wf": {"enabled": False}, "other_wf": {"enabled": True,
+                                                                        "lanes": [OTHER]}}}
+    out = run_report.overview_report(reader, LANES, SHA, "master", manifest=manifest)
+    assert "gone_wf" not in out and f"- `{MUSIC}`: smoke check failed, " in out
+    assert run_report.lane_workflows(manifest, LANE) == {MUSIC, MESH, "flux_dev_t2i"}
+    assert run_report.lane_workflows(manifest, OTHER) == {MUSIC, MESH, "other_wf"}
+    for nothing in (None, {}, {"workflows": []}, {"workflows": {}}):
+        assert run_report.lane_workflows(nothing, LANE) is None
+    # A chain of a smoke workflow the lane no longer runs brings no smoke words either.
+    del manifest["workflows"][MUSIC]
+    files[f"{P}/runs/master/{SHA}/summary.json"] = _summary([_cell("flux_dev_t2i")])
+    files[f"regression/index/master/{LANE}.json"]["entries"] = [
+        _entry(SHA, 1794702636, {"flux_dev_t2i": "pass"}, run=4242)]
+    out = run_report.overview_report(reader, LANES, SHA, "master", manifest=manifest)
+    assert "smoke" not in out and "None on the active lanes." in out
+    assert "smoke check failed" in run_report.overview_report(reader, LANES, SHA, "master")
+    # The sentence and the legend follow what the page shows. Only the commit's own
+    # summary names a smoke level (an index from before the level was indexed) ...
+    files = _smoke_overview_files()
+    head = files[f"regression/index/master/{LANE}.json"]
+    head["first_bad"] = {}
+    for entry in head["entries"]:
+        for index_cell in entry["w"].values():
+            index_cell.pop("l", None)
+    out = run_report.overview_report(run_report.DictReader(files, RESULTS), LANES, SHA, "master")
+    assert out.split("\n")[2] == run_report.SMOKE_NOTE and run_report.SMOKE_LEGEND in out
+    assert f"| `{MUSIC}` smoke check failed |" in out and "✅ pass | ➖ not run |" in out
+    # ... or only an older commit of the table has a smoke result.
+    files = _smoke_overview_files()
+    head = files[f"regression/index/master/{LANE}.json"]
+    head["first_bad"] = {}
+    head["entries"][0] = _entry(SHA, 1794702636, {"flux_dev_t2i": "pass"}, run=4242)
+    files[f"{P}/runs/master/{SHA}/summary.json"] = _summary([_cell("flux_dev_t2i")])
+    out = run_report.overview_report(run_report.DictReader(files, RESULTS), LANES, SHA, "master")
+    assert out.split("\n")[2] == run_report.SMOKE_NOTE and run_report.SMOKE_LEGEND in out
+    assert "| ✅ pass (1 reference, 2 smoke) | ➖ not run |" in out
+
+
+def test_the_overview_job_reads_the_manifest_of_its_checkout(tmp_path, monkeypatch):
+    """`overview` from the command line lists a chain only for a workflow that
+    manifest/workflows.json still runs on the lane."""
+    manifest = tmp_path / "workflows.json"
+    manifest.write_text(json.dumps({"workflows": {MUSIC: {"enabled": True}}}), encoding="utf-8")
+    monkeypatch.setattr(run_report.lanes_mod, "MANIFEST_FILE", manifest)
+    out = tmp_path / "overview.md"
+    argv = ["overview", "--commit", SHA, "--branch", "master", "--out", str(out)]
+    reader = run_report.DictReader(_smoke_overview_files(), RESULTS)
+    assert run_report.main(argv, reader=reader) == 0
+    text = out.read_text(encoding="utf-8")
+    assert f"- `{MUSIC}`: smoke check failed, failing since " in text and "gone_wf" not in text
+    # No manifest to read: nothing is left out.
+    monkeypatch.setattr(run_report.lanes_mod, "MANIFEST_FILE", tmp_path / "missing.json")
+    assert run_report.main(argv, reader=reader) == 0
+    assert "- `gone_wf`: execution error, failing since " in out.read_text(encoding="utf-8")
+
+
+def _night_column(entries, cadence="nightly"):
+    lane = {**NIGHT_LANES["lanes"][NIGHTLY], "cadence": cadence}
+    return run_report.LaneColumn(lane_id=NIGHTLY, lane=lane, summary=None, head={},
+                                 entries=run_report.entries_of(_head(entries)), references={})
+
+
+def test_the_nightly_and_weekly_table_shows_each_lanes_last_full_run():
+    """One row per lane, from its newest full run. A dispatch of one workflow
+    is not the lane's result, and a lane whose cron stopped is marked."""
+    runs = {NIGHTLY: {MUSIC, MESH, CLIP}}
+    night = 1794702636
+    full = {**_entry(LAST, night, {MUSIC: {"v": "fail", "l": "smoke"},
+                                   MESH: {"v": "infra_error", "l": "smoke"},
+                                   CLIP: {"v": "infra_error", "l": "smoke"}}, run=4100, n=7),
+            "prev": FIRST}
+    # Newer than the full run: one workflow, tested again by a dispatch.
+    retest = {**_entry(HEAD, night + 7200, {MUSIC: {"v": "pass", "l": "smoke"}}, run=4200),
+              "prev": LAST}
+    label = NIGHT_LANES["lanes"][NIGHTLY]["label"]
+    block = run_report.long_lanes_block([_night_column([retest, full])], runs, now=night + 3600)
+    assert block[:4] == ["### Nightly and weekly lanes", "",
+                         "| Lane | Last full run | Covers | Result | Not passing | Not tested |",
+                         "|---|---|---|---|---|---|"]
+    run_4100 = RUN_URL.replace("4242", "4100")
+    covers = f"[`aaaaaaa`..`e9afbcc`, 7 commits]({COMFY}/compare/{FIRST}...{LAST})"
+    # "Not tested" counts the workflows that ended in an infra error.
+    assert block[4:] == [f"| {label} | [2026-11-15 00:30 UTC]({run_4100}) | {covers} | ❌ 1 of 3 "
+                         f"failed | `{MUSIC}` smoke check failed; `{MESH}` infra error; `{CLIP}` "
+                         "infra error | 2 |"]
+    # Stale: a nightly lane after 36 hours, a weekly lane after 8 days.
+    stale = run_report.long_lanes_block([_night_column([full])], runs, now=night + 37 * 3600)
+    last = f"[2026-11-15 00:30 UTC]({run_4100})"
+    assert f"| {last} {run_report.WARN} no run for 37 hours |" in stale[4]
+    fresh = run_report.long_lanes_block([_night_column([full])], runs, now=night + 35 * 3600)
+    assert "no run for" not in fresh[4]
+    week = _night_column([full], cadence="weekly")
+    assert "no run for" not in run_report.long_lanes_block([week], runs, now=night + 7 * 86400)[4]
+    assert f"{run_report.WARN} no run for 10 days |" in run_report.long_lanes_block(
+        [week], runs, now=night + 10 * 86400)[4]
+    # No entry holds every workflow (one was just added): the newest stands in and says so.
+    more = {NIGHTLY: {MUSIC, MESH, CLIP, "new_wf"}}
+    block = run_report.long_lanes_block([_night_column([retest, full])], more, now=night + 7300)
+    assert (f"| [`05e878f`]({COMFY}/commit/{HEAD}), 1 commit | ✅ smoke pass · 1 of 4 workflows |  "
+            "| 0 |") in block[4]
+    # The lane's workflows are not known: the newest entry is taken as it is.
+    block = run_report.long_lanes_block([_night_column([retest, full])], None, now=night + 7300)
+    assert "| ✅ smoke pass |  | 0 |" in block[4]
+    # A lane that has not run yet, and no lane at all.
+    assert run_report.long_lanes_block([_night_column([])], runs)[4] == (
+        f"| {label} | no run yet |  | ➖ no result |  |  |")
+    assert run_report.long_lanes_block([], runs) == []
+    # Odd index data never raises: a time that is no time, a range that is no range.
+    odd = {**full, "t": "soon", "prev": EVIL, "range": "x", "run": None}
+    row = run_report.long_lanes_block([_night_column([odd])], runs, now=night)[4]
+    assert f"| time not recorded | [`e9afbcc`]({COMFY}/commit/{LAST}) | ❌ 1 of 3 failed |" in row
