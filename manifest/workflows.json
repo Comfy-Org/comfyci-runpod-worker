@@ -23,7 +23,8 @@
         {
           "name": "sd_xl_base_1.0.safetensors",
           "url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors",
-          "directory": "checkpoints"
+          "directory": "checkpoints",
+          "bytes": 6938078334
         }
       ],
       "gpu_type": null,
@@ -43,22 +44,26 @@
         {
           "name": "flux1-dev.safetensors",
           "url": "https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors",
-          "directory": "diffusion_models"
+          "directory": "diffusion_models",
+          "bytes": 23802932552
         },
         {
           "name": "clip_l.safetensors",
           "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors",
-          "directory": "text_encoders"
+          "directory": "text_encoders",
+          "bytes": 246144152
         },
         {
           "name": "t5xxl_fp16.safetensors",
           "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp16.safetensors",
-          "directory": "text_encoders"
+          "directory": "text_encoders",
+          "bytes": 9787841024
         },
         {
           "name": "ae.safetensors",
           "url": "https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors",
-          "directory": "vae"
+          "directory": "vae",
+          "bytes": 335304388
         }
       ],
       "gpu_type": null,
@@ -79,19 +84,22 @@
           "name": "krea2_turbo_fp8_scaled.safetensors",
           "url": "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/diffusion_models/krea2_turbo_fp8_scaled.safetensors",
           "directory": "diffusion_models",
-          "sha256": "eb4dd8c612cfd10f64f25b057e6e6bbcb5737c94a7372177e456dbf7579502f1"
+          "sha256": "eb4dd8c612cfd10f64f25b057e6e6bbcb5737c94a7372177e456dbf7579502f1",
+          "bytes": 13141730784
         },
         {
           "name": "qwen3vl_4b_fp8_scaled.safetensors",
           "url": "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
           "directory": "text_encoders",
-          "sha256": "54bd5144df0bbc25dd6ccadfcb826b521445a1b06ae5a42570bdd2974ca87094"
+          "sha256": "54bd5144df0bbc25dd6ccadfcb826b521445a1b06ae5a42570bdd2974ca87094",
+          "bytes": 5242467968
         },
         {
           "name": "qwen_image_vae.safetensors",
           "url": "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/vae/qwen_image_vae.safetensors",
           "directory": "vae",
-          "sha256": "a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f"
+          "sha256": "a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f",
+          "bytes": 253806246
         }
       ],
       "gpu_type": null,
@@ -112,18 +120,21 @@
           "name": "z_image_turbo_bf16.safetensors",
           "url": "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/diffusion_models/z_image_turbo_bf16.safetensors",
           "directory": "diffusion_models",
-          "sha256": "2407613050b809ffdff18a4ac99af83ea6b95443ecebdf80e064a79c825574a6"
+          "sha256": "2407613050b809ffdff18a4ac99af83ea6b95443ecebdf80e064a79c825574a6",
+          "bytes": 12309866400
         },
         {
           "name": "qwen_3_4b.safetensors",
           "url": "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors",
           "directory": "text_encoders",
-          "sha256": "6c671498573ac2f7a5501502ccce8d2b08ea6ca2f661c458e708f36b36edfc5a"
+          "sha256": "6c671498573ac2f7a5501502ccce8d2b08ea6ca2f661c458e708f36b36edfc5a",
+          "bytes": 8044982048
         },
         {
           "name": "ae.safetensors",
           "url": "https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors",
-          "directory": "vae"
+          "directory": "vae",
+          "bytes": 335304388
         }
       ],
       "gpu_type": null,
@@ -144,31 +155,36 @@
           "name": "qwen_image_2.1_int8_convrot.safetensors",
           "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
           "directory": "diffusion_models",
-          "sha256": "cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d"
+          "sha256": "cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d",
+          "bytes": 7256783064
         },
         {
           "name": "qwen3vl_8b_int8_convrot.safetensors",
           "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/text_encoders/qwen3vl_8b_int8_convrot.safetensors",
           "directory": "text_encoders",
-          "sha256": "8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f"
+          "sha256": "8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f",
+          "bytes": 9350798360
         },
         {
           "name": "qwen_image_2.1_vae_bf16.safetensors",
           "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/vae/qwen_image_2.1_vae_bf16.safetensors",
           "directory": "vae",
-          "sha256": "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9"
+          "sha256": "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9",
+          "bytes": 675509688
         },
         {
           "name": "portrait_model_denim.png",
           "url": "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/96309bd530ad76d87f0b09b061ea97fd646bf025/input/portrait_model_denim.png",
           "directory": "input",
-          "sha256": "d888e9396587a3fd4ad500bbf5988fed0f7ba60ffa71628c29fced78bece3ac6"
+          "sha256": "d888e9396587a3fd4ad500bbf5988fed0f7ba60ffa71628c29fced78bece3ac6",
+          "bytes": 1181250
         },
         {
           "name": "clothing_light_blue_denim_shirt.png",
           "url": "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/96309bd530ad76d87f0b09b061ea97fd646bf025/input/clothing_light_blue_denim_shirt.png",
           "directory": "input",
-          "sha256": "5f8d348aa0079922743e53ab687ba5661c57696d373a0113cc61dae9a36761a3"
+          "sha256": "5f8d348aa0079922743e53ab687ba5661c57696d373a0113cc61dae9a36761a3",
+          "bytes": 1366572
         }
       ],
       "comfy_flags": [
@@ -193,19 +209,22 @@
           "name": "qwen3vl_8b_int8_convrot.safetensors",
           "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/text_encoders/qwen3vl_8b_int8_convrot.safetensors",
           "directory": "text_encoders",
-          "sha256": "8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f"
+          "sha256": "8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f",
+          "bytes": 9350798360
         },
         {
           "name": "qwen_image_2.1_int8_convrot.safetensors",
           "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
           "directory": "diffusion_models",
-          "sha256": "cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d"
+          "sha256": "cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d",
+          "bytes": 7256783064
         },
         {
           "name": "qwen_image_2.1_vae_bf16.safetensors",
           "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/vae/qwen_image_2.1_vae_bf16.safetensors",
           "directory": "vae",
-          "sha256": "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9"
+          "sha256": "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9",
+          "bytes": 675509688
         }
       ],
       "gpu_type": null,
@@ -226,19 +245,22 @@
           "name": "qwen3vl_8b_int8_convrot.safetensors",
           "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/text_encoders/qwen3vl_8b_int8_convrot.safetensors",
           "directory": "text_encoders",
-          "sha256": "8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f"
+          "sha256": "8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f",
+          "bytes": 9350798360
         },
         {
           "name": "qwen_image_2.1_turbo_int8_convrot.safetensors",
           "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/diffusion_models/qwen_image_2.1_turbo_int8_convrot.safetensors",
           "directory": "diffusion_models",
-          "sha256": "8144a0182964aa8403ad6dbc011db837304167d235161b9aabaa8532e967314c"
+          "sha256": "8144a0182964aa8403ad6dbc011db837304167d235161b9aabaa8532e967314c",
+          "bytes": 7256787829
         },
         {
           "name": "qwen_image_2.1_vae_bf16.safetensors",
           "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/vae/qwen_image_2.1_vae_bf16.safetensors",
           "directory": "vae",
-          "sha256": "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9"
+          "sha256": "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9",
+          "bytes": 675509688
         }
       ],
       "gpu_type": null,
@@ -259,19 +281,22 @@
           "name": "mage_flow_int8_convrot.safetensors",
           "url": "https://huggingface.co/Comfy-Org/Mage-Flow/resolve/main/diffusion_models/mage_flow_int8_convrot.safetensors",
           "directory": "diffusion_models",
-          "sha256": "e081068163d7793b7e0d54ae2a773d3ac1c0d5b099c09b69dcbff36448485ae8"
+          "sha256": "e081068163d7793b7e0d54ae2a773d3ac1c0d5b099c09b69dcbff36448485ae8",
+          "bytes": 4159146848
         },
         {
           "name": "mage_flow_vae_bf16.safetensors",
           "url": "https://huggingface.co/Comfy-Org/Mage-Flow/resolve/main/vae/mage_flow_vae_bf16.safetensors",
           "directory": "vae",
-          "sha256": "34e076dc1e8a15321e1e07be5111d59cf16dd10b804b7c7e20b4de29013427e0"
+          "sha256": "34e076dc1e8a15321e1e07be5111d59cf16dd10b804b7c7e20b4de29013427e0",
+          "bytes": 345053056
         },
         {
           "name": "qwen3vl_4b_bf16.safetensors",
           "url": "https://huggingface.co/Comfy-Org/Mage-Flow/resolve/main/text_encoders/qwen3vl_4b_bf16.safetensors",
           "directory": "text_encoders",
-          "sha256": "36f3ff447ef59201722e8f9ce6020c9819fdcfba6aa2608c4e09b1c0ce114e34"
+          "sha256": "36f3ff447ef59201722e8f9ce6020c9819fdcfba6aa2608c4e09b1c0ce114e34",
+          "bytes": 8875719384
         }
       ],
       "gpu_type": null,
@@ -292,13 +317,15 @@
           "name": "gemma_2_2b_it_elm_bf16.safetensors",
           "url": "https://huggingface.co/Comfy-Org/PixelDiT/resolve/main/text_encoders/gemma_2_2b_it_elm_bf16.safetensors",
           "directory": "text_encoders",
-          "sha256": "e7ae59c203c392db4aa4e27783e924ec3225eb563392260cf747e1130ffcdb88"
+          "sha256": "e7ae59c203c392db4aa4e27783e924ec3225eb563392260cf747e1130ffcdb88",
+          "bytes": 5232958571
         },
         {
           "name": "pixeldit_1300m_1024px_bf16.safetensors",
           "url": "https://huggingface.co/Comfy-Org/PixelDiT/resolve/main/diffusion_models/pixeldit_1300m_1024px_bf16.safetensors",
           "directory": "diffusion_models",
-          "sha256": "d904bae12526c48a522a503b80668fbd45bae6398e9d6f3c2a3e76629552d4ff"
+          "sha256": "d904bae12526c48a522a503b80668fbd45bae6398e9d6f3c2a3e76629552d4ff",
+          "bytes": 2604985230
         }
       ],
       "gpu_type": null,
@@ -318,7 +345,8 @@
         {
           "name": "sd_xl_base_1.0.safetensors",
           "url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors",
-          "directory": "checkpoints"
+          "directory": "checkpoints",
+          "bytes": 6938078334
         }
       ],
       "custom_nodes": [
@@ -342,7 +370,8 @@
           "name": "comfyci_clip.mp4",
           "url": "https://raw.githubusercontent.com/Comfy-Org/comfyci-runpod-worker/43286394d73914d283e5daee12d82d011d4630fe/manifest/inputs/comfyci_clip.mp4",
           "directory": "input",
-          "sha256": "d9bf16fbfb0bd7d9b3851fcfc4ca208f4160a6523bac7ed97ce4b288c8b0ec95"
+          "sha256": "d9bf16fbfb0bd7d9b3851fcfc4ca208f4160a6523bac7ed97ce4b288c8b0ec95",
+          "bytes": 67701
         }
       ],
       "comfy_flags": [
@@ -376,13 +405,15 @@
         {
           "name": "sd_xl_base_1.0.safetensors",
           "url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors",
-          "directory": "checkpoints"
+          "directory": "checkpoints",
+          "bytes": 6938078334
         },
         {
           "name": "bbox/face_yolov8m.pt",
           "url": "https://huggingface.co/Bingsu/adetailer/resolve/main/face_yolov8m.pt",
           "directory": "ultralytics",
-          "sha256": "717923c19b3f4bbf5250b728f1fa6b2cb72a33aed1d236ea9caf0e21ad943e5f"
+          "sha256": "717923c19b3f4bbf5250b728f1fa6b2cb72a33aed1d236ea9caf0e21ad943e5f",
+          "bytes": 52026019
         }
       ],
       "custom_nodes": [
@@ -425,13 +456,15 @@
           "name": "qwen3.8_27b_w4a8.safetensors",
           "url": "https://huggingface.co/Comfy-Org/Qwen3.8-27B/resolve/main/text_encoders/qwen3.8_27b_w4a8.safetensors",
           "directory": "text_encoders",
-          "sha256": "9b992a8f6142e6bad602ecc7bab1a56580483c2651824dd0ae64c346e08f60a5"
+          "sha256": "9b992a8f6142e6bad602ecc7bab1a56580483c2651824dd0ae64c346e08f60a5",
+          "bytes": 17286101500
         },
         {
           "name": "man_with_red_hat.png",
           "url": "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/ff15d86b5a143d546ed632826d72501298563ddb/input/man_with_red_hat.png",
           "directory": "input",
-          "sha256": "5eca57bc432702a9993b73ecbae126eb369cda25e91cdfe58cb2f29bfcb0e013"
+          "sha256": "5eca57bc432702a9993b73ecbae126eb369cda25e91cdfe58cb2f29bfcb0e013",
+          "bytes": 4654979
         }
       ],
       "comfy_flags": [
@@ -453,13 +486,15 @@
           "name": "qwen3vl_4b_fp8_scaled.safetensors",
           "url": "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
           "directory": "text_encoders",
-          "sha256": "54bd5144df0bbc25dd6ccadfcb826b521445a1b06ae5a42570bdd2974ca87094"
+          "sha256": "54bd5144df0bbc25dd6ccadfcb826b521445a1b06ae5a42570bdd2974ca87094",
+          "bytes": 5242467968
         },
         {
           "name": "example.png",
           "url": "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/ff15d86b5a143d546ed632826d72501298563ddb/input/example.png",
           "directory": "input",
-          "sha256": "a8e215ad32a0052fc4190e9c5863428d5ee35cd98b246243842ba8360511b7c4"
+          "sha256": "a8e215ad32a0052fc4190e9c5863428d5ee35cd98b246243842ba8360511b7c4",
+          "bytes": 8589
         }
       ],
       "comfy_flags": [

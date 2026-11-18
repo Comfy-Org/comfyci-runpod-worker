@@ -16,6 +16,12 @@ a summary that records infra errors (RunPod, queue, checkout, model volume,
 pack install: not a verdict on the commit), and a marker with no summary. A
 dispatch that names a commit always runs.
 
+A run that names its workflows tests only those. When the commit had no result
+yet, its summary lists them under `scope`. Such a summary is not the lane's
+result of the commit, so it counts as no summary here: the cron still tests
+the commit, and that run replaces the summary. Such a run pushes no start
+marker either, so it is not counted as an attempt.
+
   python regression_skip.py --commit SHA [--explicit] [--summary FILE]
                             [--attempt FILE] [--latest FILE]
 
@@ -47,10 +53,16 @@ def _count(record: dict | None) -> int:
         return 1
 
 
+def is_scoped(summary: dict | None) -> bool:
+    """A summary of named workflows only (`scope`): not the lane's result of the commit."""
+    return bool(summary) and "scope" in summary
+
+
 def attempts(summary: dict | None, marker: dict | None = None) -> int:
     """Attempts already spent on a commit: the latest of its summary and its
-    start marker (a run that died after pushing its marker still counts)."""
-    return max(_count(summary), _count(marker))
+    start marker (a run that died after pushing its marker still counts). A
+    summary of named workflows only is not an attempt."""
+    return max(_count(None if is_scoped(summary) else summary), _count(marker))
 
 
 def next_attempt(summary: dict | None, marker: dict | None = None) -> int:
@@ -78,6 +90,9 @@ def decide(commit: str, summary: dict | None = None, latest: dict | None = None,
         return False, f"{short} has a published summary that could not be read; {again}"
     if marker and marker.get("unreadable"):
         return False, f"{short} has an attempt marker that could not be read; {again}"
+    scoped = is_scoped(summary)
+    if scoped:
+        summary = None
     n = attempts(summary, marker)
     if summary:
         verdict = f"overall {summary.get('overall')}"
@@ -96,6 +111,9 @@ def decide(commit: str, summary: dict | None = None, latest: dict | None = None,
                           f"(attempt {n + 1} of {MAX_ATTEMPTS})")
         return False, (f"{short} started {n} attempts on this lane and none published a "
                        f"result; {again}")
+    if scoped:
+        return True, (f"{short} has a result for named workflows only on this lane; testing "
+                      "every workflow of the lane")
     return True, f"{short} has no published result on this lane yet"
 
 

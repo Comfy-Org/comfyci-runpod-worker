@@ -37,9 +37,13 @@ import packs
 import regression_skip
 import smoke
 import storage
-from submit_and_poll import INFRA_STATUSES, RunPodClient, run_workflow_job
+from submit_and_poll import INFRA_STATUSES, QUEUE_DEADLINE_S, RunPodClient, run_workflow_job
 
 HERE = Path(__file__).resolve().parent
+# A run submits all its jobs at once, and the endpoint has fewer workers than a
+# run has jobs. Each job further back in the line may wait this much longer in
+# RunPod's queue, so none is cancelled only for standing behind its own run.
+QUEUE_DEADLINE_STEP_S = 60
 # custom_node_error: a custom-node pack the workflow requested did not import on
 # the commit under test (whether or not the workflow uses any of its nodes).
 EXEC_FAIL_STATUSES = {"execution_error", "validation_error", "timeout", "prompt_rejected",
@@ -236,8 +240,14 @@ def check_smoke(run_rec: dict, workflow: dict, entry: dict, status: str | None,
     return found, held
 
 
+def queue_deadline_s(position: int) -> int:
+    """Seconds the job submitted as number `position` of a run (from 0) may
+    wait in RunPod's queue: 600 for the first, 60 more for each job before it."""
+    return QUEUE_DEADLINE_S + QUEUE_DEADLINE_STEP_S * position
+
+
 def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: Path,
-                     store: storage.Storage) -> dict:
+                     store: storage.Storage, queue_deadline: float = QUEUE_DEADLINE_S) -> dict:
     workdir = Path(args.workdir) / wf_id
     workdir.mkdir(parents=True, exist_ok=True)
     # At reference level the output is compared with the approved reference
@@ -265,6 +275,7 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
         comfy_repo=args.repo_url,
         lane=args.lane_id,
         custom_nodes=pack_records,
+        queue_deadline_s=queue_deadline,
     )
     published = {k: v for k, v in run_rec.items() if k != "outputs_dir"}  # runner-local path
     (workdir / "run.json").write_text(json.dumps(published, indent=2), encoding="utf-8")
@@ -473,6 +484,39 @@ def attempt_marker(args, lane_id: str, attempt: int) -> dict:
     return marker
 
 
+def merge_retest(old: dict, new: dict) -> dict:
+    """The summary of a commit after a run that named its workflows tested
+    some of them again. `old` is the published summary, `new` this run's.
+
+    Only what the run tested changes: its cells replace the old ones, and
+    `overall` and `has_infra_error` are worked out again over every cell. Every
+    other cell and every other key stay as they are, because they describe the
+    lane's run of the commit (its time, its Actions run, its tested range). The
+    run records itself under `retests`. `scope` grows only when the old summary
+    had one: a summary without it stays the lane's result of the commit."""
+    cells = {**(old.get("workflows") or {}), **new["workflows"]}
+    verdicts = [cell.get("verdict") for cell in cells.values()]
+    tested = sorted(new["workflows"])
+    merged = dict(old)
+    merged["workflows"] = {wf_id: cells[wf_id] for wf_id in sorted(cells)}
+    merged["overall"] = ("fail" if any(v in ("fail", "execution_error") for v in verdicts)
+                         else "pass")
+    merged["has_infra_error"] = "infra_error" in verdicts
+    if "scope" in old:
+        merged["scope"] = sorted({*(old["scope"] or []), *tested})
+    # A range belongs to a cell: the one of a workflow tested again is this run's.
+    ranges = {wf_id: r for wf_id, r in (old.get("ranges") or {}).items() if wf_id not in tested}
+    ranges.update(new.get("ranges") or {})
+    if ranges:
+        merged["ranges"] = ranges
+    else:
+        merged.pop("ranges", None)
+    merged["retests"] = [*(old.get("retests") or []),
+                         {"run_ts": new["run_ts"], "run_url": new["run_url"],
+                          "run_id": new["run_id"], "env": new["env"], "workflows": tested}]
+    return merged
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", default=str(HERE.parent / "manifest" / "workflows.json"))
@@ -534,7 +578,8 @@ def main():
     # A re-run of a commit (the cron's one retry, or a dispatch naming it)
     # counts its attempts, so the cron knows when to stop. A run that died
     # before publishing left only its start marker, which counts too.
-    attempt = regression_skip.next_attempt(store.published_summary(args.branch, args.commit),
+    published = store.published_summary(args.branch, args.commit)
+    attempt = regression_skip.next_attempt(published,
                                            store.attempt_marker(args.branch, args.commit))
     if attempt > 1:
         print(f"{args.commit[:8]} was already tried on lane {lane_id}; this is attempt {attempt}")
@@ -569,8 +614,13 @@ def main():
         except ValueError as e:
             raise SystemExit(f"[{wf_id}] {e}; see manifest/workflows.json")
 
+    # A run that names its workflows is a re-test or a first look, not the
+    # lane's run of the commit: it pushes no start marker, so the cron does not
+    # count it as an attempt, and it never moves the previous-run pointer.
+    named = args.workflows != "all"
     if not args.skip_publish:
         store.snapshot_manifest(args.commit, manifest)
+    if not args.skip_publish and not named:
         # Pushed before any GPU job: if this run dies before it publishes (a
         # failed push, a killed job), the cron still counts the attempt and
         # stops after regression_skip.MAX_ATTEMPTS instead of re-running the
@@ -590,8 +640,8 @@ def main():
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(selected)) as pool:
         futs = {pool.submit(process_workflow, wf_id, entry, defaults, args, repo_root,
-                            store): wf_id
-                for wf_id, entry in selected.items()}
+                            store, queue_deadline_s(position)): wf_id
+                for position, (wf_id, entry) in enumerate(selected.items())}
         for fut in concurrent.futures.as_completed(futs):
             wf_id = futs[fut]
             try:
@@ -635,6 +685,16 @@ def main():
         # branch: a summary of a per-commit lane keeps the keys it always had.
         summary["published_new_bytes"] = published_new_bytes(results, args.previous_smoke)
 
+    if named and published and not args.skip_publish:
+        # The commit already has a result on the lane: only the cells of the
+        # workflows tested again are replaced, so one re-test does not cost the
+        # results of all the others.
+        summary = merge_retest(published, summary)
+        print(f"{args.commit[:8]} already has a result on lane {lane_id}: kept, with "
+              f"{', '.join(sorted(verdicts))} tested again (overall {summary['overall']})")
+    elif named:
+        summary["scope"] = sorted(verdicts)
+
     if not args.skip_publish:
         store.publish_summary(args.branch, args.commit, summary)
         # The previous-run pointer. A run that names its workflows is a re-test
@@ -643,7 +703,6 @@ def main():
         # comparable: every workflow at least produced outputs. A full run of a
         # nightly or weekly lane always moves it: among that many workflows one
         # often has an error, and the pointer would stand still.
-        named = args.workflows != "all"
         comparable = all(r["verdict"] in ("pass", "fail", "no_baseline") for r in results)
         if not named and (comparable or long_cadence):
             store.update_latest(args.branch,
@@ -653,7 +712,7 @@ def main():
         # the push has to retry behind a concurrent publisher.
         entry = index_builder.entry_from_summary(summary, lane_id, layout)
         store.register_derived(lambda st, b=builder, e=entry: b.upsert([e]))
-        store.finalize(f"regression {args.branch}@{args.commit[:8]}: {overall}")
+        store.finalize(f"regression {args.branch}@{args.commit[:8]}: {summary['overall']}")
     # After publishing, so the PR comment step never links to results that
     # did not make it to the store; before the exit code, so a red run has one.
     if args.summary_out:

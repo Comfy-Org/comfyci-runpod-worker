@@ -55,6 +55,10 @@ MAIN_SINKS = {"image": {"SaveImage"}, "text": {"SaveText"},
 UNCHECKED_SINKS = {"SaveAudioMP3", "SaveAudioOpus"}
 INPUT_DIR = "/runpod-volume/models/input"
 ENDPOINT_EXEC_TIMEOUT_S = 3600
+# The network volume holds every model file of the manifest, and nothing ever
+# deletes from it. The files may fill this share of `endpoint_defaults.volume_gb`
+# (a GB counted as 10^9 bytes, the smaller reading).
+VOLUME_FILL_PERCENT = 90
 # What each pack workflow must exercise (so a prompt edit cannot quietly drop
 # the pack nodes); the Manager smoke has none by design.
 PACK_NODES = {
@@ -199,6 +203,36 @@ def _literal_dynamic_inputs(wf: dict) -> list[str]:
                   if "." in name and not isinstance(value, list))
 
 
+def _volume_files(manifest: dict, lanes: dict) -> dict[str, int]:
+    """directory/name -> bytes of every file the volume has to hold: the models
+    and input files of every workflow, enabled or not (the sync fetches both),
+    that runs on a lane whose models are on the volume. Each file counts once."""
+    files: dict[str, int] = {}
+    for lane_id, lane in lanes["lanes"].items():
+        if lanes_mod.is_retired(lane) or lane.get("model_storage") == "job":
+            continue
+        for wf_id in lanes_mod.workflows_for_lane(manifest, lane_id, enabled_only=False):
+            for m in manifest["workflows"][wf_id]["models"]:
+                files[f"{m['directory']}/{m['name']}"] = m["bytes"]
+    return files
+
+
+def _volume_problems(manifest: dict, lanes: dict) -> list[str]:
+    """Why the model files would not fit the network volume, if they would not."""
+    size_gb = (lanes.get("endpoint_defaults") or {}).get("volume_gb")
+    if isinstance(size_gb, bool) or not isinstance(size_gb, int) or size_gb <= 0:
+        return ["endpoint_defaults.volume_gb in manifest/lanes.json is the size of the network "
+                f"volume in GB, a whole number above 0, not {size_gb!r}"]
+    files = _volume_files(manifest, lanes)
+    used, room = sum(files.values()), size_gb * 10**9 * VOLUME_FILL_PERCENT // 100
+    if used <= room:
+        return []
+    largest = max(files, key=files.get)
+    return [f"the model files need {used / 1e9:.1f} GB, and the {size_gb} GB volume may hold "
+            f"{room / 1e9:.1f} GB ({VOLUME_FILL_PERCENT} %): {len(files)} files, the largest is "
+            f"{largest} with {files[largest] / 1e9:.1f} GB"]
+
+
 def test_model_folders_parsed():
     assert {"checkpoints", "diffusion_models", "text_encoders", "vae", "loras",
             "ultralytics", "ultralytics_bbox"} <= _model_folders()
@@ -306,6 +340,11 @@ def test_model_entries(wf_id):
         assert not m["name"].startswith("/") and ".." not in m["name"].split("/"), m["name"]
         if "sha256" in m:
             assert re.fullmatch(r"[0-9a-f]{64}", m["sha256"]), m["name"]
+        # The file's size, so the lint can add up what the volume has to hold.
+        size = m.get("bytes")
+        assert isinstance(size, int) and not isinstance(size, bool) and size > 0, \
+            (f"{m['name']}: bytes must be the size of the download, not {size!r} "
+             "(python scripts/import_template.py --fill-bytes adds a missing one)")
     if any(m["directory"] == "input" for m in entry["models"]):
         flags = entry.get("comfy_flags") or []
         assert "--input-directory" in flags, "input/ files need --input-directory"
@@ -364,8 +403,46 @@ def test_shared_model_keys_agree():
                 other_id, other = seen[key]
                 assert (m["url"], m.get("sha256")) == (other["url"], other.get("sha256")), \
                     f"{key} differs between {other_id} and {wf_id}"
+                assert m.get("bytes") == other.get("bytes"), \
+                    f"{key} has another size in {other_id} than in {wf_id}"
             else:
                 seen[key] = (wf_id, m)
+
+
+def test_the_volume_has_room_for_every_model_file():
+    """One edit can put a workflow on a lane that keeps its models on the
+    volume. A full volume fails the sync, and nothing deletes from it."""
+    assert _volume_problems(MANIFEST, LANES) == []
+    files = _volume_files(MANIFEST, LANES)
+    listed = {f"{m['directory']}/{m['name']}": m["bytes"]
+              for entry in WORKFLOWS.values() for m in entry["models"]}
+    assert files and files.items() <= listed.items()
+
+
+def test_the_volume_rule_counts_each_file_once_and_stops_at_90_percent():
+    def model(name, size):
+        return {"name": name, "url": "https://x/" + name, "directory": "vae", "bytes": size}
+
+    lanes = {"endpoint_defaults": {"volume_gb": 10}, "lanes": {
+        "volume": {"cadence": "per-commit"}, "old": {"cadence": "retired"},
+        "fetch": {"cadence": "weekly", "model_storage": "job"}}}
+    manifest = {"workflows": {
+        "a": {"enabled": True, "models": [model("shared", 4 * 10**9), model("a", 3 * 10**9)]},
+        "b": {"enabled": False, "models": [model("shared", 4 * 10**9), model("b", 2 * 10**9)]},
+        # Fetched by each job, or only on a lane that runs nothing: not on the volume.
+        "c": {"enabled": True, "lanes": ["fetch"], "models": [model("c", 50 * 10**9)]},
+        "d": {"enabled": True, "lanes": ["old"], "models": [model("d", 50 * 10**9)]}}}
+    assert _volume_files(manifest, lanes) == {"vae/shared": 4 * 10**9, "vae/a": 3 * 10**9,
+                                              "vae/b": 2 * 10**9}
+    assert _volume_problems(manifest, lanes) == []  # 9.0 of 10 GB: at the limit
+    manifest["workflows"]["b"]["models"][1]["bytes"] += 1
+    assert _volume_problems(manifest, lanes) == [
+        "the model files need 9.0 GB, and the 10 GB volume may hold 9.0 GB (90 %): 3 files, "
+        "the largest is vae/shared with 4.0 GB"]
+    for size in (None, 0, -5, "200", 200.0, True):
+        said = _volume_problems(manifest, {**lanes, "endpoint_defaults": {"volume_gb": size}})
+        assert len(said) == 1 and "volume_gb" in said[0], size
+    assert "volume_gb" in _volume_problems(manifest, {"lanes": {}})[0]
 
 
 def test_builtin_loader_values_need_no_model_entry():

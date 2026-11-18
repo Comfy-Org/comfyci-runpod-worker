@@ -137,6 +137,40 @@ def test_a_publish_that_keeps_failing_is_bounded():
     assert runs == regression_skip.MAX_ATTEMPTS
 
 
+def test_a_result_of_named_workflows_only_does_not_skip_the_full_run(tmp_path, capsys):
+    """A dispatch that names a workflow and no commit tests master HEAD. Its
+    summary holds that one workflow, under `scope`. The cron must still test
+    the commit, or the one-workflow result would stand as the lane's own."""
+    scoped = {**_summary("pass", attempt=1, flux_dev_t2i="pass"), "scope": ["flux_dev_t2i"]}
+    run, why = regression_skip.decide(SHA, scoped, latest={"commit": "a" * 40})
+    assert run and "named workflows only" in why and "every workflow of the lane" in why
+    # Whatever it holds: a named workflow's failure or infra error is not the lane's result.
+    assert decide(summary={**_summary("fail", a="execution_error"), "scope": ["a"]})
+    assert decide(summary={**_summary("pass", infra=True, attempt=5, a="infra_error"),
+                           "scope": ["a"]})
+    # It is not an attempt: such a run pushes no start marker.
+    assert regression_skip.attempts(scoped) == 0 and regression_skip.next_attempt(scoped) == 1
+    assert regression_skip.next_attempt(scoped, {"attempt": 1}) == 2
+    # A full run that died beside it is counted as it always was.
+    run, why = regression_skip.decide(SHA, scoped, marker={"attempt": 1})
+    assert run and "attempt 2 of 2" in why
+    run, why = regression_skip.decide(SHA, scoped, marker={"attempt": 2})
+    assert not run and "none published a result" in why
+    # The full run replaces the summary, and from then on the commit is tested.
+    assert not decide(summary=_summary("pass", attempt=1))
+    # A re-test at a commit that has the lane's result adds `retests`, not
+    # `scope`: the summary stays the lane's result.
+    retested = {**_summary("fail", a="fail", b="pass"), "retests": [{"workflows": ["b"]}]}
+    run, why = regression_skip.decide(SHA, retested)
+    assert not run and "already published" in why
+    # The step's own call.
+    path = tmp_path / "summary.json"
+    path.write_text(json.dumps(scoped), encoding="utf-8")
+    assert regression_skip.main(["--commit", SHA, "--summary", str(path)]) == 0
+    cap = capsys.readouterr()
+    assert cap.out.strip() == "skip=false" and "testing: " in cap.err
+
+
 def test_cli_prints_the_step_output(tmp_path, capsys):
     summary, latest, empty = tmp_path / "s.json", tmp_path / "l.json", tmp_path / "e.json"
     summary.write_text(json.dumps(_summary("fail", z="execution_error")), encoding="utf-8")
@@ -177,6 +211,35 @@ def test_the_workflow_decides_with_the_published_summary():
 
 REPORT_ONLY = ("REPORT_ONLY: ${{ github.event_name == 'workflow_dispatch' && "
                "(inputs.report_only == true || inputs.report_only == 'true') }}")
+# A scheduled run has no inputs, and an empty input reads as false: every run
+# publishes, except a dispatch whose `publish` box is not ticked.
+PUBLISHES = ("github.event_name != 'workflow_dispatch' || inputs.publish == true || "
+             "inputs.publish == 'true'")
+
+
+def test_a_dispatch_with_publish_off_tests_the_commit_and_writes_nothing():
+    """A first look at a new workflow. The lane's result of the commit is no
+    reason to skip it, nothing reaches the results branch, and no pull request
+    gets a comment that would link to results nobody published."""
+    text = (ROOT / ".github" / "workflows" / "regression.yml").read_text(encoding="utf-8")
+    assert re.search(r"\n      publish:\n        description: .+\n        type: boolean\n"
+                     r"        default: true\n", text)
+    steps = dict(workflow_steps(".github/workflows/regression.yml"))
+    skip, suite = steps["Skip if already tested on this lane"], steps["Run regression suite"]
+    for step in (skip, suite):
+        assert "PUBLISH: ${{ " + PUBLISHES + " }}" in step
+    off = 'if [ "$PUBLISH" != "true" ]; then args+='
+    assert skip.index(off + "(--explicit); fi\n") < skip.index("python scripts/regression_skip.py")
+    assert suite.index(off + "(--skip-publish); fi\n") < suite.index(
+        'python scripts/run_regression.py "${args[@]}"\n')
+    for arg in ('--commit "$COMMIT"', "--branch master", '--lane "$LANE"',
+                '--workflows "$WORKFLOWS"'):
+        assert arg in suite, arg
+    assert ("if: always() && steps.target.outputs.skip != 'true' && (" + PUBLISHES + ")\n"
+            ) in steps["PR comment (PULSE)"]
+    # The report and the attached files do not depend on it.
+    assert "inputs.publish" not in steps["Attach the run's files"]
+    assert len([name for name, step in steps.items() if "inputs.publish" in step]) == 3
 
 
 def test_a_report_only_dispatch_starts_no_gpu_job():

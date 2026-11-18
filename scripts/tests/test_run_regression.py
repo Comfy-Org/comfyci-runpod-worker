@@ -93,6 +93,19 @@ class FakeStore:
         return self.files.get(f"regression/runs/{branch}/{commit}/attempt.json")
 
 
+def _manifest(tmp_path, *wf_ids) -> str:
+    """A manifest of its own with these workflows, all enabled, in this order:
+    a run of `--workflows all` then tests exactly them."""
+    import json
+    path = tmp_path / "manifest" / "workflows.json"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps({
+        "defaults": {"timeout_s": 600, "comfy_flags": [], "thresholds": {}},
+        "workflows": {wf_id: {"enabled": True, "workflow_path": "x", "models": []}
+                      for wf_id in wf_ids}}), encoding="utf-8")
+    return str(path)
+
+
 def test_summary_out_is_written_on_failure_with_prior_verdicts(tmp_path, monkeypatch):
     import json
     import sys
@@ -227,7 +240,7 @@ def test_the_start_marker_is_pushed_before_any_gpu_job(tmp_path, monkeypatch):
 
     monkeypatch.setattr(run_regression, "process_workflow", gpu)
     monkeypatch.setattr(sys, "argv", ["run_regression.py", "--commit", "new", "--branch", "master",
-                                      "--workflows", "sdxl_t2i"])
+                                      "--manifest", _manifest(tmp_path, "sdxl_t2i")])
     with pytest.raises(RuntimeError, match="could not push results"):
         run_regression.main()
     run_url = "https://github.com/Comfy-Org/comfyci-runpod-worker/actions/runs/42"
@@ -257,7 +270,7 @@ def test_a_marker_that_cannot_be_pushed_stops_the_run_before_the_gpu(tmp_path, m
     monkeypatch.setattr(run_regression, "process_workflow",
                         lambda *a: pytest.fail("no GPU job without a pushed marker"))
     monkeypatch.setattr(sys, "argv", ["run_regression.py", "--commit", "new", "--branch", "master",
-                                      "--workflows", "sdxl_t2i"])
+                                      "--manifest", _manifest(tmp_path, "sdxl_t2i")])
     with pytest.raises(RuntimeError, match="could not push checkpoint"):
         run_regression.main()
 
@@ -359,6 +372,430 @@ def test_a_retired_lane_runs_nothing(monkeypatch):
                                           "--skip-publish", *extra])
         with pytest.raises(SystemExit, match="lane 'old' is retired.*the primary is 'new'"):
             run_regression.main()
+
+
+# -- a run that names its workflows -------------------------------------------------
+SUMMARY_KEYS = ["schema_version", "branch", "commit", "run_ts", "overall", "has_infra_error",
+                "lane", "attempt", "run_url", "run_id", "env", "commit_meta", "tested_range",
+                "workflows"]
+
+
+class RecordingStore(FakeStore):
+    """FakeStore with the write side: `events` is what a run writes, in order."""
+
+    def __init__(self, files=None):
+        super().__init__(dict(files or {}))
+        self.events = []
+
+    def snapshot_manifest(self, commit, manifest):
+        self.events.append("snapshot")
+
+    def mark_attempt(self, branch, commit, marker):
+        self.events.append("marker")
+        self.files[f"regression/runs/{branch}/{commit}/attempt.json"] = marker
+
+    def checkpoint(self, message):
+        self.events.append("checkpoint")
+
+    def publish_summary(self, branch, commit, summary):
+        import json
+        self.events.append("summary")
+        self.files[f"regression/runs/{branch}/{commit}/summary.json"] = json.loads(
+            json.dumps(summary))
+
+    def update_latest(self, branch, pointer):
+        self.events.append("latest")
+        self.files[f"regression/latest/{branch}.json"] = pointer
+
+    def register_derived(self, fn):
+        self.events.append("index")
+
+    def finalize(self, message):
+        self.events.append(message)
+
+
+def _run(tmp_path, monkeypatch, store, verdicts, *argv):
+    """main() for commit `new` on a manifest of the workflows in `verdicts`,
+    with a GPU that answers each with its verdict. Returns (exit code, the
+    --summary-out file)."""
+    import json
+    import sys
+    import commit_meta
+    import storage
+    monkeypatch.setattr(storage, "from_args", lambda args: store)
+    monkeypatch.setattr(commit_meta, "fetch_commit_meta", lambda sha: None)
+    monkeypatch.setattr(run_regression, "process_workflow",
+                        lambda wf_id, *a: {"workflow_id": wf_id, "worker_status": "ok",
+                                           "verdict": verdicts[wf_id], "detail": None,
+                                           "env": {"image": "img"}})
+    out = tmp_path / "summary-out.json"
+    out.unlink(missing_ok=True)
+    monkeypatch.setattr(sys, "argv", ["run_regression.py", "--commit", "new", "--branch", "master",
+                                      "--manifest", _manifest(tmp_path, *verdicts),
+                                      "--summary-out", str(out), *argv])
+    code = run_regression.main()
+    return code, json.loads(out.read_text(encoding="utf-8"))
+
+
+def test_a_run_that_names_its_workflows_is_not_the_lanes_run_of_the_commit(tmp_path, monkeypatch):
+    """A dispatch with workflows=<ids> at a commit the lane has no result for
+    (a first look at master HEAD, a bisect step). It says which workflows it
+    tested, pushes no start marker and leaves the previous-run pointer alone,
+    so the cron still tests the commit and compares with the right run."""
+    import regression_skip
+    verdicts = {"a": "pass", "b": "pass", "c": "pass"}
+    store = RecordingStore({"regression/latest/master.json": {"commit": "old"}})
+    code, summary = _run(tmp_path, monkeypatch, store, verdicts, "--workflows", "b,a")
+    assert code == 0
+    assert list(summary) == SUMMARY_KEYS + ["scope"]
+    assert summary["scope"] == ["a", "b"] == list(summary["workflows"])
+    assert store.events == ["snapshot", "summary", "index", "regression master@new: pass"]
+    assert store.latest_pointer("master") == {"commit": "old"}
+    assert store.attempt_marker("master", "new") is None
+    assert store.published_summary("master", "new") == summary
+
+    def cron():
+        return regression_skip.decide("new", store.published_summary("master", "new"),
+                                      store.latest_pointer("master"),
+                                      marker=store.attempt_marker("master", "new"))[0]
+
+    assert cron()
+    # The lane's own run of the commit: counted as the first attempt, and its
+    # summary takes the place of the named one.
+    store.events.clear()
+    code, summary = _run(tmp_path, monkeypatch, store, verdicts)
+    assert code == 0 and list(summary) == SUMMARY_KEYS and summary["attempt"] == 1
+    assert store.events == ["snapshot", "marker", "checkpoint", "summary", "latest", "index",
+                            "regression master@new: pass"]
+    assert store.published_summary("master", "new") == summary
+    assert store.latest_pointer("master") == {"commit": "new", "run_ts": summary["run_ts"],
+                                              "workflows": ["a", "b", "c"]}
+    assert not cron()
+
+
+def test_a_second_named_run_adds_to_the_first(tmp_path, monkeypatch):
+    """Two bisect steps of different workflows at one commit: the second keeps
+    the first one's cell, and the summary still is not the lane's own."""
+    import regression_skip
+    verdicts = {"a": "pass", "b": "execution_error"}
+    store = RecordingStore()
+    _, first = _run(tmp_path, monkeypatch, store, verdicts, "--workflows", "a")
+    code, summary = _run(tmp_path, monkeypatch, store, verdicts, "--workflows", "b")
+    assert code == 1
+    assert list(summary) == SUMMARY_KEYS + ["scope", "retests"]
+    assert summary["scope"] == ["a", "b"] and summary["overall"] == "fail"
+    assert summary["workflows"]["a"] == first["workflows"]["a"]
+    assert [r["workflows"] for r in summary["retests"]] == [["b"]]
+    assert store.events.count("marker") == 0 and store.events.count("latest") == 0
+    assert store.events[-1] == "regression master@new: fail"
+    assert regression_skip.decide("new", store.published_summary("master", "new"))[0]
+
+
+def test_a_retest_that_passes_does_not_make_a_failing_commit_clean(tmp_path, monkeypatch):
+    """The summary, and the message of the publish, speak for every cell of
+    the commit. The job's own colour is that of the workflows it tested."""
+    verdicts = {"a": "fail", "b": "infra_error"}
+    store = RecordingStore()
+    code, first = _run(tmp_path, monkeypatch, store, verdicts)
+    assert code == 1 and first["has_infra_error"] and first["attempt"] == 1
+    verdicts["b"] = "pass"
+    store.events.clear()
+    code, summary = _run(tmp_path, monkeypatch, store, verdicts, "--workflows", "b")
+    assert code == 0
+    assert (summary["overall"], summary["has_infra_error"]) == ("fail", False)
+    assert store.events == ["snapshot", "summary", "index", "regression master@new: fail"]
+    assert list(summary) == SUMMARY_KEYS + ["retests"]
+    assert (summary["attempt"], summary["run_ts"]) == (1, first["run_ts"])
+    assert summary["workflows"]["a"] == first["workflows"]["a"]
+
+
+def test_a_first_look_with_publish_off_writes_nothing(tmp_path, monkeypatch):
+    lane_result = {"commit": "new", "overall": "pass", "attempt": 1, "run_ts": 5,
+                   "workflows": {"a": {"verdict": "pass"}, "b": {"verdict": "pass"}}}
+    store = RecordingStore({"regression/runs/master/new/summary.json": lane_result})
+    code, summary = _run(tmp_path, monkeypatch, store, {"a": "pass", "b": "pass", "c": "fail"},
+                         "--workflows", "c", "--skip-publish")
+    assert code == 1 and store.events == []
+    assert store.published_summary("master", "new") == lane_result
+    # The report of that run is built from this file: the run's own result, nothing merged.
+    assert list(summary) == SUMMARY_KEYS + ["scope"]
+    assert list(summary["workflows"]) == ["c"] == summary["scope"]
+
+
+def test_merge_retest_key_by_key():
+    import copy
+    old = {"schema_version": 2, "branch": "master", "commit": "c", "run_ts": 100,
+           "overall": "fail", "has_infra_error": True, "lane": "weekly", "attempt": 1,
+           "run_url": "u1", "run_id": 1, "env": {"image": "old"}, "commit_meta": {"pr": 9},
+           "tested_range": {"prev": "p", "commits_between": 44, "compare_url": "x"},
+           "workflows": {"a": {"workflow_id": "a", "verdict": "fail", "exec": 104.19999999999999},
+                         "b": {"workflow_id": "b", "verdict": "infra_error"},
+                         "c": {"workflow_id": "c", "verdict": "pass"}},
+           "ranges": {"a": {"prev": "p", "commits_between": 44},
+                      "b": {"prev": "q", "commits_between": 3}}}
+    new = {"schema_version": 2, "branch": "master", "commit": "c", "run_ts": 200,
+           "overall": "pass", "has_infra_error": False, "lane": "weekly", "attempt": 2,
+           "run_url": "u2", "run_id": 2, "env": {"image": "new"}, "commit_meta": {"pr": 10},
+           "tested_range": None,
+           "workflows": {"d": {"workflow_id": "d", "verdict": "no_baseline"},
+                         "b": {"workflow_id": "b", "verdict": "pass"}}}
+    before = copy.deepcopy(old)
+    merged = run_regression.merge_retest(old, new)
+    assert old == before, "the published summary is read, never changed in place"
+    # Today's keys in today's order, then what the re-test adds.
+    assert list(merged) == [*old, "retests"]
+    for key in ("schema_version", "branch", "commit", "run_ts", "lane", "attempt", "run_url",
+                "run_id", "env", "commit_meta", "tested_range"):
+        assert merged[key] == old[key], key
+    assert list(merged["workflows"]) == ["a", "b", "c", "d"]
+    assert merged["workflows"]["a"] is old["workflows"]["a"]
+    assert merged["workflows"]["c"] is old["workflows"]["c"]
+    assert merged["workflows"]["b"] == {"workflow_id": "b", "verdict": "pass"}
+    assert (merged["overall"], merged["has_infra_error"]) == ("fail", False)
+    assert merged["ranges"] == {"a": {"prev": "p", "commits_between": 44}}
+    assert merged["retests"] == [{"run_ts": 200, "run_url": "u2", "run_id": 2,
+                                  "env": {"image": "new"}, "workflows": ["b", "d"]}]
+    assert "scope" not in merged
+    # A second re-test: the list grows, a new range replaces the old one, and
+    # the last range that goes takes the key with it.
+    fixed = {**new, "run_ts": 300, "run_id": 3,
+             "workflows": {"a": {"workflow_id": "a", "verdict": "fail"}},
+             "ranges": {"a": {"prev": "r", "commits_between": 1}}}
+    again = run_regression.merge_retest(merged, fixed)
+    assert [r["run_id"] for r in again["retests"]] == [2, 3]
+    assert again["ranges"] == {"a": {"prev": "r", "commits_between": 1}}
+    assert list(again) == list(merged)
+    passed = {**new, "workflows": {"a": {"workflow_id": "a", "verdict": "pass"}}}
+    clean = run_regression.merge_retest(again, passed)
+    assert "ranges" not in clean and clean["overall"] == "pass"
+    # The roll-up is over every cell: a kept infra error keeps the summary marked.
+    kept = run_regression.merge_retest(old, passed)
+    assert (kept["overall"], kept["has_infra_error"]) == ("pass", True)
+    # A summary of named workflows stays one: its list grows.
+    scoped = run_regression.merge_retest({**old, "scope": ["a", "b", "c"]}, new)
+    assert scoped["scope"] == ["a", "b", "c", "d"]
+    assert list(scoped) == [*old, "scope", "retests"]
+
+
+def test_each_job_further_back_in_the_run_may_wait_longer_in_the_queue(tmp_path, monkeypatch):
+    """The run submits every job at once to an endpoint with 3 workers. With a
+    fixed 600 s the last jobs of 15 were cancelled for standing behind their
+    own run, and submitted again."""
+    import sys
+    import types
+    import commit_meta
+    import storage
+    assert [run_regression.queue_deadline_s(i) for i in (0, 1, 2, 14)] == [600, 660, 720, 1440]
+    process_workflow = run_regression.process_workflow
+    seen = {}
+    monkeypatch.setattr(storage, "from_args", lambda args: FakeStore({}))
+    monkeypatch.setattr(commit_meta, "fetch_commit_meta", lambda sha: None)
+    monkeypatch.setattr(run_regression, "process_workflow",
+                        lambda wf_id, *a: seen.update({wf_id: a[-1]}) or {
+                            "workflow_id": wf_id, "worker_status": "ok", "verdict": "pass"})
+    argv = ["run_regression.py", "--commit", "new", "--branch", "master", "--skip-publish",
+            "--manifest", _manifest(tmp_path, "c", "a", "b")]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert run_regression.main() == 0
+    assert seen == {"c": 600, "a": 660, "b": 720}  # the order of the manifest
+    seen.clear()
+    monkeypatch.setattr(sys, "argv", [*argv, "--workflows", "b,c"])
+    assert run_regression.main() == 0
+    assert seen == {"c": 600, "b": 660}
+
+    # process_workflow hands it to the job. Called without it, the job gets today's 600 s.
+    def job(client, wf_id, workflow, **kw):
+        seen[wf_id] = kw["queue_deadline_s"]
+        return {"status": "worker_error", "outputs": []}
+
+    monkeypatch.setattr(run_regression, "run_workflow_job", job)
+    monkeypatch.setattr(run_regression, "RunPodClient", lambda endpoint_id: None)
+    (tmp_path / "wf_api.json").write_text("{}", encoding="utf-8")
+    args = types.SimpleNamespace(workdir=str(tmp_path / "work"), endpoint_id="ep", lane_id="main",
+                                 commit="new", repo_url=None, branch="master", skip_publish=True)
+    entry = {"workflow_path": "wf_api.json", "models": []}
+    process_workflow("first", entry, DEFAULTS, args, tmp_path, None)
+    process_workflow("fourth", entry, DEFAULTS, args, tmp_path, None, 780)
+    assert (seen["first"], seen["fourth"]) == (600, 780)
+
+
+NOW = 1794700000
+RUNS = "https://github.com/Comfy-Org/comfyci-runpod-worker/actions/runs"
+
+
+class ImageLane:
+    """Three image workflows on the per-commit lane `other`, through main():
+    a results branch in a local repository that holds their references, and a
+    GPU that writes one PNG of each workflow's shade (100 is the reference's)."""
+    PREFIX = "regression/lanes/other"
+    IDS = ("wf_a", "wf_b", "wf_c")
+
+    def __init__(self, tmp_path, monkeypatch):
+        import json
+        import commit_meta
+        import storage
+        from conftest import make_remote
+        self.tmp, self.monkeypatch, self.runs = tmp_path, monkeypatch, 0
+        self.shade = dict.fromkeys(self.IDS, 100)
+        self.status = dict.fromkeys(self.IDS, "ok")
+        repo, seed = tmp_path / "repo", {}
+        (repo / "manifest" / "workflows").mkdir(parents=True)
+        for wf_id in self.IDS:
+            (repo / "manifest" / "workflows" / f"{wf_id}_api.json").write_text("{}")
+            _png(tmp_path / "reference.png", 100)
+            seed[f"{self.PREFIX}/golden/{wf_id}/current.json"] = {"tag": "v1"}
+            seed[f"{self.PREFIX}/golden/{wf_id}/v1/outputs/{wf_id}_00001_.png"] = (
+                tmp_path / "reference.png").read_bytes()
+        self.manifest = repo / "manifest" / "workflows.json"
+        self.manifest.write_text(json.dumps({"defaults": DEFAULTS, "workflows": {
+            wf_id: {"enabled": True, "workflow_path": f"manifest/workflows/{wf_id}_api.json",
+                    "models": []} for wf_id in self.IDS}}), encoding="utf-8")
+        self.remote = make_remote(tmp_path, seed)
+        monkeypatch.setattr(storage, "from_args", lambda args: storage.GitHubStorage(
+            "local/test", "results", args.results_workdir, args.prefix,
+            remote_url=str(self.remote)))
+        monkeypatch.setattr(run_regression, "run_workflow_job", self.job)
+        monkeypatch.setattr(run_regression, "RunPodClient", lambda endpoint_id: None)
+        monkeypatch.setattr(commit_meta, "fetch_commit_meta", lambda sha: {
+            "subject": "change (#9)", "pr": 9, "committed_ts": {"c1": 10, "c2": 20}[sha]})
+        monkeypatch.setattr(commit_meta, "fetch_range", lambda prev, sha: {
+            "prev": prev, "commits_between": 1, "compare_url": f"{prev}...{sha}"})
+        monkeypatch.setenv("GITHUB_SERVER_URL", "https://github.com")
+        monkeypatch.setenv("GITHUB_REPOSITORY", "Comfy-Org/comfyci-runpod-worker")
+
+    def job(self, client, wf_id, workflow, workdir=None, **kw):
+        import hashlib
+        if self.status[wf_id] != "ok":
+            return {"status": self.status[wf_id], "outputs": [], "error": {"message": "boom"}}
+        png = workdir / "outputs" / f"{wf_id}_00001_.png"
+        _png(png, self.shade[wf_id])
+        return {"status": "ok", "error": None, "comfy_version": "0.45.0",
+                "torch_version": "2.14.1+cu130", "python_version": "3.13.16",
+                "gpu_name": "NVIDIA GeForce RTX 4090", "vram_peak_mb": 21480.5,
+                "rss_peak_mb": 30110.25, "custom_nodes": None,
+                "timings": {"checkout_s": 1.9, "prompt_exec_s": 104.19999999999999},
+                "env": {"image": "img", "image_sha": "f" * 40}, "outputs_dir": str(png.parent),
+                "outputs": [{"filename": png.name, "bytes": png.stat().st_size,
+                             "sha256": hashlib.sha256(png.read_bytes()).hexdigest()}]}
+
+    def run(self, commit, *argv, now=NOW, run_id=1):
+        """One Actions run of main(): (exit code, the text of its --summary-out file)."""
+        import sys
+        import types
+        self.runs += 1
+        out = self.tmp / f"out{self.runs}.json"
+        self.monkeypatch.setattr(run_regression, "time", types.SimpleNamespace(time=lambda: now))
+        self.monkeypatch.setenv("GITHUB_RUN_ID", str(run_id))
+        self.monkeypatch.setattr(sys, "argv", [
+            "run_regression.py", "--manifest", str(self.manifest), "--commit", commit,
+            "--branch", "master", "--lane", "other", "--workdir", str(self.tmp / f"w{self.runs}"),
+            "--results-workdir", str(self.tmp / f"r{self.runs}"), "--summary-out", str(out),
+            *argv])
+        return run_regression.main(), out.read_text(encoding="utf-8")
+
+    def published(self, path, prefix=PREFIX):
+        """The text of a file on the results branch (None: there is none)."""
+        import subprocess
+        r = subprocess.run(["git", "-C", str(self.remote), "cat-file", "-p",
+                            f"results:{prefix}/{path}"], capture_output=True)
+        return r.stdout.decode("utf-8").replace("\r\n", "\n") if r.returncode == 0 else None
+
+
+def _cell_text(summary_text, wf_id):
+    """One workflow's cell as it stands in the text of a summary.json."""
+    import re
+    return re.search(rf'^    "{wf_id}": \{{\n.*?^    \}}', summary_text, re.S | re.M).group(0)
+
+
+def test_a_full_image_run_on_a_per_commit_lane_publishes_what_it_always_did(tmp_path, monkeypatch):
+    """What the pin of image behaviour cannot see, because it does not run
+    main(): the keys of the summary, the start marker and the previous-run
+    pointer of a full run of image workflows."""
+    import json
+    lane = ImageLane(tmp_path, monkeypatch)
+    code, out = lane.run("c1")
+    assert code == 0
+    assert lane.published("latest/master.json") == (
+        '{\n  "commit": "c1",\n  "run_ts": 1794700000,\n  "workflows": [\n    "wf_a",\n'
+        '    "wf_b",\n    "wf_c"\n  ]\n}')
+    text = lane.published("runs/master/c1/summary.json")
+    assert text == out, "--summary-out is the published file"
+    summary = json.loads(text)
+    assert list(summary) == SUMMARY_KEYS and list(summary["workflows"]) == list(lane.IDS)
+    for wf_id, cell in summary["workflows"].items():
+        assert list(cell) == CELL_KEYS + ["prior_verdict", "prior_commit"], wf_id
+    assert (summary["attempt"], summary["run_id"], summary["tested_range"]) == (1, 1, None)
+    assert json.loads(lane.published("runs/master/c1/attempt.json")) == {
+        "commit": "c1", "branch": "master", "lane": "other", "attempt": 1, "started_ts": NOW,
+        "run_url": f"{RUNS}/1"}
+    # A full run with an execution error is a result too. It does not move the pointer.
+    lane.status["wf_c"] = "timeout"
+    code, out = lane.run("c2", now=NOW + 600, run_id=2)
+    summary = json.loads(out)
+    assert code == 1 and list(summary) == SUMMARY_KEYS
+    assert summary["tested_range"] == {"prev": "c1", "commits_between": 1,
+                                       "compare_url": "c1...c2"}
+    assert json.loads(lane.published("latest/master.json"))["commit"] == "c1"
+    assert json.loads(lane.published("runs/master/c2/attempt.json"))["attempt"] == 1
+
+
+def test_a_retest_of_one_workflow_keeps_every_other_cell_byte_for_byte(tmp_path, monkeypatch):
+    """A dispatch with workflows=<id> at a commit the lane already has a
+    result for. Before, its summary took the place of the lane's: one workflow
+    tested again cost the cells of all the others."""
+    import json
+    import regression_skip
+    lane = ImageLane(tmp_path, monkeypatch)
+    assert lane.run("c1")[0] == 0
+    # The lane's run of c2: one output changed, and one workflow met a worker error.
+    lane.shade["wf_b"], lane.status["wf_c"] = 180, "worker_error"
+    assert lane.run("c2", now=NOW + 600, run_id=2)[0] == 1
+    old_text = lane.published("runs/master/c2/summary.json")
+    old = json.loads(old_text)
+    assert (old["overall"], old["has_infra_error"]) == ("fail", True)
+    assert {wf: cell["verdict"] for wf, cell in old["workflows"].items()} == {
+        "wf_a": "pass", "wf_b": "fail", "wf_c": "infra_error"}
+    pointer = lane.published("latest/master.json")
+    marker = lane.published("runs/master/c2/attempt.json")
+    assert json.loads(pointer)["commit"] == "c1"
+
+    # An hour later, in another Actions run, wf_c is tested again at c2.
+    lane.status["wf_c"] = "ok"
+    code, out = lane.run("c2", "--workflows", "wf_c", now=NOW + 4200, run_id=3)
+    new_text = lane.published("runs/master/c2/summary.json")
+    new = json.loads(new_text)
+    assert code == 0 and new_text == out
+    for wf_id in ("wf_a", "wf_b"):
+        assert _cell_text(new_text, wf_id) == _cell_text(old_text, wf_id), wf_id
+        assert list(new["workflows"][wf_id]) == CELL_KEYS + ["prior_verdict", "prior_commit"]
+    assert '"prompt_exec_s": 104.19999999999999' in _cell_text(new_text, "wf_a")
+    assert new["workflows"]["wf_c"]["verdict"] == "pass"
+    assert new["workflows"]["wf_c"]["prior_commit"] == "c1"
+    # The summary stays the lane's result of c2: its time, its run, its range.
+    assert list(new) == SUMMARY_KEYS + ["retests"]
+    assert (new["run_ts"], new["run_id"], new["run_url"]) == (NOW + 600, 2, f"{RUNS}/2")
+    assert new["tested_range"] == {"prev": "c1", "commits_between": 1, "compare_url": "c1...c2"}
+    assert new["retests"] == [{"run_ts": NOW + 4200, "run_url": f"{RUNS}/3", "run_id": 3,
+                               "env": {"image": "img", "image_sha": "f" * 40},
+                               "workflows": ["wf_c"]}]
+    # The whole file: the old one with that cell, the roll-up over every cell, and the re-test.
+    expected = {**old, "has_infra_error": False, "retests": new["retests"],
+                "workflows": {**old["workflows"], "wf_c": new["workflows"]["wf_c"]}}
+    assert expected["overall"] == "fail"  # wf_b still fails: the commit is not clean
+    assert new_text == json.dumps(expected, indent=2)
+    # No start marker of its own, and the previous-run pointer stays where it was.
+    assert lane.published("runs/master/c2/attempt.json") == marker
+    assert lane.published("latest/master.json") == pointer
+    # The history row of c2 still links the lane's run, with the new cell.
+    head = json.loads(lane.published("index/master/other.json", prefix="regression"))
+    entry = next(e for e in head["entries"] if e["c"] == "c2")
+    assert (entry["run"], entry["t"], entry["o"], entry["infra"]) == (2, NOW + 600, "fail", False)
+    assert {wf: cell["v"] for wf, cell in entry["w"].items()} == {
+        "wf_a": "pass", "wf_b": "fail", "wf_c": "pass"}
+    # And the cron leaves the commit alone: its infra error is gone.
+    assert regression_skip.decide("c2", old, json.loads(pointer), marker=json.loads(marker))[0]
+    assert not regression_skip.decide("c2", new, json.loads(pointer),
+                                      marker=json.loads(marker))[0]
 
 
 # -- limits -------------------------------------------------------------------------

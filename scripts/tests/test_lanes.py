@@ -2,6 +2,7 @@
 import copy
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 import index_builder
 import lanes as lanes_mod
 import runpod_endpoints
+from conftest import git, workflow_steps
 
 ROOT = Path(__file__).resolve().parents[2]
 REGISTRY = json.loads((ROOT / "manifest" / "lanes.json").read_text(encoding="utf-8"))
@@ -199,6 +201,149 @@ def test_image_matrix_skips_unbuilt_images_unless_asked_for():
     assert lanes_mod.image_matrix(REGISTRY, "nothing") == []
 
 
+class PushRepo:
+    """A repository like this one, cut to what an image is built from: each
+    commit() is one commit of a push, and built() is the plan for a push that
+    started after the commit `since`."""
+
+    def __init__(self, root, registry):
+        self.root, self.registry = root, copy.deepcopy(registry)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
+        self.first = self.commit(**{"Dockerfile": "FROM scratch\n", "src/handler.py": "x = 1\n",
+                                    "README.md": "one\n"})
+
+    def commit(self, **files) -> str:
+        files["manifest/lanes.json"] = json.dumps(self.registry, indent=2) + "\n"
+        for path, text in files.items():
+            (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / path).write_text(text, encoding="utf-8")
+        git(self.root, "add", "-A")
+        git(self.root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+            "--allow-empty", "-m", "change")
+        return git(self.root, "rev-parse", "HEAD").strip()
+
+    def built(self, since, only=None) -> list[str]:
+        rows = lanes_mod.image_matrix(self.registry, only, since=since, repo=self.root)
+        return [row["image"] for row in rows]
+
+    def why(self, since) -> str:
+        return lanes_mod.images_since(self.registry, since, self.root)[1]
+
+
+EVERY_IMAGE = ["cu130-t2141", "cu132-t2150"]
+
+
+def test_a_push_that_changes_no_image_builds_none(tmp_path):
+    """Adding a lane, writing an endpoint id or changing a default is an edit
+    of lanes.json. It used to rebuild every image and roll it out."""
+    repo = PushRepo(tmp_path, REGISTRY)
+    assert repo.built(None) == EVERY_IMAGE  # no --since: a dispatch builds as before
+    repo.registry["lanes"][NEW]["endpoint_id"] = "abc123"
+    repo.registry["lanes"]["nightly"] = {**REGISTRY["lanes"][PRIMARY], "cadence": "nightly",
+                                         "prefix": "regression/lanes/nightly"}
+    repo.registry["endpoint_defaults"]["volume_gb"] = 500
+    repo.registry["images"]["cu130-t2141"]["note"] = "no image is built from a note"
+    lane_edit = repo.commit(**{"README.md": "two\n", ".github/workflows/build-image.yml": "x\n"})
+    assert repo.built(repo.first) == []
+    assert repo.why(repo.first) == f"no image changed since {repo.first[:8]}: nothing is built"
+    # An image's own entry: that image, and no other.
+    repo.registry["images"]["cu132-t2150"]["torch_spec"] = "torch==2.15.1 torchvision==0.29.2"
+    image_edit = repo.commit()
+    assert repo.built(lane_edit) == ["cu132-t2150"] == repo.built(repo.first)
+    assert repo.why(lane_edit) == f"images changed since {lane_edit[:8]}: cu132-t2150"
+    assert repo.built(lane_edit, only="cu130-t2141") == []
+    assert repo.built(image_edit) == []
+    # An image that was not built before the push: a new one, and one whose
+    # only lane was retired until now.
+    repo.registry["images"]["cu140-t2160"] = {**REGISTRY["images"]["cu132-t2150"], "cuda": "14.0"}
+    repo.registry["lanes"]["cu140"] = {**REGISTRY["lanes"][NEW], "image": "cu140-t2160",
+                                       "cuda": "14.0", "prefix": "regression/lanes/cu140"}
+    del repo.registry["images"]["cu128-t2110"]["build"]
+    repo.registry["lanes"][LEGACY]["cadence"] = "per-commit"
+    repo.commit()
+    assert repo.built(image_edit) == ["cu128-t2110", "cu140-t2160"]
+
+
+def test_a_push_that_changes_what_images_are_built_from_builds_them_all(tmp_path):
+    repo = PushRepo(tmp_path, REGISTRY)
+    for path in ("src/handler.py", "docker/extra_model_paths.yaml", "manifest/custom_nodes.json",
+                 "Dockerfile"):
+        before = git(repo.root, "rev-parse", "HEAD").strip()
+        repo.commit(**{path: f"changed {path}\n"})
+        assert repo.built(before) == EVERY_IMAGE, path
+        assert repo.why(before) == f"every image is built: {path} changed since {before[:8]}"
+    # A push of two commits, src/ first and lanes.json last. Compared with the
+    # last commit alone it would build nothing, and nobody would be told.
+    before = repo.commit(**{"README.md": "three\n"})
+    repo.commit(**{"src/handler.py": "x = 2\n"})
+    repo.registry["lanes"][NEW]["endpoint_id"] = "abc123"
+    last = repo.commit()
+    assert repo.built(before) == EVERY_IMAGE
+    assert git(repo.root, "diff", "--name-only", "HEAD~1", "HEAD").split() == [
+        "manifest/lanes.json"]
+    # A file moved out of src/ is a change to src/.
+    git(repo.root, "mv", "src/handler.py", "handler.py")
+    repo.commit()
+    assert repo.built(last) == EVERY_IMAGE
+
+
+def test_a_push_without_a_known_commit_before_it_builds_every_image(tmp_path, monkeypatch, capsys):
+    """A new branch has all zeros there, and a forced push a commit the
+    checkout cannot fetch."""
+    repo = PushRepo(tmp_path, REGISTRY)
+    repo.registry["lanes"][NEW]["endpoint_id"] = "abc123"
+    repo.commit()
+    for since in ("0" * 40, "f" * 40, "", "HEAD~1", "--output=x"):
+        assert repo.built(since) == EVERY_IMAGE, since
+    assert repo.why("0" * 40) == f"every image is built: no commit to compare with ({'0' * 40})"
+    assert repo.why("f" * 40) == ("every image is built: ffffffff or its manifest/lanes.json is "
+                                  "not in this checkout")
+    assert not (repo.root / "x").exists()  # only a commit id ever reaches git
+    # A checkout that is no repository at all (a source archive).
+    assert lanes_mod.image_matrix(REGISTRY, since=repo.first, repo=tmp_path.parent) \
+        == lanes_mod.image_matrix(REGISTRY)
+    # The command: the plan on stdout, the reason on stderr.
+    monkeypatch.setattr(lanes_mod, "load_lanes", lambda path=None: repo.registry)
+    monkeypatch.setattr(lanes_mod, "REPO_ROOT", repo.root)
+    assert lanes_mod.main(["images", "--since", repo.first]) == 0
+    out = capsys.readouterr()
+    assert json.loads(out.out) == []
+    assert out.err.strip() == f"::notice::no image changed since {repo.first[:8]}: nothing is built"
+    assert lanes_mod.main(["images", "--since", "0" * 40]) == 0
+    out = capsys.readouterr()
+    assert [row["image"] for row in json.loads(out.out)] == EVERY_IMAGE
+    assert out.err.startswith("::notice::every image is built: no commit to compare with")
+    assert lanes_mod.main(["images"]) == 0
+    out = capsys.readouterr()
+    assert [row["image"] for row in json.loads(out.out)] == EVERY_IMAGE and out.err == ""
+
+
+def test_the_build_plans_a_push_against_the_commit_before_it():
+    """Not against HEAD~1: a push can hold several commits. The checkout holds
+    only HEAD, so the commit before the push is fetched, and when that fails
+    lanes.py builds every image."""
+    plan = dict(workflow_steps(".github/workflows/build-image.yml"))["plan"]
+    assert "EVENT: ${{ github.event_name }}" in plan
+    assert "BEFORE: ${{ github.event.before }}" in plan
+    assert re.search(r'\n( +)elif \[ "\$EVENT" = "push" \]; then\n'
+                     r'\1  git fetch --quiet --no-tags --depth=1 origin "\$BEFORE" \|\| true\n'
+                     r'\1  matrix=\$\(python lanes\.py images --since "\$BEFORE"\)\n', plan)
+    # A dispatch names its images, or builds every one.
+    assert re.search(r'if \[ -n "\$IMAGES" \]; then\n +matrix=\$\(python lanes\.py images '
+                     r'--only "\$IMAGES"\)\n', plan)
+    assert re.search(r"\n +else\n +matrix=\$\(python lanes\.py images\)\n +fi\n", plan)
+    # Every path that starts the workflow on a push is one the plan knows.
+    build = (ROOT / ".github" / "workflows" / "build-image.yml").read_text(encoding="utf-8")
+    paths = re.search(r"\n    paths:\n((?:      - .+\n)+)", build).group(1)
+    paths = [line.strip()[2:].strip("'") for line in paths.splitlines()]
+    assert sorted(paths) == sorted(["Dockerfile", "src/**", "docker/**", "manifest/lanes.json",
+                                    "manifest/custom_nodes.json",
+                                    ".github/workflows/build-image.yml"])
+    for source in lanes_mod.IMAGE_SOURCES:
+        assert source in paths or source + "**" in paths, source
+    assert lanes_mod.REGISTRY_PATH in paths
+
+
 def test_per_commit_matrix_only_lists_provisioned_lanes():
     rows = lanes_mod.per_commit_matrix(PENDING)
     ids = [r["lane"] for r in rows]
@@ -326,6 +471,99 @@ def test_set_image_dry_run_sends_nothing(capsys):
     reg["lanes"][NEW]["endpoint_id"] = "abc123"
     assert runpod_endpoints.set_image(reg, "cu132-t2150-1", None, "cu132-t2150", None, True) == 0
     assert "would PATCH abc123" in capsys.readouterr().out
+
+
+class FakeEndpoints:
+    """Stands in for the RunPod client: live endpoints by id, and which were read."""
+
+    def __init__(self, live):
+        self.live, self.read = live, []
+
+    def get(self, endpoint_id):
+        self.read.append(endpoint_id)
+        return self.live[endpoint_id]
+
+
+def _live(workers_max=3, idle=20, disk=40):
+    """An endpoint as RunPod's GET answers it, cut to the keys `status` reads."""
+    return {"image": "ghcr.io/comfy-org/comfyci-runpod-worker:img-abc", "disk": disk,
+            "gpu": {"pools": ["ADA_24"], "count": 1, "minCudaVersion": "13.0"},
+            "workers": {"idleTimeout": idle, "max": workers_max, "min": 0},
+            "networkVolumes": ["n0xnkwnogx"], "dataCenterIds": ["EU-RO-1"]}
+
+
+def _status_registry():
+    reg = _registry(old={"cadence": "retired", "role": "legacy", "image": "old"},
+                    main={"role": "primary"}, new={"endpoint_id": None})
+    reg["endpoint_defaults"] = copy.deepcopy(REGISTRY["endpoint_defaults"])
+    return reg
+
+
+def test_status_prints_every_difference_between_runpod_and_the_manifest(capsys):
+    """RunPod lowers the workers of an endpoint nobody uses, and a retired
+    endpoint keeps its share of the worker quota until someone sets it to 0."""
+    reg = _status_registry()
+    client = FakeEndpoints({"ep-main": _live(workers_max=2), "ep-old": _live(disk=30)})
+    assert runpod_endpoints.status(reg, client, None) == 0  # it reports, it does not fail
+    out = capsys.readouterr().out
+    assert "main: differs: workers.max is 2 on RunPod, the manifest says 3\n" in out
+    assert ("old: differs: workers.max is 3 on RunPod, the manifest says 0 "
+            "(the lane is retired)\n") in out
+    assert "new: not provisioned" in out
+    assert "2 of the settings above differ from manifest/lanes.json" in out
+    # Only the endpoints the manifest names are read, and nothing else is called.
+    assert client.read == ["ep-old", "ep-main"]
+    # --strict turns a difference into a failure. One lane can be asked for.
+    assert runpod_endpoints.status(reg, client, None, strict=True) == 1
+    assert runpod_endpoints.status(reg, client, "new", strict=True) == 0
+    capsys.readouterr()
+    assert runpod_endpoints.status(reg, client, "main", strict=True) == 1
+    out = capsys.readouterr().out
+    assert out.count("differs") == 1 and "1 of the settings above differ" in out
+
+
+def test_status_is_quiet_when_runpod_and_the_manifest_agree(capsys):
+    reg = _status_registry()
+    # A retired endpoint is held to 0 workers only: its disk and idle time do not matter.
+    client = FakeEndpoints({"ep-main": _live(), "ep-old": _live(workers_max=0, idle=5, disk=30)})
+    assert runpod_endpoints.status(reg, client, None, strict=True) == 0
+    out = capsys.readouterr().out
+    assert "differ" not in out
+    assert "main: ep-main image=ghcr.io/comfy-org/comfyci-runpod-worker:img-abc" in out
+    assert "workers=0-3 idle=20s" in out
+
+
+def test_status_compares_workers_idle_time_and_disk_with_what_create_asks_for():
+    reg = _status_registry()
+    diff = runpod_endpoints.differences
+    assert diff(reg, "main", _live(idle=5, disk=120)) == [
+        "workers.idleTimeout is 5 on RunPod, the manifest says 20",
+        "disk is 120 on RunPod, the manifest says 40"]
+    # RunPod sets an endpoint without requests for 7 days to 0 workers.
+    assert diff(reg, "main", _live(workers_max=0)) == [
+        "workers.max is 0 on RunPod, the manifest says 3"]
+    assert diff(reg, "main", {}) == [
+        "workers.max is None on RunPod, the manifest says 3",
+        "workers.idleTimeout is None on RunPod, the manifest says 20",
+        "disk is None on RunPod, the manifest says 40"]
+    # The lane's own largest number of workers, as `create` reads it.
+    reg["lanes"]["main"]["workers_max"] = 2
+    assert diff(reg, "main", _live(workers_max=2)) == []
+    reg["lanes"]["new"]["workers_max"] = 2
+    body = runpod_endpoints.endpoint_body(reg, "new", "img-abc")
+    assert (body["workers"], body["disk"]) == ({"min": 0, "max": 2, "idleTimeout": 20}, 40)
+    assert runpod_endpoints.endpoint_settings(reg, reg["lanes"]["new"]) == (body["workers"], 40)
+
+
+def test_status_strict_is_a_flag_of_the_command(monkeypatch, capsys):
+    reg = _status_registry()
+    client = FakeEndpoints({"ep-main": _live(workers_max=2), "ep-old": _live(workers_max=0)})
+    monkeypatch.setattr(runpod_endpoints, "load_lanes", lambda: reg)
+    monkeypatch.setattr(runpod_endpoints, "Client", lambda: client)
+    assert runpod_endpoints.main(["status"]) == 0
+    assert runpod_endpoints.main(["status", "--strict"]) == 1
+    assert runpod_endpoints.main(["status", "--strict", "--lane", "old"]) == 0
+    assert "main: differs: workers.max is 2 on RunPod" in capsys.readouterr().out
 
 
 def test_dockerfile_takes_every_build_arg_the_workflow_passes():

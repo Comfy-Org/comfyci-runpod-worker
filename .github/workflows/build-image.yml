@@ -37,13 +37,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # A push builds only the images it changed (`lanes.py images --since`): a
+      # change to the Dockerfile, src/, docker/ or the pack registry builds them
+      # all, a change to lanes.json only the images whose entry differs. Adding
+      # a lane or writing an endpoint id builds nothing and repoints nothing.
+      # The comparison is with the commit before the push, not with HEAD~1: a
+      # push can hold several commits. A checkout holds only HEAD, so that
+      # commit is fetched first. When it is all zeros (a new branch) or cannot
+      # be fetched (a forced push), every image is built.
       - id: plan
         env:
           IMAGES: ${{ inputs.images }}
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
         run: |
           cd scripts
           if [ -n "$IMAGES" ]; then
             matrix=$(python lanes.py images --only "$IMAGES")
+          elif [ "$EVENT" = "push" ]; then
+            git fetch --quiet --no-tags --depth=1 origin "$BEFORE" || true
+            matrix=$(python lanes.py images --since "$BEFORE")
           else
             matrix=$(python lanes.py images)
           fi

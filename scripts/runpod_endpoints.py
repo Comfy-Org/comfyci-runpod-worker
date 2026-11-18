@@ -1,7 +1,10 @@
 """Keep the lanes' RunPod serverless endpoints in step with manifest/lanes.json.
 
-  status [--lane ID]
-      image, workers, GPU pool and CUDA floor of each provisioned lane's endpoint
+  status [--lane ID] [--strict]
+      image, workers, GPU pool and CUDA floor of each provisioned lane's endpoint,
+      and every setting that differs from the manifest: the largest number of
+      workers, the idle timeout and the disk (a retired lane: 0 workers).
+      --strict exits 1 when one differs.
   set-image (--lane ID | --image IMAGE) --tag TAG [--dry-run]
       point the lane's endpoint (or every non-legacy lane on IMAGE) at
       ghcr.io/comfy-org/comfyci-runpod-worker:TAG. TAG must start with the
@@ -72,6 +75,17 @@ class Client:
         return r.json()
 
 
+def endpoint_settings(lanes: dict, cfg: dict) -> tuple[dict, int]:
+    """(workers, disk in GB) of a lane's endpoint: endpoint_defaults, with the
+    lane's own largest number of workers. What `create` asks for, and what
+    `status` holds the live endpoint to."""
+    d = lanes.get("endpoint_defaults") or {}
+    workers = dict(d.get("workers") or {"min": 0, "max": 3, "idleTimeout": 20})
+    if cfg.get("workers_max") is not None:
+        workers["max"] = cfg["workers_max"]
+    return workers, int(d.get("disk_gb", 40))
+
+
 def endpoint_body(lanes: dict, lane_id: str, tag: str) -> dict:
     """The REST v2 CreateEndpointRequest for a lane, from endpoint_defaults + the lane."""
     cfg = lane_config(lanes, lane_id)
@@ -87,9 +101,7 @@ def endpoint_body(lanes: dict, lane_id: str, tag: str) -> dict:
     missing = [k for k in ("gpu_pools", "network_volumes", "data_center_ids", "registry") if not d.get(k)]
     if missing:
         raise SystemExit(f"endpoint_defaults is missing {', '.join(missing)}")
-    workers = dict(d.get("workers") or {"min": 0, "max": 3, "idleTimeout": 20})
-    if cfg.get("workers_max") is not None:
-        workers["max"] = cfg["workers_max"]
+    workers, disk = endpoint_settings(lanes, cfg)
     return {
         "name": ENDPOINT_NAME.format(image=image_id),
         "type": "QUEUE",
@@ -104,7 +116,7 @@ def endpoint_body(lanes: dict, lane_id: str, tag: str) -> dict:
         "flashboot": d.get("flashboot", "FLASHBOOT"),
         "networkVolumes": list(d["network_volumes"]),
         "dataCenterIds": list(d["data_center_ids"]),
-        "disk": int(d.get("disk_gb", 40)),
+        "disk": disk,
         "env": dict(d.get("env") or {}),
     }
 
@@ -175,7 +187,25 @@ def set_image(lanes: dict, tag: str, lane_id: str | None, image_id: str | None,
     return 0
 
 
-def status(lanes: dict, client: Client, lane_id: str | None) -> int:
+def differences(lanes: dict, lane_id: str, ep: dict) -> list[str]:
+    """Where a lane's live endpoint `ep` is not what the manifest says, as
+    sentences. A retired lane runs nothing: only its largest number of workers
+    is held, to 0, so it takes no share of the account's worker quota."""
+    cfg = lane_config(lanes, lane_id)
+    live = ep.get("workers") or {}
+    if lanes_mod.is_retired(cfg):
+        pairs, why = [("workers.max", live.get("max"), 0)], " (the lane is retired)"
+    else:
+        workers, disk = endpoint_settings(lanes, cfg)
+        pairs, why = [("workers.max", live.get("max"), workers.get("max")),
+                      ("workers.idleTimeout", live.get("idleTimeout"), workers.get("idleTimeout")),
+                      ("disk", ep.get("disk"), disk)], ""
+    return [f"{name} is {have!r} on RunPod, the manifest says {want!r}{why}"
+            for name, have, want in pairs if have != want]
+
+
+def status(lanes: dict, client: Client, lane_id: str | None, strict: bool = False) -> int:
+    found = 0
     for target, cfg in (lanes.get("lanes") or {}).items():
         if lane_id and target != lane_id:
             continue
@@ -191,7 +221,12 @@ def status(lanes: dict, client: Client, lane_id: str | None) -> int:
               f"pools={gpu.get('pools')} minCuda={gpu.get('minCudaVersion')} "
               f"workers={workers.get('min')}-{workers.get('max')} idle={workers.get('idleTimeout')}s "
               f"volumes={ep.get('networkVolumes')} dc={ep.get('dataCenterIds')}")
-    return 0
+        for text in differences(lanes, target, ep):
+            found += 1
+            print(f"{target}: differs: {text}")
+    if found:
+        print(f"{found} of the settings above differ from manifest/lanes.json")
+    return 1 if strict and found else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -199,6 +234,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("status")
     p.add_argument("--lane", default=None)
+    p.add_argument("--strict", action="store_true",
+                   help="exit 1 when a live endpoint differs from the manifest")
     p = sub.add_parser("set-image")
     p.add_argument("--lane", default=None)
     p.add_argument("--image", default=None)
@@ -213,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
 
     lanes = load_lanes()
     if args.cmd == "status":
-        return status(lanes, Client(), args.lane)
+        return status(lanes, Client(), args.lane, args.strict)
     if args.cmd == "set-image":
         client = None if args.dry_run else Client()
         return set_image(lanes, args.tag, args.lane, args.image, client, args.dry_run)

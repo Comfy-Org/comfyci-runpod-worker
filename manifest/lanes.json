@@ -21,6 +21,7 @@
     "network_volumes": [
       "n0xnkwnogx"
     ],
+    "volume_gb": 200,
     "data_center_ids": [
       "EU-RO-1"
     ],
