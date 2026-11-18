@@ -416,6 +416,42 @@ def test_the_cache_of_other_downloaders_goes_when_the_files_are_not_enough(comfy
     assert report["files"] == ["vae/new.safetensors"] and not (tmp_path / "hf-cache").exists()
 
 
+def test_a_cache_that_is_not_on_the_workers_disk_is_never_removed(comfy, host, tmp_path,
+                                                                  monkeypatch):
+    """`HF_HOME` names the cache, and an endpoint may point it at the network
+    volume to keep it between workers. Removing it there frees nothing on the
+    worker's own disk, and takes the cache from every worker."""
+    volume = tmp_path / "runpod-volume"
+    kept = [volume / "hf" / "hub" / "blob.safetensors", volume / "models" / "vae" / "v.pt",
+            comfy / "main.py", comfy / "models" / "checkpoints" / "put_checkpoints_here"]
+    for path in kept:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"k" * 100)
+    monkeypatch.setattr(model_sync, "VOLUME_ROOT", volume)
+    monkeypatch.setattr(model_sync, "FREE_MARGIN_BYTES", 0)
+    monkeypatch.setattr(model_sync, "_free_bytes", lambda: 1000)  # a disk that is nearly full
+    big = {**model(host, "big.safetensors"), "bytes": 5000}
+    # On the volume, the volume itself, a folder that holds the volume, and
+    # one that holds the models folder.
+    for cache in (volume / "hf", volume, tmp_path, comfy):
+        monkeypatch.setattr(model_sync, "HF_CACHE", cache)
+        report = model_sync.fetch_local([big])
+        assert report["failed"] == [{"error": "disk full: 0.0 GB free, 0.0 GB needed"}]
+        assert all(path.exists() for path in kept), cache
+    # A cache on another disk gives the models no room either.
+    cache = tmp_path / "hf-cache"
+    (cache / "hub").mkdir(parents=True)
+    monkeypatch.setattr(model_sync, "HF_CACHE", cache)
+    monkeypatch.setattr(model_sync, "_device", lambda path: 7 if path.name == "hf-cache" else 1)
+    model_sync.fetch_local([big])
+    assert (cache / "hub").exists()
+    # On the worker's own disk it goes, as before.
+    monkeypatch.setattr(model_sync, "_device", lambda path: 1)
+    model_sync.fetch_local([big])
+    assert not cache.exists() and all(path.exists() for path in kept)
+    assert host.requests == []
+
+
 def test_a_full_disk_ends_before_any_download(comfy, host, tmp_path, monkeypatch):
     old = model(host, "old.safetensors", body_of("old", 3000))
     model_sync.fetch_local([old])
@@ -480,9 +516,111 @@ def test_a_name_that_leaves_the_models_folder_is_not_fetched(comfy, host):
     report = model_sync.fetch_local([{"directory": "..", "name": "main.py",
                                       "url": host.url("/main.py")},
                                      model(host, "a.safetensors")])
-    assert report["failed"] == [{"model": "../main.py",
-                                 "error": "its name leaves the models folder"}]
+    plain = "its name is not a plain path below the models folder"
+    assert report["failed"] == [{"model": "../main.py", "error": plain}]
     assert host.requests == [] and not (comfy / "main.py").exists()
+    # A name that stays inside and is not the path of its file: the list would
+    # know it as vae/../loras/x, the disk as loras/x, and every job would
+    # remove it as unknown and download it again.
+    for name in ("../loras/x.safetensors", "./x.safetensors", "sub//x.safetensors"):
+        report = model_sync.fetch_local([{**model(host, "x.safetensors"), "name": name}])
+        assert report["failed"] == [{"model": f"vae/{name}", "error": plain}], name
+    assert host.requests == [] and not list((comfy / "models").rglob("x.safetensors"))
+
+
+def test_a_model_whose_name_ends_like_a_part_file_is_kept(comfy, host):
+    weights = model(host, "weights.part")
+    assert model_sync.fetch_local([weights])["files"] == ["vae/weights.part"]
+    (comfy / "models" / "vae" / "other.part").write_bytes(b"left by a killed download")
+    report = model_sync.fetch_local([weights])
+    assert report["reused"] == ["vae/weights.part"] and host.paths() == ["/weights.part"]
+    assert sorted(p.name for p in (comfy / "models" / "vae").iterdir()) == ["weights.part"]
+
+
+def test_a_url_that_is_not_http_is_not_opened(comfy, host, tmp_path):
+    """urllib opens a `file:` URL too: a file of the worker itself would be
+    copied into the models folder as if it were the model."""
+    own = tmp_path / "own.txt"
+    own.write_text("a file of the worker")
+    for url in (own.as_uri(), "ftp://example.org/a.safetensors", "nonsense"):
+        report = model_sync.fetch_local([{"directory": "vae", "name": "a.safetensors",
+                                          "url": url}])
+        assert report["failed"] == [{
+            "model": "vae/a.safetensors",
+            "error": f"bad url: not an http or https url: {url}"}], url
+    # An entry without a url is a failed file too, not a job that breaks.
+    report = model_sync.fetch_local([{"directory": "vae", "name": "a.safetensors"},
+                                     model(host, "b.safetensors")])
+    assert report["failed"] == [{"model": "vae/a.safetensors", "error": "it has no url"}]
+    assert model_sync.fetch_failure(report)[0] == "model_fetch_error"
+    assert host.requests == [] and not list((comfy / "models").rglob("*.safetensors"))
+    # The volume sync opens its URLs the same way.
+    with pytest.raises(ValueError, match="not an http or https url"):
+        model_sync._open(own.as_uri(), None)
+
+
+def test_a_file_without_a_sha256_must_have_the_size_its_entry_says(comfy, host):
+    """A host that answers with a sign-in page says 200. With a sha256 the
+    page fails the check. Without one, its size is all there is to go by."""
+    host.routes["/f.safetensors"] = [(200, {}, b"<html>sign in</html>")]
+    entry = {"directory": "vae", "name": "f.safetensors", "url": host.url("/f.safetensors")}
+    report = model_sync.fetch_local([{**entry, "bytes": 5 * 10**9}])
+    assert report["failed"] == [{"model": "vae/f.safetensors",
+                                 "error": "size mismatch: got 20 bytes, not 5000000000"}]
+    assert host.paths() == ["/f.safetensors"]  # the same bytes would come again: one try
+    assert not (comfy / "models" / "vae" / "f.safetensors").exists()
+    assert not list((comfy / "models").rglob("*.part"))
+    # A sha256 that matches decides, whatever the entry says about the size.
+    page = hashlib.sha256(b"<html>sign in</html>").hexdigest()
+    assert model_sync.fetch_local([{**entry, "bytes": 7, "sha256": page}])["failed"] == []
+    # An entry with neither is taken as it comes, as the volume sync takes it.
+    bare = {**entry, "name": "g.safetensors"}
+    assert model_sync.fetch_local([bare])["files"] == ["vae/g.safetensors"]
+
+
+def test_a_file_that_cannot_be_put_in_place_is_a_failed_download(comfy, host):
+    """A folder where the file goes, a file where its folder goes: the job
+    ends as a failed download, not as a worker that broke with a part file
+    left behind."""
+    (comfy / "models" / "vae" / "d.safetensors").mkdir(parents=True)
+    report = model_sync.fetch_local([model(host, "d.safetensors")])
+    (failed,) = report["failed"]
+    assert failed["model"] == "vae/d.safetensors"
+    assert failed["error"].startswith(("IsADirectoryError", "PermissionError"))
+    assert host.paths() == ["/d.safetensors"] and report["files"] == []
+    assert not list((comfy / "models").rglob("*.part"))
+    assert model_sync.fetch_failure(report)[0] == "model_fetch_error"
+    # ComfyUI's own placeholder file, named as a folder.
+    inside = model(host, "e.safetensors", directory="checkpoints/put_checkpoints_here")
+    report = model_sync.fetch_local([inside])
+    (failed,) = report["failed"]
+    assert failed["model"] == "checkpoints/put_checkpoints_here/e.safetensors"
+    assert failed["error"].startswith(("FileExistsError", "NotADirectoryError"))
+    assert "/e.safetensors" not in host.paths()
+
+
+def test_a_list_this_module_did_not_write_is_not_believed(comfy, host, tmp_path, monkeypatch):
+    """The list decides which files may be removed for room. An entry that is
+    damaged must not break every job of the worker, and one that names a file
+    outside the models folder must not get that file removed."""
+    a = model(host, "a.safetensors")
+    model_sync.fetch_local([a])
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep me")
+    whole = {"url": a["url"], "sha256": a["sha256"], "bytes": 2000, "used_at": 5}
+    (comfy / "models" / ".comfyci-fetched.json").write_text(json.dumps({
+        "vae/a.safetensors": {**whole, "bytes": "2000", "used_at": "then"},
+        "vae/b.safetensors": {"used_at": 7}, "vae/c.safetensors": "junk",
+        "../../outside.txt": whole, "vae/../../../outside.txt": whole}))
+    monkeypatch.setattr(model_sync, "FREE_MARGIN_BYTES", 0)
+    monkeypatch.setattr(model_sync, "_free_bytes", lambda: 0)  # every spare file would go
+    report = model_sync.fetch_local([model(host, "new.safetensors")])
+    assert report["failed"] == [{"error": "disk full: 0.0 GB free, 0.0 GB needed"}]
+    assert report["evicted"] == [] and outside.read_text() == "keep me"
+    # The file of the damaged entry is one that no list knows now: it went.
+    assert not (comfy / "models" / "vae" / "a.safetensors").exists()
+    assert state_of(comfy) == {}
+    assert host.paths() == ["/a.safetensors"]
 
 
 def test_a_download_that_was_killed_leaves_a_part_file_and_the_next_job_removes_it(
@@ -535,11 +673,89 @@ def test_which_url_may_carry_the_token():
                 "https://nothuggingface.co/x", "https://cas-bridge.xethub.hf.co/x",
                 "http://huggingface.co/org/repo/resolve/main/x",   # not encrypted
                 "https://huggingface.co:8443/x", "https://huggingface.co@example.org/x",
+                # urllib would connect to the whole of "example.org@huggingface.co".
+                "https://example.org@huggingface.co/x", "https://u:p@huggingface.co/x",
+                "https://example.org\\@huggingface.co/x",
                 "https://raw.githubusercontent.com/org/repo/abc/x.png", "not a url",
                 "https://[huggingface.co/x"):
         assert token(url, "t") is None, url
     assert token("https://huggingface.co/x", None) is None
     assert token("https://huggingface.co/x", "") is None
+    # The report names the same host when it says what a refused file needs.
+    import run_report
+    assert run_report.TOKEN_HOST == model_sync.TOKEN_HOST == "huggingface.co"
+
+
+def test_what_counts_as_a_token():
+    clean = model_sync.clean_token
+    assert clean("hf_AbC123") == "hf_AbC123"
+    # A secret that was pasted with its line break, or with blanks around it.
+    assert clean("hf_AbC123\n") == clean(" hf_AbC123\r\n") == clean("\thf_AbC123 ") == "hf_AbC123"
+    assert clean("abc.DEF-123_~+/==") == "abc.DEF-123_~+/=="
+    # What no Bearer header can carry is no token.
+    for junk in (None, "", " \n", "hf_a b", "hf_a\nb", "\u200bhf_AbC123", "hf_\u00e9", "hf_'x'",
+                 "Bearer hf_AbC123", 7, b"hf_AbC123"):
+        assert clean(junk) is None, junk
+
+
+def test_a_token_with_a_line_break_at_its_end_is_sent_without_it(comfy, host, monkeypatch):
+    """The endpoint's HF_TOKEN is a secret someone pasted. With a line break
+    at its end the HTTP library refused the header before any connection, and
+    every job of the lane failed."""
+    host.as_https(monkeypatch)
+    body = body_of("weights")
+    host.routes[HF_FILE] = [(200, {}, body)]
+    m = {"directory": "vae", "name": "m.safetensors", "url": "https://huggingface.co" + HF_FILE,
+         "sha256": hashlib.sha256(body).hexdigest(), "bytes": len(body)}
+    monkeypatch.setenv("HF_TOKEN", "hf_secret\n")
+    report = model_sync.fetch_local([m])
+    assert report["failed"] == [] and report["token"] is True
+    assert [r["auth"] for r in host.requests] == ["Bearer hf_secret"]
+    # A value no header can carry is no token: the file is asked for without
+    # one, and the report says that there was none.
+    monkeypatch.setenv("HF_TOKEN", "\u200bhf_secret")
+    report = model_sync.fetch_local([{**m, "name": "n.safetensors"}])
+    assert report["failed"] == [] and report["token"] is False
+    assert host.requests[-1]["auth"] is None
+    # The token a caller hands over is cleaned the same way, and comes first.
+    report = model_sync.fetch_local([{**m, "name": "o.safetensors"}], hf_token=" from_job\r\n")
+    assert report["token"] is True and host.requests[-1]["auth"] == "Bearer from_job"
+
+
+def test_no_failure_message_holds_the_token(comfy, host, tmp_path, monkeypatch):
+    """What a download says when it fails goes into the job's answer, into
+    run.json on the results branch and into the report. Whatever a library
+    quotes in its error, the token is not in it."""
+    token = "hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345"
+    said = []
+
+    def refuse(url, dest, hf_token, stop=None):
+        assert hf_token == token  # the line break is gone before anything is sent
+        raise said[0](f"Invalid header value b'Bearer {hf_token}'")
+
+    monkeypatch.setattr(model_sync, "_stream", refuse)
+    m = {"directory": "vae", "name": "m.safetensors", "url": "https://huggingface.co" + HF_FILE}
+    for kind, text in ((ValueError, "bad url: Invalid header value b'Bearer <token>'"),
+                       (OSError, "OSError: Invalid header value b'Bearer <token>'")):
+        said[:] = [kind]
+        report = model_sync.fetch_local([m], hf_token=token + "\n")
+        assert report["failed"] == [{"model": "vae/m.safetensors", "error": text}]
+        assert token not in json.dumps([report, model_sync.fetch_failure(report)])
+    # A long message is cut after the token is out of it, not before: a cut
+    # through the token would leave its first part standing.
+    said[:] = [lambda text: OSError("x" * 250 + text)]
+    error = model_sync.fetch_local([m], hf_token=token)["failed"][0]["error"]
+    assert error.endswith("b'Bearer <token>'") and token[:8] not in error
+    assert len(f"OSError: {'x' * 250}Invalid header value b'Bearer {token}'") > 300
+    # The volume sync, with the token from the job input as sync_models.py sends it.
+    monkeypatch.setattr(model_sync, "VOLUME_ROOT", tmp_path / "volume")
+    monkeypatch.setattr(model_sync, "MODELS_ROOT", tmp_path / "volume" / "models")
+    monkeypatch.setattr(model_sync, "STATE_FILE", tmp_path / "volume" / ".sync-state.json")
+    said[:] = [ValueError]
+    report = model_sync.sync([m], token + "\n")
+    assert report["failed"] == [{"model": "vae/m.safetensors",
+                                 "error": "Invalid header value b'Bearer <token>'"}]
+    assert token not in json.dumps(report)
 
 
 HF_FILE = "/org/gated/resolve/main/m.safetensors"
@@ -576,6 +792,41 @@ def test_the_token_follows_a_redirect_that_stays_on_huggingface(comfy, host, mon
     assert [(r["host"], r["auth"]) for r in host.requests] == [
         ("huggingface.co", "Bearer from_env"), ("huggingface.co", "Bearer from_env"),
         ("huggingface.co.example.org", None)]
+
+
+def test_a_refusal_by_the_storage_host_is_tried_again(comfy, host, monkeypatch):
+    """huggingface.co redirects a download to its storage host, with a link it
+    signs for that request. A 403 there says nothing about a licence, and the
+    next try gets a new link. It was taken for the model host's own refusal:
+    one such answer ended the job for good, and the report told the owner to
+    accept a licence."""
+    host.as_https(monkeypatch)
+    body = body_of("weights")
+    host.routes[HF_FILE] = [(302, {"Location": "https://cdn.example.net/blob/abc?sig=1"}, b"")]
+    host.routes["/blob/abc?sig=1"] = [(403, {}, b"Request has expired"), (200, {}, body)]
+    m = {"directory": "vae", "name": "m.safetensors", "url": "https://huggingface.co" + HF_FILE,
+         "sha256": hashlib.sha256(body).hexdigest(), "bytes": len(body)}
+    report = model_sync.fetch_local([m], hf_token="hf_secret")
+    assert report["failed"] == [] and report["files"] == ["vae/m.safetensors"]
+    assert [r["host"] for r in host.requests] == ["huggingface.co", "cdn.example.net"] * 2
+    # A storage host that keeps saying no: three tries, and a download that
+    # failed. The message names the host, and another job may try again.
+    host.routes["/blob/abc?sig=1"] = [(404, {}, b"gone")]
+    report = model_sync.fetch_local([{**m, "name": "n.safetensors"}], hf_token="hf_secret")
+    assert report["failed"] == [{"model": "vae/n.safetensors",
+                                 "error": "HTTP 404 Not Found from cdn.example.net"}]
+    assert len(host.requests) == 4 + 2 * 3
+    status, failure = model_sync.fetch_failure(report)
+    assert status == "model_fetch_error" and "http_status" not in failure
+    # The model's own host saying no is final, also at the end of a redirect
+    # that stays on it.
+    renamed = "/org/new-name/resolve/main/m.safetensors"
+    host.routes[HF_FILE] = [(307, {"Location": renamed}, b"")]
+    host.routes[renamed] = [(403, {}, b"gated")]
+    report = model_sync.fetch_local([{**m, "name": "o.safetensors"}], hf_token="hf_secret")
+    assert len(host.requests) == 10 + 2
+    assert model_sync.fetch_failure(report)[0] == "model_access_error"
+    assert report["failed"][0]["host"] == "huggingface.co"
 
 
 def test_a_file_of_another_host_never_gets_the_token(comfy, host, monkeypatch):

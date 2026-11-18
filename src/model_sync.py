@@ -12,7 +12,8 @@ worker's disk is erased when the worker stops, so a file found again is a
 bonus: every job checks what is there against its own list.
 
 The Hugging Face token goes to https://huggingface.co and to no other host,
-also not to the storage host a download is redirected to.
+also not to the storage host a download is redirected to. It is in no message
+either: what a download says when it fails is published with the run.
 """
 from __future__ import annotations
 
@@ -44,6 +45,13 @@ LOCAL_STATE = LOCAL_ROOT / ".comfyci-fetched.json"
 PART = ".part"
 # The one host the token is for.
 TOKEN_HOST = "huggingface.co"
+# What a Bearer header may carry (RFC 6750). A token of other characters is
+# not sent: the HTTP library would refuse the header and quote it in its error.
+TOKEN_RE = re.compile(r"[A-Za-z0-9._~+/-]+=*")
+# What a message says where the token stood.
+TOKEN_MARK = "<token>"
+# How a model URL may start.
+URL_SCHEMES = ("http", "https")
 CHUNK_BYTES = 8 * 1024 * 1024
 FETCH_STREAMS = 4
 FETCH_TRIES = 3
@@ -74,16 +82,32 @@ def _save_state(state: dict):
     tmp.replace(STATE_FILE)
 
 
+def clean_token(value) -> str | None:
+    """A token as it is sent: without the white space a pasted secret has
+    around it. None for no token, and for a value that a Bearer header cannot
+    carry (a line break inside it, a character that is not ASCII)."""
+    text = value.strip() if isinstance(value, str) else ""
+    return text if TOKEN_RE.fullmatch(text) else None
+
+
+def without_token(text: str, hf_token: str | None) -> str:
+    """`text` with the token taken out of it, for a message that leaves the
+    worker."""
+    return text.replace(hf_token, TOKEN_MARK) if hf_token else text
+
+
 def token_for(url: str, hf_token: str | None) -> str | None:
     """The token, when a request to `url` may carry it: https, and the host is
-    exactly huggingface.co. A host that only contains the name does not get it."""
+    exactly huggingface.co. A host that only contains the name does not get
+    it, nor does a URL with a user name in front of the host: urllib would
+    take the two together for the name to connect to."""
     try:
         parts = urllib.parse.urlsplit(url)
         port = parts.port
     except ValueError:
         return None
     if (hf_token and parts.scheme == "https" and parts.hostname == TOKEN_HOST
-            and port in (None, 443)):
+            and port in (None, 443) and "@" not in parts.netloc):
         return hf_token
     return None
 
@@ -115,6 +139,10 @@ class _TokenRedirects(urllib.request.HTTPRedirectHandler):
 
 
 def _open(url: str, hf_token: str | None, timeout: float = 60):
+    """Open a model URL. ValueError for one that is not http or https: urllib
+    would open a `file:` URL too, and that is a file of the worker itself."""
+    if urllib.parse.urlsplit(url).scheme not in URL_SCHEMES:
+        raise ValueError(f"not an http or https url: {url}")
     req = urllib.request.Request(url)
     _authorize(req, hf_token)
     return urllib.request.build_opener(_TokenRedirects(hf_token)).open(req, timeout=timeout)
@@ -165,7 +193,7 @@ def missing_models(models: list[dict]) -> list[str]:
 
 
 def sync(models: list[dict], hf_token: str | None = None) -> dict:
-    hf_token = hf_token or os.environ.get("HF_TOKEN")
+    hf_token = clean_token(hf_token) or clean_token(os.environ.get("HF_TOKEN"))
     state = _load_state()
     report = {"downloaded": [], "skipped": [], "failed": [], "deleted": []}
     for m in models:
@@ -181,7 +209,8 @@ def sync(models: list[dict], hf_token: str | None = None) -> dict:
         try:
             size, digest = _download(m["url"], path, hf_token)
         except Exception as e:
-            report["failed"].append({"model": key, "error": str(e)[:500]})
+            report["failed"].append({"model": key,
+                                     "error": without_token(str(e), hf_token)[:500]})
             continue
         if m.get("sha256") and digest != m["sha256"]:
             path.unlink(missing_ok=True)
@@ -205,14 +234,40 @@ class FetchError(Exception):
         self.http_status = http_status
 
 
+def _is_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _below(key: str) -> Path | None:
+    """The file of `key` (directory/name) under LOCAL_ROOT. None for a key that
+    leaves the folder, and for one that is not the plain path of its file
+    (`vae/../loras/x`): the list would know the file under another name than
+    the disk does."""
+    root = LOCAL_ROOT.resolve()
+    try:
+        path = (root / key).resolve()
+    except (OSError, ValueError):
+        return None
+    if root not in path.parents or path.relative_to(root).as_posix() != key:
+        return None
+    return path
+
+
 def _local_state() -> dict:
+    """The worker's list of what it fetched: per directory/name the url, the
+    sha256, the bytes and when a job last used the file. An entry that this
+    module would not have written is left out, so its file is one that no
+    list knows."""
     try:
         state = json.loads(LOCAL_STATE.read_text())
     except (OSError, ValueError):
         return {}
     if not isinstance(state, dict):
         return {}
-    return {key: entry for key, entry in state.items() if isinstance(entry, dict)}
+    return {key: entry for key, entry in state.items()
+            if isinstance(entry, dict) and isinstance(entry.get("url"), str)
+            and _is_number(entry.get("bytes")) and _is_number(entry.get("used_at"))
+            and _below(key) is not None}
 
 
 def _save_local_state(state: dict) -> None:
@@ -249,17 +304,18 @@ def _clean_up(state: dict) -> list[str]:
     """Remove what no list knows, and return its names: every part file (a
     download that was killed left it), and every file that git does not track
     and the state does not list (an earlier workflow downloaded it by itself).
-    Tracked files stay. When git cannot say what it tracks, only the part
-    files go. An entry of the state whose file is gone is dropped."""
+    Tracked files stay, and so does a model of the state whose own name ends
+    like a part file. When git cannot say what it tracks, only the part files
+    go. An entry of the state whose file is gone is dropped."""
     tracked = _tracked()
     removed = []
     for folder, _dirs, names in os.walk(LOCAL_ROOT):
         for name in names:
             path = Path(folder) / name
             below = path.relative_to(LOCAL_ROOT).as_posix()
-            if path == LOCAL_STATE:
+            if path == LOCAL_STATE or below in state:
                 continue
-            unknown = tracked is not None and below not in tracked and below not in state
+            unknown = tracked is not None and below not in tracked
             if name.endswith(PART) or unknown:
                 try:
                     path.unlink()
@@ -269,13 +325,6 @@ def _clean_up(state: dict) -> list[str]:
     for key in [k for k in state if not (LOCAL_ROOT / k).is_file()]:
         del state[key]
     return removed
-
-
-def _local_path(model: dict) -> Path | None:
-    """Where a model goes under LOCAL_ROOT. None for a name that leaves it."""
-    root = LOCAL_ROOT.resolve()
-    path = (root / str(model["directory"]) / str(model["name"])).resolve()
-    return path if root in path.parents else None
 
 
 def _reusable(entry: dict, model: dict, path: Path) -> bool:
@@ -289,13 +338,37 @@ def _reusable(entry: dict, model: dict, path: Path) -> bool:
             and (not model.get("sha256") or entry.get("sha256") == model["sha256"]))
 
 
+def _device(path: Path) -> int:
+    """The disk a path is on, as the system numbers it."""
+    return path.stat().st_dev
+
+
+def _spare_cache() -> Path | None:
+    """HF_CACHE, when removing it gives the models room: a folder on the disk
+    the models folder is on. None for any other. `HF_HOME` can name any
+    folder, also one on the network volume, which is every worker's: a cache
+    there is on another disk, and removing it would free nothing here. A
+    folder that holds the volume or the models folder, or lies in one of
+    them, is never removed."""
+    try:
+        cache, local, volume = HF_CACHE.resolve(), LOCAL_ROOT.resolve(), VOLUME_ROOT.resolve()
+        if not cache.is_dir() or _device(cache) != _device(local):
+            return None
+    except OSError:
+        return None
+    for other in (local, volume):
+        if cache == other or cache in other.parents or other in cache.parents:
+            return None
+    return cache
+
+
 def _make_room(state: dict, keep: set[str], need: int, evicted: list[str]) -> int:
     """Free space until `need` bytes are free, and return the bytes free then.
     First the fetched files this job does not need, the one used longest ago
-    first. Then what other downloaders cached."""
+    first. Then what other downloaders cached (`_spare_cache`)."""
     free = _free_bytes()
     spare = sorted((key for key in state if key not in keep),
-                   key=lambda key: state[key].get("used_at") or 0)
+                   key=lambda key: state[key]["used_at"])
     for key in spare:
         if free >= need:
             break
@@ -305,8 +378,9 @@ def _make_room(state: dict, keep: set[str], need: int, evicted: list[str]) -> in
         free = _free_bytes()
     if evicted:
         _save_local_state(state)
-    if free < need and HF_CACHE.exists():
-        shutil.rmtree(HF_CACHE, ignore_errors=True)
+    cache = _spare_cache() if free < need else None
+    if cache is not None:
+        shutil.rmtree(cache, ignore_errors=True)
         free = _free_bytes()
     return free
 
@@ -336,14 +410,33 @@ def repo_of(url: str) -> tuple[str | None, str | None]:
     return parts.hostname, "/".join(names[:take]) if len(names) >= take else None
 
 
+def _mismatch(model: dict, size: int, digest: str) -> str | None:
+    """Why a download is not the file its entry describes, else None: another
+    sha256, or, for an entry without one, another size than its `bytes`."""
+    if model.get("sha256"):
+        return None if digest == model["sha256"] else f"sha256 mismatch: got {digest}"
+    want = model.get("bytes")
+    if _is_number(want) and size != want:
+        return f"size mismatch: got {size} bytes, not {want}"
+    return None
+
+
 def _fetch_one(model: dict, path: Path, hf_token: str | None,
                stop: threading.Event) -> tuple[int, str]:
     """Download one model to `path` through its part file: (bytes, sha256).
-    FETCH_TRIES tries. A host that answers 401, 403 or 404 gets no second
-    one, nor does a file with the wrong sha256 or a full disk. FetchError when
-    the file is not there in the end, and no part file is left."""
+    FETCH_TRIES tries. The model's own host answering 401, 403 or 404 gets no
+    second one, nor does a file with the wrong sha256 or a full disk. The
+    same answer from a host that a redirect led to is tried again like any
+    failure: no person can act on it, and the model's host signs a new link
+    for each try. A file without a sha256 must have the size its entry says.
+    FetchError when the file is not there in the end, and no part file is
+    left."""
     part = path.with_name(path.name + PART)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    own_host = repo_of(model["url"])[0]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise FetchError(f"{type(e).__name__}: {e}")
     error = FetchError("not tried")
     for attempt in range(1, FETCH_TRIES + 1):
         wait = RETRY_WAIT_S
@@ -352,9 +445,13 @@ def _fetch_one(model: dict, path: Path, hf_token: str | None,
         except urllib.error.HTTPError as e:
             part.unlink(missing_ok=True)
             e.close()
-            error = FetchError(f"HTTP {e.code} {e.reason}"[:300], e.code)
-            if e.code in NO_RETRY_HTTP:
-                raise error
+            answered = repo_of(e.url or "")[0] or own_host
+            if answered == own_host:
+                error = FetchError(f"HTTP {e.code} {e.reason}", e.code)
+                if e.code in NO_RETRY_HTTP:
+                    raise error
+            else:
+                error = FetchError(f"HTTP {e.code} {e.reason} from {answered}")
             if e.code == 429:
                 wait = rate_limit_wait_s(e.headers)
         except _Stopped:
@@ -362,18 +459,22 @@ def _fetch_one(model: dict, path: Path, hf_token: str | None,
             raise
         except ValueError as e:  # a URL that urllib cannot open
             part.unlink(missing_ok=True)
-            raise FetchError(f"bad url: {e}"[:300])
+            raise FetchError(f"bad url: {e}")
         except (OSError, http.client.HTTPException) as e:
             part.unlink(missing_ok=True)
             if getattr(e, "errno", None) == errno.ENOSPC:
                 raise FetchError("disk full while writing")
-            error = FetchError(f"{type(e).__name__}: {e}"[:300])
+            error = FetchError(f"{type(e).__name__}: {e}")
         else:
-            if model.get("sha256") and digest != model["sha256"]:
-                part.unlink(missing_ok=True)
-                raise FetchError(f"sha256 mismatch: got {digest}")
-            os.replace(part, path)
-            return size, digest
+            wrong = _mismatch(model, size, digest)
+            if wrong is None:
+                try:
+                    os.replace(part, path)
+                    return size, digest
+                except OSError as e:
+                    wrong = f"{type(e).__name__}: {e}"
+            part.unlink(missing_ok=True)
+            raise FetchError(wrong)
         if attempt < FETCH_TRIES:
             _wait(stop, wait)
             if stop.is_set():
@@ -390,8 +491,9 @@ def fetch_local(models: list[dict], hf_token: str | None = None,
     - Reuse: a file stays when the state has it with the same url and sha256
       and its size is the recorded one.
     - Make room: the files to download plus FREE_MARGIN_BYTES must be free.
-      Fetched files this job does not need go first, then HF_CACHE. When that
-      is not enough nothing is downloaded: "disk full: ...".
+      Fetched files this job does not need go first, then HF_CACHE when it
+      is on the worker's disk. When that is not enough nothing is downloaded:
+      "disk full: ...".
     - Download: up to `streams` files at once, each to a part file that is
       renamed when its sha256 matches. The first file that fails for good
       stops the others: the job is over then, and its time is billed.
@@ -400,9 +502,10 @@ def fetch_local(models: list[dict], hf_token: str | None = None,
     directory/name, `bytes` and `seconds` of the downloads with `mb_per_s`,
     `reused_bytes`, `streams`, `token` (whether there was a token to send to
     huggingface.co) and `failed`: one object per file that failed, with
-    `model`, `error`, and for an answer of the host `http_status`, `host`
-    and `repo`. A full disk is one object without `model`."""
-    hf_token = hf_token or os.environ.get("HF_TOKEN")
+    `model`, `error`, and for an answer of the model's own host `http_status`,
+    `host` and `repo`. A full disk is one object without `model`. No `error`
+    holds the token."""
+    hf_token = clean_token(hf_token) or clean_token(os.environ.get("HF_TOKEN"))
     streams = max(1, int(streams))
     report = {"files": [], "bytes": 0, "seconds": 0.0, "mb_per_s": None, "streams": streams,
               "token": bool(hf_token), "reused": [], "reused_bytes": 0, "evicted": [],
@@ -419,9 +522,11 @@ def fetch_local(models: list[dict], hf_token: str | None = None,
         if key in keep:
             continue
         keep.add(key)
-        path = _local_path(m)
-        if path is None:
-            report["failed"].append({"model": key, "error": "its name leaves the models folder"})
+        path = _below(key)
+        if path is None or not isinstance(m.get("url"), str):
+            why = ("it has no url" if path is not None else
+                   "its name is not a plain path below the models folder")
+            report["failed"].append({"model": key, "error": why})
             continue
         entry = state.get(key)
         if entry and _reusable(entry, m, path):
@@ -458,7 +563,7 @@ def fetch_local(models: list[dict], hf_token: str | None = None,
             return
         except FetchError as e:
             stop.set()  # the job is over: the other downloads end too
-            failure = {"model": key, "error": str(e)}
+            failure = {"model": key, "error": without_token(str(e), hf_token)[:300]}
             if e.http_status is not None:
                 host, repo = repo_of(m["url"])
                 failure.update(http_status=e.http_status, host=host, repo=repo)
@@ -495,10 +600,11 @@ def fetch_brief(report: dict) -> dict:
 
 def fetch_failure(report: dict) -> tuple[str, dict] | None:
     """(worker status, failure detail) of a fetch that did not get every file,
-    else None. `model_access_error` when the host refused a file (401, 403,
-    404): a person has to act, and the detail names the host, the repository
-    and the answer. Anything else is `model_fetch_error`, which another job
-    can get past: the network, a rate limit, a wrong sha256, a full disk."""
+    else None. `model_access_error` when the model's own host refused a file
+    (401, 403, 404): a person has to act, and the detail names the host, the
+    repository and the answer. Anything else is `model_fetch_error`, which
+    another job can get past: the network, a rate limit, a wrong sha256, a
+    full disk, a refusal by a host that a redirect led to."""
     failed = report.get("failed") or []
     if not failed:
         return None

@@ -6,6 +6,7 @@ sub-input stays in the prompt. The two image files the worker reads its
 environment from are held to what these rely on."""
 import base64
 import hashlib
+import http.client
 import json
 import re
 import sys
@@ -13,6 +14,8 @@ import types
 from pathlib import Path
 
 import pytest
+
+import run_regression
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
@@ -26,6 +29,7 @@ import comfy_runner  # noqa: E402
 import handler  # noqa: E402
 import model_sync  # noqa: E402
 
+FETCH_LOCAL = model_sync.fetch_local  # the Worker below puts a stand-in in its place
 COMMIT = "c" * 40
 MODELS = [{"directory": "vae", "name": "ae.safetensors", "url": "https://huggingface.co/a/b/x",
            "sha256": "1" * 64, "bytes": 300},
@@ -168,6 +172,52 @@ def test_how_many_files_a_job_downloads_at_once():
     assert [handler.fetch_streams({"fetch_streams": n}) for n in (1, 4, 16)] == [1, 4, 16]
     for junk in (0, -1, 17, 2.0, "2", True, None, [2]):
         assert handler.fetch_streams({"fetch_streams": junk}) == 4, junk
+    # The runner refuses a number the worker would answer with its own 4.
+    most = run_regression.FETCH_STREAMS_MAX
+    assert handler.fetch_streams({"fetch_streams": most}) == most
+    assert handler.fetch_streams({"fetch_streams": most + 1}) == 4
+
+
+def test_no_answer_holds_the_token(tmp_path, monkeypatch):
+    """The endpoint's HF_TOKEN with a line break at its end, as a pasted secret
+    has it. The HTTP library refused the header and quoted it, the quote was
+    the job's failure, and the failure goes into run.json on a public branch."""
+    token = "hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345"
+    dialled = []
+
+    def offline(connection):
+        dialled.append(connection.host)
+        raise OSError("offline")
+
+    monkeypatch.setattr(http.client.HTTPSConnection, "connect", offline)
+    root = tmp_path / "comfyui"
+    for name, value in (("COMFY_ROOT", root), ("LOCAL_ROOT", root / "models"),
+                        ("LOCAL_STATE", root / "models" / ".comfyci-fetched.json"),
+                        ("HF_CACHE", tmp_path / "hf-cache"), ("RETRY_WAIT_S", 0),
+                        ("VOLUME_ROOT", tmp_path / "volume"),
+                        ("MODELS_ROOT", tmp_path / "volume" / "models"),
+                        ("STATE_FILE", tmp_path / "volume" / ".sync-state.json"),
+                        ("_tracked", lambda: None), ("_free_bytes", lambda: 10**12)):
+        monkeypatch.setattr(model_sync, name, value)
+    monkeypatch.setenv("HF_TOKEN", token + "\n")
+    monkeypatch.setenv("no_proxy", "*")
+    Worker(tmp_path, monkeypatch, missing=["vae/ae.safetensors"])
+    monkeypatch.setattr(handler.model_sync, "fetch_local", FETCH_LOCAL)
+    answer = handler.handler({"input": {**JOB, "fetch_missing": True}})
+    assert token not in json.dumps(answer)
+    # The token was good enough to send: the request got as far as the host.
+    assert dialled == ["huggingface.co"] * 3 and answer["model_fetch"]["token"] is True
+    assert answer["status"] == "model_fetch_error"
+    assert answer["failure"]["failed"] == [{"model": "vae/ae.safetensors",
+                                            "error": "URLError: <urlopen error offline>"}]
+    # The volume sync gets the token in its job input.
+    monkeypatch.delenv("HF_TOKEN")
+    answer = handler.handler({"input": {"mode": "sync_models", "models": MODELS[:1],
+                                        "hf_token": token + "\n"}})
+    assert token not in json.dumps(answer) and len(dialled) == 4
+    assert answer == {"status": "sync_partial", "sync": {
+        "downloaded": [], "skipped": [], "deleted": [],
+        "failed": [{"model": "vae/ae.safetensors", "error": "<urlopen error offline>"}]}}
 
 
 def test_a_fetch_that_fails_ends_the_job_before_the_workflow_runs(tmp_path, monkeypatch):

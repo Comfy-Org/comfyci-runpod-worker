@@ -1033,18 +1033,29 @@ needs no line in `docker/extra_model_paths.yaml`. The steps, in order:
    up, so this is a bonus and nothing counts on it.
 3. **Make room.** The files to download plus 5 GB must be free. Fetched files
    this job does not need are removed first, the one used longest ago first,
-   then `~/.cache/huggingface`. When that is not enough the job ends before
-   any download: "disk full: 12.3 GB free, 65.0 GB needed".
+   then the Hugging Face cache (`HF_HOME`, else `~/.cache/huggingface`). The
+   cache goes only when it is on the worker's own disk: one on the network
+   volume is every worker's, and removing it would free nothing here. When
+   that is not enough the job ends before any download: "disk full: 12.3 GB
+   free, 65.0 GB needed".
 4. **Download.** Four files at once. Each goes to `<name>.part`, is hashed
    while it is written, and gets its name when the sha256 matches. A file has
    3 tries. After an HTTP 429 the worker waits the seconds the host's
    `RateLimit` header gives, 300 at most. A wrong sha256 gets no second try,
-   nor does an HTTP 401, 403 or 404. The first file that fails for good stops
-   the others: the job is over then, and its time is billed.
+   nor does an HTTP 401, 403 or 404 of the model's own host. The same answer
+   from a storage host that the download was redirected to is tried again:
+   it says nothing about a licence, and the next try gets a new link. The
+   first file that fails for good stops the others: the job is over then, and
+   its time is billed.
+
+A model entry that cannot be fetched is a failed download of that file, not a
+job that breaks: a URL that is not http or https, a name that is not a plain
+path below the models folder, a file that cannot be put in its place.
 
 To try another number of files at once, a run can say it:
 `python scripts/run_regression.py ... --fetch-streams 1` puts `fetch_streams`
-(1 to 16) into the job input.
+(1 to 16) into the job input. A larger number is refused: the worker would
+use its own 4 and say nothing.
 
 **Input files are not fetched.** A file with `"directory": "input"` is read
 from the volume on every lane (`--input-directory`). The model sync puts the
@@ -1058,15 +1069,19 @@ token rides in no job. It is sent to `https://huggingface.co` and to no other
 host: not to the storage host a download is redirected to, and not to a host
 that only has the name in it. The volume sync holds to the same rule. Without
 a token public files still download, on a limit that every user of the
-worker's address shares, and the report says that there was none.
+worker's address shares, and the report says that there was none. White
+space around the value is cut off, so a secret that was pasted with its line
+break works. A value that no header can carry counts as no token. No failure
+message holds the token: what a download says when it fails is published
+with the run.
 
 **Two worker statuses** say that a model did not arrive. Both are
 `infra_error`: the workflow was not tested.
 
 | `worker_status` | Meaning | Tried again |
 |---|---|---|
-| `model_fetch_error` | a download failed: the network, HTTP 5xx or 429, a wrong sha256, a full disk | yes: right away on a per-commit lane, in the pass at the end of a nightly or weekly run |
-| `model_access_error` | the model host answered 401, 403 or 404: no token, a licence that is not accepted, a file that moved | no. A person has to act. The job's `failure` names the host, the repository and the answer (`host`, `repo`, `http_status`), and the report says what to do |
+| `model_fetch_error` | a download failed: the network, HTTP 5xx or 429, a wrong sha256, a full disk, a refusal by a storage host that the download was redirected to | yes: right away on a per-commit lane, in the pass at the end of a nightly or weekly run |
+| `model_access_error` | the model's own host answered 401, 403 or 404: no token, a licence that is not accepted, a file that moved | no. A person has to act. The job's `failure` names the host, the repository and the answer (`host`, `repo`, `http_status`), and the report says what to do |
 
 **What the runner does** (`scripts/submit_and_poll.py`,
 `scripts/run_regression.py`). On such a lane it tells each job to fetch and
@@ -1097,6 +1112,9 @@ not (`scripts/tests/test_manifest_lint.py`):
   3,600 seconds RunPod gives a job;
 - an enabled workflow that loads an input file runs on no lane without a
   volume.
+
+The lint no longer asks that an enabled workflow of such a lane finds its
+models on the volume ("its models are on no volume"): its jobs fetch them.
 
 Moving a workflow from the weekly to the nightly cadence makes the next sync
 put its models on the volume, and the 90 % rule then counts them. The move
@@ -1833,7 +1851,10 @@ workflow has. A reference-level image workflow's files do not change at all:
   base64), the smallest first, and lists every file in name order. So a large
   clip or mesh never holds back the picture. A file that was not sent says
   `truncated` in `run.json`. A run whose files fit is answered as it always
-  was.
+  was. A reference-level image workflow needs every picture: when one was
+  not sent, nothing is compared and the result is `fail` with "output not
+  transferred", as for a text that was not sent. Keep the pictures of such a
+  workflow under the limit together, or run it at smoke level.
 - An input named `a.b` in a workflow file is a sub-input of the input `a`:
   the codec of a `SaveVideo` format, the seed of a sampling mode. The worker
   keeps a literal one when `a` is an input of the node. Before, it removed

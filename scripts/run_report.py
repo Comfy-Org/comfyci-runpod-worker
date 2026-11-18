@@ -96,6 +96,8 @@ FETCH_NOTE = ("Models GB is what the job downloaded to its worker before the wor
               "Fetch s how long its models took it, with the download speed in MB/s. A file the "
               "worker still had from an earlier job is not downloaded again. Neither is part of "
               "Exec s.")
+# The one host a worker sends its Hugging Face token to (src/model_sync.py).
+TOKEN_HOST = "huggingface.co"
 # What a person does about a file the model host refused, by the host's answer.
 ACCESS_HINTS = {
     401: "{host} wants a token it accepts for {repo}: check `HF_TOKEN` on the lane's "
@@ -103,6 +105,9 @@ ACCESS_HINTS = {
     403: "accept the licence of {repo} on {host} with the account behind `HF_TOKEN`, or "
          "correct the URL in the manifest.",
     404: "the file is not at {repo} on {host}: correct the URL in the manifest."}
+# The same for any other host. The worker has no token for it.
+NO_TOKEN_HINT = ("{host} refuses the file of {repo}, and the worker has no token for that "
+                 "host: `HF_TOKEN` goes to " + TOKEN_HOST + " only. Use a URL that needs none.")
 
 SHA_RE = re.compile(r"[0-9a-f]{7,40}")
 FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -2194,7 +2199,10 @@ def failure_detail(d: LaneData, v: View, limits: Limits) -> list[str]:
     if err.get("message"):
         bullets.append(f"**Message:** {md(err['message'], 2000)}")
     # A model the job was to download for itself: what the host said, and to whom.
-    hint = ACCESS_HINTS.get(as_int(err.get("http_status")))
+    answer = as_int(err.get("http_status"))
+    hint = ACCESS_HINTS.get(answer)
+    if hint and answer != 404 and err.get("host") != TOKEN_HOST:
+        hint = NO_TOKEN_HINT
     if hint:
         bullets.append("**What to do:** " + hint.format(
             host=code(err.get("host"), 120) or "the model host",

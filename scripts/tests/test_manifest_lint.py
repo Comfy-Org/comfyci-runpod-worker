@@ -325,6 +325,9 @@ def _job_fetch_problems(manifest: dict, lanes: dict) -> list[str]:
                                 "file into ComfyUI's own models folder")
         size = lanes_mod.fetch_bytes(entry)
         timeout_s = entry.get("timeout_s") or (manifest.get("defaults") or {}).get("timeout_s", 0)
+        if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)):
+            problems.append(f"{wf_id}: timeout_s must be a number of seconds, not {timeout_s!r}")
+            timeout_s = 0
         fetch_s = lanes_mod.fetch_allowance_s(entry)
         for lane_id in on:
             disk_gb = lanes_mod.endpoint_settings_of(lanes, lanes["lanes"][lane_id])["disk_gb"]
@@ -757,6 +760,10 @@ def test_a_fetch_and_its_workflow_fit_the_time_runpod_gives_a_job():
     # Without a timeout of its own the manifest's default counts.
     assert problems(67 * 10**9, None) == []      # 2,680 + 600 + 300
     assert len(problems(68 * 10**9, None)) == 1  # 2,720 + 600 + 300
+    # A timeout that is no number is said, not added up.
+    for junk in ("600", [600], True):
+        assert problems(10**9, junk) == [
+            f"big: timeout_s must be a number of seconds, not {junk!r}"], junk
     # The allowance rounds up, counts every model once and no input file.
     allowance = lanes_mod.fetch_allowance_s
     assert allowance({"models": [_fetched("a", 1), _fetched("b", 25_000_000)]}) == 2

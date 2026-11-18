@@ -88,6 +88,10 @@ LONG_POLL_INTERVAL_S = 3
 DEADLINE_MARGIN_MIN = lanes_mod.DEADLINE_MARGIN_MIN
 # Such a run pushes what it has after this many workflows.
 CHECKPOINT_EVERY = 10
+# The most files a job can be told to download at once (`--fetch-streams`).
+# The worker takes 1 to 16 (src/handler.py) and uses its own number for
+# anything else without a word, so a larger one is refused here.
+FETCH_STREAMS_MAX = 16
 # The worker status of a workflow that the run's deadline did not reach.
 NOT_REACHED = "not_reached"
 # What an untested workflow's status must not be for the pass at the end of a
@@ -247,6 +251,13 @@ class ImageComparator(output_kinds.Comparator):
         return {"identical": True, "mean_mse": 0.0, "mean_psnr_db": None, "min_psnr_db": None,
                 "max_abs_diff": 0, "mean_pct_pixels_changed": 0.0}
 
+    def transfer_error(self, run_rec: dict) -> str | None:
+        """A picture the worker listed and did not send. The pictures of the
+        two sides are paired by their place in name order, and the worker
+        sends the smallest files first: without one of them, the others would
+        be measured against the wrong pictures."""
+        return output_kinds.not_transferred(run_rec, (".png",))
+
 
 COMPARATORS: dict[str, output_kinds.Comparator] = {
     "image": ImageComparator(), "text": output_kinds.TextComparator()}
@@ -400,7 +411,7 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
     else:
         outputs_dir = Path(run_rec["outputs_dir"])
         figures_dir = workdir / "figures"
-        # A compared file the worker listed and did not send (never so for images).
+        # A compared file the worker listed and did not send.
         lost = cmp_.transfer_error(run_rec)
 
         def against(ref_dir: Path) -> dict:
@@ -618,6 +629,14 @@ def _count(text: str) -> int:
     return value
 
 
+def _streams(text: str) -> int:
+    """`--fetch-streams`: a whole number from 1 to FETCH_STREAMS_MAX."""
+    value = _count(text)
+    if value > FETCH_STREAMS_MAX:
+        raise argparse.ArgumentTypeError(f"must be at most {FETCH_STREAMS_MAX}")
+    return value
+
+
 def lane_count(lane: dict, key: str) -> int | None:
     """What a lane says under a key that counts something (`max_in_flight`,
     `timeout_minutes`): None when it says nothing. Anything but a whole number
@@ -828,9 +847,10 @@ def main():
                     help="minutes from now after which no job is submitted that could still "
                          "be running then (default on a nightly or weekly lane: its "
                          "timeout_minutes minus 25; on a per-commit lane: none)")
-    ap.add_argument("--fetch-streams", type=_count, default=None,
+    ap.add_argument("--fetch-streams", type=_streams, default=None,
                     help="files a job downloads at once, on a lane whose jobs fetch their "
-                         "models (default: the worker's own, 4). For measuring download speed")
+                         f"models: 1 to {FETCH_STREAMS_MAX} (default: the worker's own, 4). "
+                         "For measuring download speed")
     storage.add_storage_args(ap)
     args = ap.parse_args()
 

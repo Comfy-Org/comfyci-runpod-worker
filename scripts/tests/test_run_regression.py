@@ -3463,3 +3463,92 @@ def test_the_runs_deadline_counts_the_time_a_job_may_fetch(tmp_path, monkeypatch
     assert worst({}, {"timeout_s": 600}, 1800, 1) == 2700
     assert worst({}, {"timeout_s": 600}, 1800, 1, 2400) == 5100
     assert worst({}, {"timeout_s": 600}, 600, 2, 100) == 3200
+
+
+def test_the_run_refuses_a_number_of_streams_the_worker_would_not_take(tmp_path, monkeypatch,
+                                                                      capsys):
+    """The worker takes 1 to 16 and uses its own 4 for anything else, without
+    a word. A run that asked for 32 would be read as a measurement of 32."""
+    import argparse
+    streams = run_regression._streams
+    assert [streams(text) for text in ("1", "4", "16")] == [1, 4, 16]
+    for text in ("0", "-1", "17", "32"):
+        with pytest.raises(argparse.ArgumentTypeError):
+            streams(text)
+    lane = _fetch_lane(tmp_path, monkeypatch, {"wf": {"level": "smoke", "cadence": "weekly"}})
+    with pytest.raises(SystemExit) as stopped:
+        lane.run("c1", "weekly", "--skip-publish", "--fetch-streams", "32")
+    assert stopped.value.code == 2 and lane.sent == {}  # before any job
+    assert "--fetch-streams: must be at most 16" in capsys.readouterr().err
+
+
+# -- a picture that did not arrive --------------------------------------------------------
+# The worker sends output files up to a size limit, the smallest first, and
+# lists the rest as not sent (src/handler.py).
+FRAMES = {"wf_00001_.png": 10, "wf_00002_.png": 100, "wf_00003_.png": 200}
+
+
+class FramesStore(ImageStore):
+    """A golden and a previous run of three pictures, each of its own shade."""
+
+    def _write(self, dest, shade):
+        for name, own in FRAMES.items():
+            _png(dest / name, own)
+        return len(FRAMES)
+
+
+def _frames_run(tmp_path, monkeypatch, not_sent=()):
+    """process_workflow for an image workflow whose job wrote the three
+    pictures of the reference, bit for bit, and did not send those named."""
+    import types
+
+    def job(client, wf_id, workflow, workdir=None, **kw):
+        out = workdir / "outputs"
+        for name, shade in FRAMES.items():
+            if name not in not_sent:
+                _png(out / name, shade)
+        return {"status": "ok", "outputs_dir": str(out), "gpu_name": "gpu",
+                "timings": {"prompt_exec_s": 3.0},
+                "outputs": [{"filename": name, "bytes": 9, "sha256": name,
+                             **({"truncated": True} if name in not_sent else {})}
+                            for name in FRAMES]}
+
+    monkeypatch.setattr(run_regression, "run_workflow_job", job)
+    monkeypatch.setattr(run_regression, "RunPodClient", lambda endpoint_id: None)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "wf_api.json").write_text("{}", encoding="utf-8")
+    args = types.SimpleNamespace(workdir=str(tmp_path / "work"), endpoint_id="ep", lane_id="main",
+                                 commit="new", repo_url=None, branch="master", skip_publish=True)
+    return run_regression.process_workflow("wf", {"workflow_path": "wf_api.json", "models": []},
+                                           DEFAULTS, args, tmp_path, FramesStore())
+
+
+def test_a_picture_that_was_not_sent_is_not_measured_against_another(tmp_path, monkeypatch):
+    """The pictures of a run and of its reference are paired by their place in
+    name order. With the smallest files sent first, the picture that stays
+    behind can be the first: the two that arrived were measured against the
+    reference's first two, and a run that equals its reference bit for bit
+    was published as drift, with numbers and figures."""
+    cell = _frames_run(tmp_path / "all", monkeypatch)
+    assert cell["verdict"] == "pass" and cell["vs_golden"]["identical"] is True
+    assert cell["vs_golden"]["frames_compared"] == 3 and list(cell) == CELL_KEYS
+
+    said = "output not transferred, over the worker's inline size limit: wf_00001_.png"
+    cell = _frames_run(tmp_path / "first", monkeypatch, not_sent=("wf_00001_.png",))
+    assert cell["vs_golden"] == {"kind": "image", "error": said}
+    assert cell["vs_previous"] == cell["vs_golden"]
+    # It is still a failure, as a run without all its pictures always was. It
+    # says why, and shows no figure of pictures that were never a pair.
+    assert (cell["verdict"], cell["detail"], cell["figures"]) == ("fail", None, False)
+    assert not (tmp_path / "first" / "work" / "wf" / "figures").exists()
+    # The run is known by its first picture's sha256, which the worker listed.
+    assert cell["output_sha256"] == "wf_00001_.png" and list(cell) == CELL_KEYS
+
+    cell = _frames_run(tmp_path / "two", monkeypatch, not_sent=("wf_00003_.png", "wf_00002_.png"))
+    assert cell["vs_golden"]["error"].endswith("size limit: wf_00002_.png, wf_00003_.png")
+    assert cell["verdict"] == "fail"
+    # A file of another kind that stayed behind is not the comparison's business.
+    image = run_regression.COMPARATORS["image"]
+    assert image.transfer_error({"outputs": [
+        {"filename": "wf_00001_.png", "sha256": "p"},
+        {"filename": "wf_mesh_00001_.glb", "sha256": "m", "truncated": True}]}) is None

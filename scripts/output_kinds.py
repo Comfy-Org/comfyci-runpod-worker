@@ -87,6 +87,16 @@ def outputs_of(run_rec: dict | None, extensions: tuple[str, ...]) -> list[dict]:
     return sorted(found, key=lambda o: str(o.get("filename")))
 
 
+def not_transferred(run_rec: dict | None, extensions: tuple[str, ...]) -> str | None:
+    """Why a run's files with one of `extensions` cannot be compared: the
+    worker listed one and did not send it. None when all of them arrived."""
+    cut = [str(o.get("filename")) for o in outputs_of(run_rec, extensions) if o.get("truncated")]
+    if cut:
+        return ("output not transferred, over the worker's inline size limit: "
+                + ", ".join(cut[:5]))
+    return None
+
+
 def text_sha(run_rec: dict | None) -> str | None:
     """The sha256 that identifies a run's text output, from its record alone:
     the text file's own sha256 as the worker reported it. With several text
@@ -467,12 +477,7 @@ class TextComparator(Comparator):
         return {"kind": "text", "identical": True, "similarity": 1.0}
 
     def transfer_error(self, run_rec: dict) -> str | None:
-        cut = [str(o.get("filename")) for o in outputs_of(run_rec, TEXT_EXTENSIONS)
-               if o.get("truncated")]
-        if cut:
-            return ("output not transferred, over the worker's inline size limit: "
-                    + ", ".join(cut[:5]))
-        return None
+        return not_transferred(run_rec, TEXT_EXTENSIONS)
 
     def describe(self, outputs_dir: Path) -> dict:
         own = self.compare(outputs_dir, outputs_dir)

@@ -4915,13 +4915,27 @@ def test_a_refused_model_says_who_has_to_do_what():
             "message": f"the model host answered {status} for org/gated",
             "host": "huggingface.co", "repo": "org/gated", "http_status": status})
         assert f"- **What to do:** {said}" in block, status
+    # Any other host gets no token from the worker, so the token is no way out
+    # there. A file that is gone is a matter of the URL on every host.
+    for status in (401, 403):
+        block = _unfetched("model_access_error", {
+            "message": f"the model host answered {status} for org/repo",
+            "host": "raw.githubusercontent.com", "repo": "org/repo", "http_status": status})
+        assert ("- **What to do:** <code>raw.githubusercontent.com</code> refuses the file of "
+                "<code>org/repo</code>, and the worker has no token for that host: `HF_TOKEN` "
+                "goes to huggingface.co only. Use a URL that needs none.") in block, status
+    block = _unfetched("model_access_error", {
+        "message": "the model host answered 404 for org/repo",
+        "host": "raw.githubusercontent.com", "repo": "org/repo", "http_status": 404})
+    assert ("- **What to do:** the file is not at <code>org/repo</code> on "
+            "<code>raw.githubusercontent.com</code>: correct the URL in the manifest.") in block
     # What the worker sends is not trusted: it is escaped, or left out.
     block = _unfetched("model_access_error", {
         "message": "no", "host": "<b>evil</b>", "repo": None, "http_status": 403,
         "failed": ["junk", {"model": "a|b", "error": None}]})
-    assert ("- **What to do:** accept the licence of the file's repository on "
-            "<code>&lt;b&gt;evil&lt;/b&gt;</code> with the account behind `HF_TOKEN`, or correct "
-            "the URL in the manifest.") in block
+    assert ("- **What to do:** <code>&lt;b&gt;evil&lt;/b&gt;</code> refuses the file of the "
+            "file's repository, and the worker has no token for that host: `HF_TOKEN` goes to "
+            "huggingface.co only. Use a URL that needs none.") in block
     assert "- **Not downloaded:** <code>a&#124;b</code> (no reason recorded)" in block
     for junk in ("403", 403.0, True, None, 500, [403]):
         block = _unfetched("model_access_error", {"message": "no", "http_status": junk})
