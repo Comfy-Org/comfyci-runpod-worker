@@ -601,6 +601,30 @@ def test_referenced_files_helper():
                                      "clip.mp4", "bbox/face.pt"}
 
 
+# The importer lists the sound a LoadAudio reads and the clip a LoadVideo
+# reads as input files, next to the pictures. Unknown here, such a file would
+# be "in the models list but never loaded".
+INPUT_FILE_BY_NODE.update({"LoadAudio": "audio", "LoadVideo": "file"})
+
+
+def test_the_lint_knows_the_input_files_the_importer_lists():
+    import import_template
+
+    assert import_template.INPUT_FILE_BY_NODE.items() <= INPUT_FILE_BY_NODE.items()
+    assert import_template.INPUT_DIR == INPUT_DIR
+    assert set(import_template.KEPT_SAVES) <= OUTPUT_NODES
+    wf = {
+        "1": {"class_type": "LoadAudio", "inputs": {"audio": "voice_demo.mp3"}},
+        "2": {"class_type": "LoadVideo", "inputs": {"file": "warrior.mov [input]"}},
+        "3": {"class_type": "LoadVideo", "inputs": {"file": ["9", 0]}},
+        # Only the node's own file input names a file.
+        "4": {"class_type": "LoadAudio", "inputs": {"file": "not_a_file", "audio": ["9", 0]}},
+        "5": {"class_type": "SaveVideo", "inputs": {"file": "x", "audio": "y", "video": ["2", 0]}},
+    }
+    assert _referenced_files(wf) == {"voice_demo.mp3", "warrior.mov"}
+    assert import_template.input_names(wf) == ["voice_demo.mp3", "warrior.mov"]
+
+
 def test_output_ancestors_helper():
     wf = {
         "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
