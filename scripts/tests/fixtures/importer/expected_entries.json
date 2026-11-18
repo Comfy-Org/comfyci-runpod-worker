@@ -1,0 +1,72 @@
+{
+  "ace_step_15_t2a": {
+    "enabled": true,
+    "level": "smoke",
+    "cadence": "nightly",
+    "output_kind": "audio",
+    "expect": {
+      "seconds": 30
+    },
+    "workflow_path": "manifest/workflows/ace_step_15_t2a_api.json",
+    "seed_overrides": {
+      "3": {
+        "seed": 31
+      },
+      "94": {
+        "seed": 31
+      }
+    },
+    "models": [
+      {
+        "name": "ace_step_1.5_turbo_aio.safetensors",
+        "url": "https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files/resolve/main/checkpoints/ace_step_1.5_turbo_aio.safetensors",
+        "directory": "checkpoints",
+        "sha256": "67b0f43aa5c51c840bd0228e6a935d8ff416ec87e5df2fc0637da17a561252bc",
+        "bytes": 10025478736
+      }
+    ],
+    "gpu_type": null,
+    "timeout_s": 900,
+    "thresholds": null,
+    "golden_tag": null
+  },
+  "minimax_music3_t2a": {
+    "enabled": true,
+    "level": "smoke",
+    "cadence": "weekly",
+    "output_kind": "audio",
+    "workflow_path": "manifest/workflows/minimax_music3_t2a_api.json",
+    "seed_overrides": {
+      "37:38": {
+        "seed": 197122968890040
+      }
+    },
+    "models": [
+      {
+        "name": "minimax_music3_dit_fp16.safetensors",
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-Music-3/resolve/main/diffusion_models/minimax_music3_dit_fp16.safetensors",
+        "directory": "diffusion_models",
+        "sha256": "45494a2b6b69af115902ff28eaf54118d19067aa54da01000f3e3efce7ba0e34",
+        "bytes": 4914197682
+      },
+      {
+        "name": "minimax_music3_text_encoder_pruned_int8_convrot.safetensors",
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-Music-3/resolve/main/text_encoders/minimax_music3_text_encoder_pruned_int8_convrot.safetensors",
+        "directory": "text_encoders",
+        "sha256": "010b7416d2336a08c711bc22ee65849c9623069ddb7d89bec011a75699e52014",
+        "bytes": 9196611886
+      },
+      {
+        "name": "minimax_music3_dav.safetensors",
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-Music-3/resolve/main/vae/minimax_music3_dav.safetensors",
+        "directory": "vae",
+        "sha256": "2a32155b769be01445fcc2a8663b910fc9e1751e18dc1c3ec528064512d9ef0c",
+        "bytes": 216696128
+      }
+    ],
+    "gpu_type": null,
+    "timeout_s": 1200,
+    "thresholds": null,
+    "golden_tag": null
+  }
+}
