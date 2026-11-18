@@ -48,6 +48,7 @@ pick with `--storage` / `REGRESSION_STORAGE`):
 | `scripts/` | Orchestration run on the (CPU) CI runner: submit/poll, compare, publish, golden generation |
 | `scripts/template_api_export.py`, `scripts/import_template.py` | Turn a workflow template into a corpus entry (see [Adding a workflow](#adding-a-workflow)) |
 | `.github/workflows/regression.yml` | Scheduled poller that tests each new master commit on every per-commit lane and reports the results in the run: one job summary per lane, one for all lanes, and the run's files as an artifact (interim, until the core CI job below) |
+| `.github/workflows/nightly-weekly.yml` | Tests master HEAD once a night and once a week on the lanes of those cadences (see [Nightly and weekly lanes](#nightly-and-weekly-lanes)) |
 | `scripts/run_report.py` | Renders those job summaries from the results branch (see [What a run shows](#what-a-run-shows)) |
 | `action.yml` | Composite action for ComfyUI's `test-ci.yml` (GCS phase) |
 
@@ -87,11 +88,38 @@ this repo per template.
 2. Paste the entry under `workflows` in `manifest/workflows.json` and choose a
    `timeout_s` the model can finish in. Leave `"enabled": false`.
 
-   `output_kind` says what the workflow's output is, and so how it is
+   `output_kind` says what the workflow's main output is, and so how it is
    compared. An entry without the key is an image workflow: its `SaveImage`
    PNGs are compared pixel by pixel. `"output_kind": "text"` makes it a text
-   workflow: its `.txt` file is compared with the reference text. No other
-   value exists, and an unknown one stops a run before any GPU job starts.
+   workflow: its `.txt` file is compared with the reference text.
+   `"output_kind": "audio"` is a sound workflow: a FLAC file written by
+   `SaveAudioAdvanced` with `format` `"flac"`. Nothing compares audio yet, so
+   such an entry must be at smoke level (next paragraph). An unknown value
+   stops a run before any GPU job starts, and so does an audio entry that is
+   not at smoke level. A 3D or a video workflow is an image workflow: it
+   saves a picture under the workflow id, and its mesh (`SaveGLB`) or clip
+   (`SaveVideo`) is a second file, prefixed `<id>_`.
+
+   `level` says how the workflow is checked. An entry without the key is at
+   **reference level (the main tests)**: its output is compared with an
+   approved reference, the golden. `"level": "smoke"` puts it at **smoke
+   level**: it only has to finish and to write usable files (see
+   [Smoke level](#smoke-level)). A smoke-level entry has no golden, so its
+   `thresholds` and `golden_tag` are null and step 5 falls away. Use it where
+   an output cannot be the same on every run, or where nothing can compare
+   it yet. It does not catch a wrong but plausible output.
+
+   A smoke-level entry can say what its author knows about the output in
+   `expect`. Every key is optional: `width` and `height` (the PNG files),
+   `frames` (the video), `seconds` (the audio, within 5 % and never tighter
+   than 0.5 s) and `min_chars` (the text). For example
+   `"expect": {"width": 1024, "height": 1024, "seconds": 30}`. An unknown
+   key, a value that is not a number above 0, or `expect` on a
+   reference-level entry stops a run before any GPU job starts.
+
+   `cadence` says how often the workflow runs: on every commit (no key, or
+   `"per-commit"`), `"nightly"` or `"weekly"`. It runs on the lanes of that
+   cadence and on no other (see [Lanes](#lanes)).
 
    For a hand-exported workflow, the entry needs the same shape: `workflow_path`,
    `seed_overrides` (node id → input patch, belt-and-braces for the seed),
@@ -108,6 +136,22 @@ this repo per template.
    A workflow that uses custom nodes lists its packs under `custom_nodes`
    (names from `manifest/custom_nodes.json`) and restricts itself with `lanes`
    to the lanes whose image bakes them; see [Custom-node packs](#custom-node-packs).
+
+   Every `models` entry also carries `bytes`, the size of the download. The
+   importer writes it next to the sha256. For an entry written by hand,
+   `python scripts/import_template.py --fill-bytes` asks each URL for its size
+   and adds the missing ones to the manifest, changing nothing else. The lint
+   adds the sizes up, each file once, and fails when they pass 90 % of the
+   network volume (`endpoint_defaults.volume_gb` in `manifest/lanes.json`).
+   Nothing deletes from the volume, so a full one fails every sync after it.
+   The lint counts, and the model sync downloads, the models of the same
+   workflows: those that run on a lane which reads its models from the volume
+   (`lanes.volume_workflows`). A workflow that runs only on lanes with
+   `"model_storage": "job"`, or on lanes without a volume, is in neither.
+   Nothing fetches models for a job yet, so the lint also fails for an
+   enabled workflow of that kind that loads a file which is not among the
+   volume's: "its models are on no volume". One whose files another workflow
+   puts on the volume passes. The rule goes when jobs can fetch models.
 
    **A text workflow** (a model that answers in text, like the
    `llm_qwen38_27b_t2t` entry) is written by hand: the importer only writes
@@ -168,6 +212,16 @@ this repo per template.
 | `execution_error` | workflow errored on the commit under test, or a custom-node pack it requested did not import (worker status `custom_node_error`) | **red** |
 | `no_baseline` | no blessed golden yet | warning, green |
 | `infra_error` | RunPod/queue/checkout/model-volume/pack-install problem (after 1 retry) | warning, green |
+
+That is what the verdicts mean at reference level (the main tests), where an
+output is compared with its golden. A workflow at smoke level uses the same
+five names, and its `pass` and `fail` mean something else: see
+[Smoke level](#smoke-level).
+
+On a lane with the `nightly` or `weekly` cadence an `infra_error` that is
+still there at the end of the run is **red**: nothing tests the commit again
+the next minute there (see
+[How a nightly or weekly run goes](#how-a-nightly-or-weekly-run-goes)).
 
 Thresholds come from the manifest entry if set, otherwise from the manifest
 defaults loosened to 3× the golden's own re-run noise floor
@@ -236,8 +290,18 @@ marker, `runs/master/<sha>/attempt.json` (attempt number, Actions run URL), so
 a run that dies before publishing its summary (a failed results push, a killed
 job) is still counted. A summary with infra errors, or a marker with no
 summary, gets one more attempt: two in all per commit per lane, counted in the
-summary's and the marker's `attempt`. A run that cannot push its marker stops
-before any GPU work. To test a commit again on purpose, dispatch **GPU
+summary's and the marker's `attempt`. Two cases follow from that rule. A
+workflow that another run right away would not test either is no reason for
+the retry: its models are not on the volume yet (`missing_model`), the model
+host refuses a file (`model_access_error`), or the run's deadline came before
+it could start (`not_reached`). A summary whose untested workflows are all of
+that kind is left alone, and its report says so. And a summary with `partial`
+(a nightly or weekly run pushes one every 10 workflows) belongs to a run that
+did not finish: it counts as a marker with no summary. A run that names its
+workflows at such a commit does not merge into it: it writes a summary of its
+own with `scope`, as at a commit without a result, and the cron's retry still
+follows. A run that cannot push its marker stops before any GPU work.
+To test a commit again on purpose, dispatch **GPU
 regression** with `commit=<sha>` (and `lane=` for one lane), when no GPU
 regression run is in progress, or check afterwards that the dispatch ran:
 all runs share one concurrency group, and GitHub cancels a pending run as
@@ -248,6 +312,46 @@ decision lives in `scripts/regression_skip.py`. The cron used to key on the
 previous-run pointer, which does not advance on execution errors, so a red
 HEAD was re-run on both lanes every half hour (53 runs for 11 commits during
 the 2026-11-03/04 z_image timeouts).
+
+**A run that names its workflows.** A dispatch of **GPU regression** with
+`workflows=<ids>` tests only those workflows. It is a re-test or a first look,
+not the lane's run of the commit, so it pushes no start marker and never moves
+the previous-run pointer. What it publishes depends on what the lane has for
+the commit:
+
+- No result yet: the summary holds the named workflows and lists their ids
+  under `scope`. The cron does not count such a summary as tested: its next
+  tick tests the commit with every workflow, and that run replaces the
+  summary. A second named run at the same commit adds its cells, and its ids
+  to `scope`. What a nightly or weekly run that did not finish pushed on its
+  way (`partial`) is no result either: the named run replaces it. In the run
+  index the entry of such a summary carries `"named": true`. It has its row
+  in the history, and it is not the lane's latest run: `latest`, in the
+  index head and in `index/lanes.json`, stays at the newest entry without
+  the mark, also when the named run is at a newer commit.
+- A result: only the cells of the named workflows are replaced. Every other
+  cell stays as it is, byte for byte, and so do `run_ts`, `run_url`, `run_id`,
+  `attempt`, `env`, `commit_meta` and `tested_range`, which describe the
+  lane's run. `overall` and `has_infra_error` are worked out again over every
+  cell, and the re-test records itself under `retests` (`run_ts`, `run_url`,
+  `run_id`, `env`, `workflows`). The history row keeps its link to the lane's
+  run, and the PR comment step decides over every cell of the commit. The job
+  itself is red or green by the workflows it tested.
+
+A lane tests a commit once, so a dispatch for a commit that already has the
+lane's result must name it (`commit=<sha>`). To try a workflow without
+writing anything, turn `publish` off: the commit is then tested whatever the
+lane has for it, nothing reaches the results branch, no pull request gets a
+comment, and the result is on the run's page and in its attached files.
+
+**Waiting for a worker.** A run submits all its jobs at once, and an endpoint
+has 3 workers. A job may wait 600 seconds in RunPod's queue, and 60 seconds
+more for each job submitted before it in the run (the order of the manifest).
+A job that waits longer is cancelled and submitted once more. The extra wait
+is added to the time the runner gives the job as a whole, its `timeout_s`
+plus 900 seconds. That is the per-commit lane. A nightly or weekly lane has
+only a few jobs on its endpoint at a time (see
+[How a nightly or weekly run goes](#how-a-nightly-or-weekly-run-goes)).
 
 A failure vs golden is also classified against the previous tested run
 (`detail` in `summary.json`): `new_drift` when this commit's outputs differ
@@ -264,6 +368,82 @@ outside Actions). Each workflow also records `prior_verdict` / `prior_commit`:
 its most recent red or green verdict before this commit, read from the run
 index, which (unlike the previous-run pointer) includes runs that had
 execution errors.
+
+### Smoke level
+
+A workflow whose entry says `"level": "smoke"` is not compared with anything.
+It passes when it finished, every save node wrote its file, and every file
+passes the checks of its type. It has no golden and no bless step: **Golden
+baselines** leaves it out of `workflows=all` and refuses it when it is named.
+
+| Verdict | Meaning at smoke level | CI effect |
+|---|---|---|
+| `pass` | it finished, every expected file is there and passes its checks | green |
+| `fail` | it finished, and a file is missing or does not pass. Also when it wrote no file at all (worker status `no_outputs`) | **red** |
+| `execution_error` | the workflow did not finish, as at reference level | **red** |
+| `infra_error` | not tested, as at reference level | warning, green (red on a nightly or weekly lane) |
+| `no_baseline` | never: there is no reference to miss | |
+
+The checks are in `scripts/smoke.py`. They run on the CI runner, on the files
+the worker sent back. A file's type comes from its extension, and a file of
+another extension is listed and not checked.
+
+| Type | File | It passes when |
+|---|---|---|
+| image | `.png` | it decodes fully, each side has at least 64 px, it is not blank (the grey image has a standard deviation of at least 1.0) and not one flat colour with a speck (at most 99.5 % of the pixels share one grey level) |
+| text | `.txt` | it is UTF-8 and at most 1 MiB, has at least 8 characters that are not blank and 4 different ones, and with 20 words or more no word is more than half of them (a word has a letter or a digit: the bars of a table do not count) |
+| audio | `.flac` | it is a FLAC file that ends with a whole frame, 8,000 to 192,000 Hz, 1 to 8 channels, at least 1.0 s long, and not silent: at least 4,000 bytes of audio frames a second (FLAC stores silence in a few bytes) |
+| mesh | `.glb` | it is a GLB whose first primitive has positions, with at least 100 vertices and 100 faces, every position finite, and a bounding box larger than 0.0001 in at least two directions |
+| video | `.mp4` | it is an MP4 with a video track, at least 2 frames, each side at least 64 px, and not blank or still: a frame after the first has at least 100 bytes plus 500 for each megapixel, on average (the first frame is stored whole, and alone it carries a small black clip over that) |
+
+The video limit is not settled. It rests on 267 made-up clips: flat colours,
+one picture repeated, moving stripes, a blurred picture that pans or gets
+brighter, with and without grain (`MEASURED_CLIPS` in
+`scripts/tests/test_smoke.py` has every number). Each blank or still one has
+at most 0.62 of what a frame needs, and each moving one at least 1.15. No
+clip of a model is among them, and no manifest entry has a video at smoke
+level today. Before the first video workflow gets the smoke level, measure
+real clips of its model (`bytes_per_frame_mp` in `smoke.files`, times the
+megapixels) and check the limit against them.
+
+- **A file that cannot be read fails.** A cut or broken file is a problem of
+  that file (check `decode`), never a crash of the run.
+- **`expect`** in the entry adds what its author knows: `width` and `height`
+  (PNG), `frames` (video), `seconds` (audio), `min_chars` (text).
+- **Which files must be there** comes from the workflow's own save nodes:
+  `SaveImage` a `.png`, `SaveText` a `.txt`, `SaveAudioAdvanced` a `.flac`,
+  `SaveGLB` a 3D file and `SaveVideo` an `.mp4`, each named with the node's
+  `filename_prefix` and the counter ComfyUI adds (`<prefix>_00001_.png`). A
+  file of another node under a longer prefix (`<prefix>_gif_00001.png`) is
+  not that node's file. A node that wrote nothing is a `missing` problem. The
+  lint holds `SaveVideo` to `format` `mp4` or `auto` with the codec `h264` or
+  `auto`: another container has another extension, and the limit above was
+  measured on H.264.
+- **A file the worker did not send** (it is over the worker's size limit)
+  cannot be opened. It passes on its size alone from 1,024 bytes, and the
+  report says "not sent, checked by size only". A text is held to its 1 MiB
+  all the same: that needs no look at the file.
+- **A file whose name leaves the outputs folder** (`../x.png`, an absolute
+  path) fails, whatever its type: "could not be read: its name leaves the
+  outputs folder" (check `decode`). The runner writes such a file nowhere,
+  and it never passes on its size. Only a broken worker names one.
+- **New, inherited or first run.** Nothing is compared, so a failed check is
+  placed by the workflow's own last verdict (`prior_verdict`): new when it
+  passed before, inherited when it already failed, and "first run" when it
+  has no earlier result on the lane. A workflow that fails its first run is a
+  problem of the workflow, and is not worded like a change in a commit.
+- **PULSE** comments on a smoke failure only when the workflow passed its
+  checks the time before. The row reads `smoke check failed`.
+
+Smoke level does not catch a wrong but plausible output: half a picture, a
+quiet hiss where music should be, a mesh of the wrong object. That is what
+reference level is for. To move a workflow there, remove `"level"` from its
+entry and approve a published run as its reference (`from_run`, see
+[Accepting an intentional change](#accepting-an-intentional-change-re-bless)).
+Until then its verdict is `no_baseline`. A run that holds an output file
+which was not published (see [Results layout](#results-layout)) is refused
+as a reference. Approve the second of two runs with the same output: all of
+its files are published.
 
 ## What a run shows
 
@@ -286,13 +466,30 @@ it cannot hold up the commits that wait for the run to end.
   "new in this run": the change is in one of them;
 - the commit, its parent and pull request, when it was tested, how many
   commits the run covers, the lane, the branch and the environment (GPU,
-  driver, Python, torch, CUDA, ComfyUI version, worker image, baked packs);
+  driver, Python, torch, CUDA, ComfyUI version, worker image, baked packs).
+  On a lane with the `nightly` or `weekly` cadence a run covers many commits:
+  its title names the range (`e9afbcc..05e878f (7 commits)`), and the table
+  says how much new output of smoke-level workflows the lane's run published;
+- a warning under the title when the summary is one that a nightly or weekly
+  run pushed on its way and no final one replaced: "The run that tested this
+  commit did not finish: 40 of 55 workflows have a result". The table then
+  has a **Progress** row. A nightly or weekly run that was stopped reports
+  from the files on its runner: its title has the warning mark also when
+  every workflow it has is green, and the workflows it left without a result
+  are listed as such.
+  A **Tested again** row lists the workflows that a later run tested again
+  at the commit, and their rows in the table of workflows link that run;
 - "What needs attention", one block per workflow that did not pass. For a
   changed output: each metric next to its limit, the comparison with the
   previous tested commit, where the reference (the golden) came from, the diff
   figures and the two commands that approve the new output. For an execution
   or infra error: the worker status, the error message, the node, the
-  traceback and the tail of the server log. A changed output that was approved
+  traceback and the tail of the server log. On a nightly or weekly lane a
+  failure is placed by the workflow's own last result ("new since `e9afbcc`,
+  7 commits", with the command that tests one commit of that range), a
+  workflow that was not tested says whether the run tried it again (its cell
+  then has `"tries": 2`) and how to test it now, and the workflows the run's
+  deadline did not reach stand in one list. A changed output that was approved
   as the reference after the run is labelled "accepted", is no longer counted
   as open and sits under a heading of its own. The label needs both: the
   output is the lane's reference today, and that reference is another one than
@@ -327,6 +524,28 @@ it cannot hold up the commits that wait for the run to end.
   file over 256 KB is linked, not shown. Generated text is model output: it
   appears only inside `<pre>` blocks, escaped, and is never printed to the
   job log;
+- for a workflow at smoke level, what was checked where a reference-level
+  workflow has what was compared. Its result reads "smoke pass" or "smoke
+  check failed", and one sentence under the headline says what that is
+  worth: such a workflow is only checked to finish and to write a usable
+  file. Its row has a **Checked** cell with its files by type ("2 images
+  1024x1024 · mesh 35,781 vertices", "30.0 s · 48000 Hz · stereo") and
+  nothing in the three reference columns. A lane of smoke-level workflows
+  alone has no reference columns, and a lane without one has no Checked
+  column. The Output cell is a thumbnail when the run wrote a PNG, else a
+  link named after the kind. The file list says what was measured on each
+  file. A failed check has a block under "What needs attention": each
+  problem with its file, the files with what was measured, and where the
+  failure started: "new at this commit", "new since `<sha>`, N commits",
+  "inherited" or "first run". No command approves anything there. A text
+  that passed its checks is shown under "Generated text", marked "smoke
+  level, not compared". One that failed is shown in its block. The headline
+  counts smoke passes apart from matches with a reference, and the roll-up
+  of a lane reads "smoke pass", or "pass (13 reference, 2 smoke)" when it
+  holds both. An output file that a smoke run kept off the results branch
+  (see [Results layout](#results-layout)) is not linked: the report points
+  to the files attached to the run. The legend explains the two smoke
+  labels. A page without a smoke-level result reads as it always did;
 - every output file, a link to each `run.json`, schema notes, the status of
   custom-node packs, and the workflows that did not run on the lane;
 - the lane's newest 20 commits with their results, each linked to the run that
@@ -334,7 +553,17 @@ it cannot hold up the commits that wait for the run to end.
 
 **The "All lanes" summary** shows the commit on every lane, the workflows the
 lanes disagree on, each lane's open failures, and the newest 25 commits as a
-table with one column per lane.
+table with one column per lane. An open failure is listed only for a workflow
+the lane still runs: one that was renamed, moved or switched off while it was
+red is left out. A nightly or weekly lane that has an endpoint gets no column:
+it tests one commit in many. It has a row in the table "Nightly and weekly
+lanes" instead, built from its last full run (the newest that did not name
+its workflows): when it ran, with a link to the run, the
+commits it covered, its result, what did not pass and how many workflows were
+not tested. A last run older than 36 hours on a nightly lane, or 8 days on a
+weekly one, is marked "no run for ...". GitHub can drop a scheduled run
+without a word, and that mark is then the only sign. The open failures of
+those lanes are listed with the others.
 
 **A commit that was already tested.** A cron tick that finds the commit
 tested on a lane tests nothing there. Its summary shows the published result
@@ -441,10 +670,13 @@ lasts. A summary without a run has only the page, as "Run details".
 
 - **When**: a workflow's outputs changed at this commit (`detail: new_drift`),
   or it hit an execution error while its prior run (`prior_verdict`) produced
-  outputs. Never for pass, inherited drift, infra errors, missing goldens, a
-  workflow with no prior run, a re-test of a commit older than the previous
-  run, or a run that covered several new commits (the change cannot be pinned
-  on one PR).
+  outputs, or a smoke-level workflow failed its checks while its prior run
+  passed them. That last case has the headline "GPU workflow failed" and the
+  verdict `smoke check failed`, with no numbers: nothing was compared. Never
+  for pass, inherited drift, a smoke failure that was already there, infra
+  errors, missing goldens, a workflow with no prior run, a re-test of a
+  commit older than the previous run, or a run that covered several new
+  commits (the change cannot be pinned on one PR).
 - **One comment per PR**: found again by the hidden marker
   `<!-- pulse-regression:v1 -->` and the token owner's login, and edited in
   place, so reruns never add a second one. A later clean run of the same
@@ -479,11 +711,11 @@ variable `PULSE_PR_COMMENTS` to `on`. Setting it to `off` stops it at once.
 A lane is one environment the corpus runs in: a worker image (Python, torch
 build, CUDA channel), the RunPod endpoint running that image, a cadence and a
 storage prefix. `manifest/lanes.json` declares the images once under `images`
-and the lanes under `lanes`; `scripts/lanes.py` derives the build matrix and
-the per-commit matrix from it, and `scripts/lanes.py validate` (run by the
-tests) keeps the file consistent. Goldens are per lane: cu130+ images enable
-comfy-kitchen kernels that cu128 cannot, so a new lane always starts with its
-own baselines.
+and the lanes under `lanes`; `scripts/lanes.py` derives the build matrix, the
+per-commit matrix and the matrix of a nightly or weekly run from it, and
+`scripts/lanes.py validate` (run by the tests) keeps the file consistent.
+Goldens are per lane: cu130+ images enable comfy-kitchen kernels that cu128
+cannot, so a new lane always starts with its own baselines.
 
 Today's lanes:
 
@@ -491,6 +723,8 @@ Today's lanes:
 |---|---|---|---|
 | `py313-torch2.14.1-cu130` | `cu130-t2141` | primary, blocking | per-commit |
 | `py313-torch2.15.0-cu132` | `cu132-t2150` | lane, informational | per-commit (from its first endpoint) |
+| `py313-torch2.14.1-cu130-nightly` | `cu130-t2141` | lane, informational | nightly (from its first endpoint) |
+| `py313-torch2.14.1-cu130-weekly` | `cu130-t2141` | lane, informational | weekly (from its first endpoint, and for workflows with models once those are fetched for each job) |
 | `py312-torch2.11.0-cu128` | `cu128-t2110` (never rebuilt) | legacy | retired: history only |
 
 - **Role**: exactly one lane is `primary`, the one `primary` names. It is the
@@ -499,24 +733,271 @@ Today's lanes:
   others are `lane`, or `legacy` for a lane whose endpoint is never repointed
   automatically.
 - **Cadence**: `per-commit` lanes with an `endpoint_id` run on every new master
-  commit. `nightly` and `weekly` are accepted but nothing schedules them yet.
-  `retired` means history only: the lane stays out of the per-commit matrix
+  commit (**GPU regression**). `nightly` and `weekly` lanes with an
+  `endpoint_id` run once a night and once a week (**GPU regression (nightly
+  and weekly)**, see [below](#nightly-and-weekly-lanes)).
+  `retired` means history only: the lane stays out of every matrix
   (even with `lane=`), of image builds and repoints, and `run_regression.py`,
   golden generation and `runpod_endpoints.py create/set-image` refuse it.
   Blessing or promoting its goldens still works (storage only).
 - **`blocking`** is informational: it is shown on the dashboard, and nothing
   gates ComfyUI merges on it.
 
-A workflow can restrict itself to lanes with `lanes` in
-`manifest/workflows.json` (a list of lane ids; null, the default, means every
-lane). `run_regression.py`, `golden_baseline.py` and the per-commit plan
-(`lanes.py per-commit` lists each lane's workflows) all honour it, even when
-the workflow is named explicitly, and the dashboard shows a skipped cell as
-not run. Workflows that need custom-node packs must use it (see below).
+**Which lanes run a workflow** is decided by two keys of its entry in
+`manifest/workflows.json`:
+
+- `cadence`: `per-commit` (the default, also when the key is absent),
+  `nightly` or `weekly`. A workflow runs on the lanes of its own cadence and
+  on no other. Moving a workflow to another cadence is that one word, and a
+  change of the primary lane edits no workflow entry.
+- `lanes`: a list of lane ids that narrows it further (null, the default,
+  means every lane of the cadence). Workflows that need custom-node packs
+  must use it (see below).
+
+`run_regression.py`, `golden_baseline.py`, the reports and the plans of both
+workflow files share the one rule (`lanes.why_not_on_lane`). It is a hard
+filter: a workflow that a dispatch names on a lane that does not run it is
+skipped, with a log line that says why ("cadence nightly, the lane is
+per-commit", or "manifest lanes: ..."), and the dashboard shows the cell as
+not run. A report does not list a workflow of another cadence under "not run
+on this lane". On a retired lane only the `lanes` list counts, so its goldens
+of any cadence can still be blessed.
+
+The two keys together can leave a workflow on no lane, and no run would turn
+red for a workflow that never runs. So `validate` fails for an enabled
+workflow that no lane runs (retired lanes do not count): "cadence 'nightly'
+and lanes [...] leave it on no lane". A pack workflow names its lanes, so
+moving one to `nightly` also means naming a nightly lane in its list.
+
+A golden lives under a lane's prefix. A reference-level workflow that changes
+cadence therefore has no golden on its new lane: its first run there ends in
+`no_baseline`, and that run's output is approved without GPU time (**Golden
+baselines** with `from_run`, `lane=<the new lane>` and `bless=true`, see
+[Accepting an intentional change](#accepting-an-intentional-change-re-bless)).
+Its history is split between the two lanes. A smoke-level workflow moves with
+the edit alone.
 
 **Always pass `lane=`** to **Golden baselines** and **Build run index**: left
 empty, they resolve to the lane that owns the bare `regression` prefix
 (layout 1), which is the retired cu128 lane.
+
+**Check the endpoints against the manifest.** `RUNPOD_API_KEY=... python
+scripts/runpod_endpoints.py status` prints the endpoint of every provisioned
+lane, and each setting that differs from `lanes.json`: the largest number of
+workers (the lane's `workers_max`, else `endpoint_defaults.workers.max`), the
+idle timeout (`idle_timeout_s`, else `endpoint_defaults.workers.idleTimeout`),
+the disk (`disk_gb`, else `endpoint_defaults.disk_gb`), and the GPU pools, the
+data centers and the network volumes (the lane's `gpu_pools`,
+`data_center_ids` and `network_volumes`, else the lists of
+`endpoint_defaults`; the order of a list does not count). A retired lane's
+endpoint is held to 0 workers and nothing else. `--strict` exits 1 when
+something differs. Without another flag the command only reads.
+
+**RunPod lowers the workers of an endpoint nobody uses.** RunPod's
+documentation says an endpoint without a request for 3 days is lowered to 2
+workers, and after 7 days to 0, where it stays until someone raises it. Jobs
+sent to it then only wait in the queue. `status --restore-workers` raises the
+largest number of workers to the manifest's when it is lower, with one PATCH.
+It never lowers one and never touches a retired lane's endpoint. If the
+account's worker quota refuses the raise, the command ends with RunPod's
+message. The nightly and weekly workflow runs it before each test run. On a
+per-commit lane that stood idle (a new lane before its first run), run it by
+hand with `--lane <lane id>`. An id that is no lane ends the command with
+"unknown lane", as it does for `create` and `set-image`.
+
+### Nightly and weekly lanes
+
+Workflows that are too slow or too many for every commit run once a night or
+once a week. **GPU regression (nightly and weekly)**
+(`.github/workflows/nightly-weekly.yml`) tests ComfyUI master HEAD:
+
+| Cadence | Cron (UTC) | Lanes |
+|---|---|---|
+| nightly | `17 1 * * *`, every day at 01:17 | every `nightly` lane that has an `endpoint_id` and an enabled nightly workflow |
+| weekly | `17 3 * * 0`, Sunday at 03:17 | the same for `weekly` |
+
+`python scripts/lanes.py cadence nightly` prints the plan. With no such lane
+the plan is `[]`, it says why each lane of the cadence is left out, and the
+run ends after its plan job. So a lane can be declared before its endpoint
+exists, which is the state of both lanes today: no workflow has either
+cadence yet, and neither lane has an endpoint.
+
+- **One lane per cadence.** Everything the suite stores about a commit on a
+  lane assumes that one run wrote it: the summary, the start marker, the
+  previous-run pointer, the goldens. So a cadence is a lane with its own
+  prefix, never a second run inside a per-commit lane. The label names the
+  cadence, because the dashboard prints only a lane's label.
+- **Its own workflow file and group.** The runs have their own name in the
+  Actions list ("GPU regression · nightly"), and wait in the concurrency
+  group `gpu-nightly-weekly`. A per-commit tick is in another group and never
+  replaces one. One group for both cadences, so the two never run at once.
+  `queue: max` lets several runs wait in line. If GitHub ever rejects the
+  file for that line, delete the line and do not dispatch while a run waits.
+- **Its own endpoint, shared by the two lanes.** Both lanes name
+  `"endpoint_name": "comfyci-cu130-nightly-weekly"`, so a nightly or weekly
+  run never takes a worker from a per-commit run. Lanes that share an
+  endpoint (the same `endpoint_name` or the same `endpoint_id`) must ask for
+  the same `image`, `endpoint_name`, `workers_max`, `disk_gb`,
+  `idle_timeout_s`, `env`, `gpu_pools`, `data_center_ids` and
+  `network_volumes`, and one name cannot stand for two ids: `validate` checks
+  it. It compares what each lane asks for with `endpoint_defaults` filled in,
+  so a lane that writes a default out agrees with one that leaves it out.
+  `runpod_endpoints.py set-image` sends such an endpoint one PATCH, and
+  `create` refuses to make it twice.
+- **Each lane job** runs the steps of the per-commit lane job (a test holds
+  the two files to the same text), with one more before the suite: `status
+  --lane <lane> --restore-workers`. There is no "All lanes" job and no PR
+  comment. The "All lanes" summary of every per-commit run shows where these
+  lanes stand (see [What a run shows](#what-a-run-shows)).
+- **A commit is tested once per lane**, by the rule of the per-commit lanes
+  (see [Verdicts](#verdicts)). A night without a new commit tests nothing and
+  shows the published result.
+- **Who is told.** GitHub mails a failed scheduled run to one person: whoever
+  last changed the `cron` lines of the workflow file.
+
+To start a run by hand:
+
+```
+gh workflow run nightly-weekly.yml --repo Comfy-Org/comfyci-runpod-worker \
+    -f cadence=nightly [-f commit=<sha>] [-f workflows=<ids>] [-f lane=<lane id>] \
+    [-f publish=false]
+```
+
+`workflows` and `publish` work as on **GPU regression**: a run that names its
+workflows is a re-test or a first look, and with `publish` off nothing is
+written. The plan knows the workflows a dispatch names: a lane whose only
+workflow is still switched off (`"enabled": false`) is tested when the
+dispatch names that workflow. To show a published result of one of these
+lanes again without testing, dispatch **GPU regression** with
+`report_only: true` and `lane=<the lane>`: it lists every lane of the
+registry.
+
+#### How a nightly or weekly run goes
+
+A per-commit run is over in five minutes, and the cron tests its commit again
+when something went wrong. A nightly or weekly run can take hours and cost
+dollars, and the lane's next run is a day or a week away. So
+`scripts/run_regression.py` runs a lane of these two cadences in its own way:
+
+| | Per-commit lane | Nightly or weekly lane |
+|---|---|---|
+| Jobs on the endpoint at once | all | the lane's `max_in_flight`, or `--max-in-flight` |
+| Attempts for a job | 2, the second right away | 1, and one pass at the end of the run |
+| Wait in RunPod's queue | 600 s, plus 60 s for each job before it | 1,800 s |
+| A look at a job | every 10 s | every 3 s |
+| The run's own deadline | none | the lane's `timeout_minutes` minus 25, or `--deadline-minutes` |
+| A workflow that was not tested | a warning. The cron tests the commit once more | **red** (exit code 1) |
+| The previous-run pointer | moves when every workflow produced outputs | moves on every full run |
+
+- **A few jobs at a time.** Fifty jobs submitted at once to two workers would
+  mostly be cancelled for waiting in the queue. A job is submitted only when
+  one of the lane's slots is free, so its queue clock starts when a worker can
+  take it. The runner then hands the next job to a worker itself, and the
+  worker waits, billed, until it does. So the runner looks at a job every 3
+  seconds, and the endpoint keeps an idle worker for 60.
+- **The deadline.** GitHub ends the lane's job after `timeout_minutes`. Before
+  the run submits a job, it asks whether the job could still be running 25
+  minutes before that. A job can take its `timeout_s` plus 900 seconds, plus
+  the 1,200 seconds more it may wait in the queue. When that does not fit, no
+  job is submitted: the workflow's cell says `"worker_status": "not_reached"`
+  (verdict `infra_error`), and the run goes on with the next workflow, which
+  may be smaller. So no job is in flight when the deadline comes, and the last
+  25 minutes belong to the publish and the report. `lanes.py validate`
+  refuses a lane whose `timeout_minutes` is 25 or less, and an enabled
+  workflow whose job can never fit before the deadline of a lane it runs on:
+  either would be `not_reached` in every run.
+- **A job the runner cannot see.** When the status of a job cannot be read
+  for 5 minutes (the runner's network, RunPod), the runner gives the job up
+  and cancels it, so it does not run on beside the second job the workflow
+  gets at the end of the run. The per-commit lanes have the same 5 minutes.
+- **Checkpoints.** After every 10 workflows the run writes a summary of what
+  it has, with `"partial": {"done": 10, "of": 55}`, and pushes it with the
+  workflow folders written so far. `done` counts the workflows that have a
+  result, not those the deadline did not reach. A run that dies, is cancelled
+  or loses its network leaves that behind. **GPU regression** with
+  `report_only: true` and the lane shows it ("The run that tested this commit
+  did not finish: 40 of 55 workflows have a result"), and the next run of the
+  commit is its second attempt. The run index is written by the final publish
+  alone, so a run that died is in no history table. A run that names its
+  workflows pushes nothing early. Nor does a second full run of a commit that
+  has the lane's full result (the cron's retry, a dispatch): that result stays
+  on the branch until the run is done, and a run that dies takes nothing away.
+- **The pass at the end.** When every workflow has had its one attempt, those
+  that were not tested for a reason that can pass (the queue, the network, a
+  worker error) are tried once more, while the deadline allows. Not tried
+  again: a job that used up its whole time, because a second one can cost
+  another hour (RunPod ended it, or the runner gave up on it, and its
+  `run.json` says `"reason": "timed_out"`). And a workflow that another job
+  would not change: `missing_model`, `model_access_error`, `not_reached`,
+  `bad_request`. The cell of a workflow that got its second job says
+  `"tries": 2`, whatever that job ended with.
+- **A red run.** The exit code is 1 when a workflow failed, as on every lane,
+  and also when one stayed untested. GitHub mails a red scheduled run, and
+  nothing else would tell anyone.
+- **A stopped run.** When a run is cancelled or reaches its time limit, GitHub
+  sends the step an interrupt, 7.5 seconds later a terminate, and 2.5 seconds
+  after that it kills the step. On the first signal the script cancels its
+  RunPod jobs in flight, and once more when RunPod has answered every
+  submission that was on its way: a job is known only then. That second pass
+  comes after 1 second at the earliest and after 4.5 at the latest. After 6
+  seconds the script ends, whatever RunPod has answered, so its last line is
+  out before the terminate. The line names the jobs it cancelled, and apart
+  from them any job whose cancel RunPod did not take: that one may run on,
+  and is to be cancelled by hand. It also counts the submissions RunPod had
+  not answered: each may have started a job that has no id yet, to be looked
+  for on the endpoint. There is no time to push anything then, which is what
+  the checkpoints are for. The step starts the script with `exec`, so the
+  script itself is the process that gets the signals.
+- **Who broke it.** A nightly run covers about 6 commits and a weekly run
+  about 44, and a workflow's last result is not always in the run before. So
+  the summary says, for each red workflow, how many commits lie between the
+  workflow's own last red or green result and this commit: `ranges`, with
+  `{"prev", "commits_between", "compare_url"}` per workflow id. The report
+  words the failure from it ("new since `e9afbcc`, 7 commits"), and a
+  workflow without an earlier result reads "first run". The open failing
+  chain carries the range too, so nobody is pointed at the pull request of
+  the newest of 44 commits. To find the commit, test single commits of the
+  range. The report prints the command:
+
+  ```
+  gh workflow run nightly-weekly.yml --repo Comfy-Org/comfyci-runpod-worker \
+      -f cadence=weekly -f commit=<sha> -f workflows=<id>
+  ```
+
+  Each such step publishes under its own commit with `scope`, moves no
+  pointer, and shortens the chain: six steps halve 44 commits down to one.
+  A step that fails becomes the chain's start, with the commits it counted
+  since the last pass. A step that passes becomes the chain's last pass. The
+  commits the chain's start counted then reach back past that pass, so the
+  open failure names "one of the commits since its last pass" with their
+  compare link and no number: only GitHub can count them, and a passing step
+  does not ask. So after a search that ends on a pass the reader gets a
+  compare link without a count, also when one commit is left. The page of the
+  failing run follows the chain from then on. Its block says "When this run
+  was made it had last passed at `e9afbcc`", names the commit of the later
+  pass, and gives the compare link from that pass without the count the run
+  recorded. In the lane's history each step's row says "1 of N workflows", so
+  a green step does not read as a green week. The row of a full run never
+  says so, also not one from before a workflow joined the lane.
+
+The keys a lane may add. Every one is optional, and `validate` checks its
+type:
+
+| Key | Read by | Meaning |
+|---|---|---|
+| `endpoint_name` | `runpod_endpoints.py create`, `validate` | the endpoint's name on RunPod (default `comfyci-<image>`). Lanes with the same name share one endpoint |
+| `workers_max` | `runpod_endpoints.py create`, `status` | the endpoint's largest number of workers (default `endpoint_defaults.workers.max`, 3) |
+| `disk_gb` | `runpod_endpoints.py create`, `status` | container disk of the endpoint's workers (default `endpoint_defaults.disk_gb`, 40) |
+| `idle_timeout_s` | `runpod_endpoints.py create`, `status` | how long a worker stays up after a job (default `endpoint_defaults.workers.idleTimeout`, 20) |
+| `env` | `runpod_endpoints.py create` | environment variables of the endpoint, on top of `endpoint_defaults.env` |
+| `gpu_pools` | `runpod_endpoints.py create`, `status` | the RunPod GPU pools the endpoint's workers run on, at least one (default `endpoint_defaults.gpu_pools`: `ADA_24`, the RTX 4090). The lane's `gpu` stays the label people read and selects nothing |
+| `data_center_ids` | `runpod_endpoints.py create`, `status` | the data centers the workers may run in, at least one (default `endpoint_defaults.data_center_ids`: `EU-RO-1`) |
+| `network_volumes` | `runpod_endpoints.py create`, `status`, `validate`, the manifest lint | the network volumes the workers mount (default `endpoint_defaults.network_volumes`: the model volume). `[]` means no volume: the lane must then say `"model_storage": "job"`, and a workflow that runs only on such lanes does not count against the volume's size |
+| `timeout_minutes` | `lanes.py cadence`, `nightly-weekly.yml`, `run_regression.py`, `validate` | the time limit of the lane's job (default 360, GitHub's own). On a nightly or weekly lane the run's own deadline is this minus 25, so `validate` asks for more than 25 there, and for every enabled workflow of the lane that its `timeout_s` plus 2,100 seconds is under that deadline |
+| `max_in_flight` | `run_regression.py` | how many jobs a run has on the endpoint at once (default: all of them, as on the per-commit lanes). `--max-in-flight` overrides it |
+| `model_storage` | the manifest lint, `sync_models.py` | `"job"`: the lane's models are not on the network volume. The model sync leaves out a workflow that runs only on such lanes, and the lint does not count it against the volume's size. Nothing fetches models for a job yet, so such a workflow ends as `missing_model` unless another lane's workflow puts the same files on the volume. The lint fails for an enabled one that does not find every file there. Default `"volume"` |
+
+None of them is published: the run index copies a fixed list of lane keys.
 
 ### Adding a lane
 
@@ -546,9 +1027,20 @@ The cu132 lane is the worked example.
    there. `min_cuda_driver` is the endpoint's host driver floor; RunPod's
    serverless 4090 hosts report CUDA 13.2 (driver 595.x). Merge, or build and
    provision from the branch first (see the cu132 order below).
-2. `build-image.yml` builds every buildable image on push to main (or dispatch
-   it from the branch with the image id) and tags it `:<image>` and
-   `:<image>-<sha>`. Every image CI builds bakes every pack in
+2. `build-image.yml` builds the images a push to main changed (or dispatch
+   it from the branch with the image id) and tags each `:<image>` and
+   `:<image>-<sha>`. A change to the Dockerfile, `src/`, `docker/` or
+   `manifest/custom_nodes.json` builds every buildable image. A change to
+   `lanes.json` alone builds only an image whose entry is new or differs
+   (`lanes.py images --since <commit>`), so adding a lane to an existing
+   image or writing an endpoint id builds and repoints nothing. A lane that
+   has its endpoint and moves to another image, leaves the `legacy` role or
+   is no longer `retired` does build that image: the build is what points the
+   endpoint at it. The commit to compare with is the head of the last push
+   run of the workflow that succeeded, so a build that failed is made up for
+   by the next push that starts the workflow, whatever that push changes.
+   When GitHub names no such run, it is the commit before the push. Every
+   image CI builds bakes every pack in
    `manifest/custom_nodes.json`, so a pack requirement that does not install
    on the lane's Python breaks the build. **Python 3.14**: the registry's
    `opencv-python(-headless)==4.12.0.88` pin needs `numpy<2.3`, and no numpy
@@ -567,7 +1059,12 @@ The cu132 lane is the worked example.
 
    The request comes from `endpoint_defaults` in `lanes.json` (pool, workers,
    volume, data center, registry credential, timeouts) plus the lane's CUDA
-   floor; `--dry-run` prints it, `--write` records the new id as the lane's
+   floor and the endpoint keys the lane names (`endpoint_name`,
+   `workers_max`, `disk_gb`, `idle_timeout_s`, `env`, `gpu_pools`,
+   `data_center_ids`, `network_volumes`, see
+   [Nightly and weekly lanes](#nightly-and-weekly-lanes) and
+   [A lane on another card](#a-lane-on-another-card)); `--dry-run` prints
+   it, `--write` records the new id as the lane's
    `endpoint_id`. Commit that. The account has a 10-worker quota across all
    endpoints; if the create is refused, give the lane `"workers_max": 2`.
    From then on `build-image.yml` repoints the lane at each new sha tag
@@ -586,6 +1083,100 @@ The cu132 lane is the worked example.
    `endpoint_id` is skipped), and ci.comfy.org lists it in the lane selector
    after the first publish.
 
+**A nightly or weekly lane** takes the same steps, with these differences:
+
+1. It runs an image that exists, so there is nothing to build: add only the
+   lane, with `"cadence": "nightly"` or `"weekly"`, the cadence as the first
+   word of its `label`, and its own `prefix`. The merge builds and repoints
+   nothing.
+2. Give it an endpoint of its own, not a per-commit lane's: name it with
+   `endpoint_name`, and put the endpoint's settings on the lane
+   (`workers_max`, `disk_gb`, `idle_timeout_s`, `env`) and the job's
+   `timeout_minutes`. Two lanes that share the endpoint carry the same
+   `endpoint_name` and the same settings.
+3. Create the endpoint once, for one of the lanes, from the tag the primary
+   lane's endpoint runs (`status` prints it). Look at the request first:
+
+   ```
+   python scripts/runpod_endpoints.py create --lane <lane id> \
+       --tag <image>-<sha> --dry-run
+   RUNPOD_API_KEY=... python scripts/runpod_endpoints.py create \
+       --lane <lane id> --tag <image>-<sha> --write
+   ```
+
+   A lane that shares the endpoint gets the same `endpoint_id` by hand.
+   Every variable in `env` that reads a RunPod secret needs that secret to
+   exist first. Count the workers before: the account's quota of 10 is over
+   all its endpoints, each of today's endpoints takes 3, and a retired
+   endpoint counts until it is at 0. If the create is refused, give the
+   lanes of the endpoint `"workers_max": 2`. Create it on the day the first
+   workflow of the cadence merges: RunPod lowers the workers of an endpoint
+   nobody uses, and until a first run nobody restores them.
+4. A reference-level workflow needs its golden on the lane (see
+   [Lanes](#lanes)). A smoke-level one needs nothing.
+5. Its cron picks the lane up from the first night or Sunday on which it has
+   an endpoint and an enabled workflow of its cadence. Until then
+   `python scripts/lanes.py cadence <cadence>` prints `[]` and says why.
+
+#### A lane on another card
+
+Every lane gets the GPU pool, the data center and the network volume of
+`endpoint_defaults`: the RTX 4090 pool in EU-RO-1, with the model volume. A
+lane can name its own with `gpu_pools`, `data_center_ids` and
+`network_volumes`. Each replaces the default list whole, and a key the lane
+leaves out keeps the default. A weekly lane for models that need more than
+24 GB, on the 96 GB pool, in three data centers, without the model volume:
+
+```json
+"py313-torch2.14.1-cu130-weekly-96gb": {
+  "label": "weekly · py3.13 / torch 2.14.1 / cu130 / RTX PRO 6000",
+  "python": "3.13", "torch": "2.14.1", "cuda": "13.0", "gpu": "RTX PRO 6000",
+  "cadence": "weekly", "blocking": false, "role": "lane", "layout": 2,
+  "prefix": "regression/lanes/py313-torch2.14.1-cu130-weekly-96gb",
+  "image": "cu130-t2141", "endpoint_id": null, "min_cuda_driver": "13.0",
+  "endpoint_name": "comfyci-cu130-weekly-96gb",
+  "gpu_pools": ["BLACKWELL_96"],
+  "data_center_ids": ["US-CA-2", "US-NC-1", "EUR-IS-2"],
+  "network_volumes": [], "model_storage": "job",
+  "workers_max": 1, "disk_gb": 120, "idle_timeout_s": 60,
+  "env": {"HF_TOKEN": "{{ RUNPOD_SECRET_hf_token }}"},
+  "max_in_flight": 1, "timeout_minutes": 350}
+```
+
+- **The pool.** `GET https://api.runpod.io/v2/catalog/gpus` (with the API
+  key) lists every card with its `pool`: `ADA_24` is the RTX 4090,
+  `ADA_48_PRO` the 48 GB cards (L40S, RTX 6000 Ada), `BLACKWELL_96` the RTX
+  PRO 6000 with 96 GB. With `?include=AVAILABILITY&product=SERVERLESS` it
+  also names the data centers that have each card now, and the CUDA versions
+  of their hosts (`min_cuda_driver` is the floor).
+- **`gpu` is the label.** It is published with the lane, and people read it
+  on the dashboard and in a PR comment. It selects nothing, so write the card
+  the pool gives.
+- **No volume.** A network volume lives in one data center, and only workers
+  there mount it. The model volume is in EU-RO-1, so a lane in other data
+  centers runs without it: `"network_volumes": []`. `validate` then asks for
+  `"model_storage": "job"`, the lint does not count a workflow that runs only
+  on such lanes against the volume, and the model sync does not download its
+  models. Nothing fetches models for a job yet, so such a lane cannot run
+  until that exists, and the lint fails for an enabled workflow with models
+  of its own on it.
+- **Another volume.** A lane may name a volume in its own data center
+  instead. The model sync fills only the volume of the primary lane's
+  endpoint, so the models have to be copied there by hand, and the lint
+  counts the lane's model files against `endpoint_defaults.volume_gb` like
+  those of any other lane.
+- **Its own endpoint.** Give the lane an `endpoint_name`. Lanes that share an
+  endpoint must name the same three lists.
+- **Its workflows.** A weekly workflow without a `lanes` list runs on every
+  weekly lane. So name this lane in the `lanes` list of each workflow that
+  needs the card, and the other weekly lane in the lists of the rest.
+- **Workers.** Count them before the create: the account's quota of 10 is
+  over all its endpoints.
+
+The steps are those of any lane: create the endpoint (step 3 above,
+`--dry-run` shows the pool, the data centers and the volumes it will ask
+for), then the references. `status` holds the endpoint to the lane's lists.
+
 ### Changing the primary lane
 
 1. In `lanes.json`, set `primary` to the new lane, give it `role: primary`
@@ -601,6 +1192,19 @@ The cu132 lane is the worked example.
 3. The run index (`index/lanes.json`) picks the new primary up at the next
    publish. To publish it at once, dispatch **Build run index** with
    `branch=master` and `lane=<new primary>` (CPU only).
+4. The nightly and weekly lanes follow the primary lane's image, and a lane
+   is tied to its image by its id and its prefix. So they are replaced, not
+   edited: add a `<new lane>-nightly` and a `<new lane>-weekly` lane on the
+   new image, with the endpoint keys and the `endpoint_id` of the old pair,
+   and retire the old pair (below) with `"endpoint_id": null`: the endpoint
+   is the new pair's now, and `status` holds the endpoint of a retired lane
+   to 0 workers. Point the endpoint at the new image (`runpod_endpoints.py
+   set-image --lane <new nightly lane> --tag <image>-<sha>`, one PATCH for
+   both lanes) and raise its CUDA floor in the RunPod console to the new
+   lanes' `min_cuda_driver`. No workflow
+   entry changes, except a `lanes` list that names the old nightly or weekly
+   lane. Smoke-level workflows need nothing else. Reference-level ones need
+   their goldens approved on the new lanes (see [Lanes](#lanes)).
 
 ### Retiring a lane
 
@@ -616,8 +1220,9 @@ last role, and every default-prefix path breaks if the layout-1 lane goes).
 3. Scale its endpoint to max 0 workers in the RunPod console, once no GPU
    regression run that started before the merge is still using it. Do not
    delete it yet: an idle endpoint costs nothing and max 0 frees its share of
-   the worker quota. ci.comfy.org needs to know the `retired` cadence, or it
-   shows the lane as stale a day after its last run.
+   the worker quota. `runpod_endpoints.py status` names a retired endpoint
+   that still has workers. ci.comfy.org needs to know the `retired` cadence,
+   or it shows the lane as stale a day after its last run.
 4. The model sync already follows the primary, so nothing depends on the
    retired endpoint. From now on always pass `lane=` to **Golden baselines**
    and **Build run index**.
@@ -656,10 +1261,8 @@ in order:
    refused, add `"workers_max": 2` to the lane for the create rather than
    scaling cu128 down while it is still the primary on main, and take it out
    again before you commit the `endpoint_id` (step 7 raises the endpoint to
-   3). Only `create` reads `workers_max`, so dropping it changes nothing on
-   the endpoint and a re-create gets 3, whereas dropping it after the merge
-   is one more `lanes.json` change on main, which rebuilds both images and
-   repoints both lanes again.
+   3). `create` and `status` read `workers_max`: dropping it changes nothing
+   on the endpoint, a re-create gets 3, and `status` then expects 3.
 4. Generate goldens from the branch (a fresh endpoint has no stale workers):
    `gh workflow run golden-baseline.yml --ref lanes-cu132 -f lane=py313-torch2.15.0-cu132 -f ref=v0.42.0 -f workflows=all -f bless=false`
    (v0.42.0 is the tag the cu130 goldens use). Inspect
@@ -669,10 +1272,15 @@ in order:
    A bless from the branch publishes the branch's registry to
    `index/lanes.json` (cu130 primary, cu128 retired; hence step 1) until
    main's next publish rewrites it; step 9 makes it stick.
-5. Merge. That starts **Build worker images** (rebuilds `cu130-t2141` and
-   `cu132-t2150` from scratch, then repoints both lanes) and **Sync models**
-   (on the cu130 endpoint), and the cron stops testing cu128 from its next
-   tick. Wait for both runs to finish.
+5. Merge. That starts **Build worker images** and **Sync models** (on the
+   cu130 endpoint), and the cron stops testing cu128 from its next tick. Wait
+   for both runs to finish. The build makes the images the merge changed and
+   repoints their lanes (see [Adding a lane](#adding-a-lane), step 2): both
+   `cu130-t2141` and `cu132-t2150` when the merge touches the Dockerfile,
+   `src/`, `docker/` or the pack registry, only an image whose entry is new
+   or changed on main otherwise, and none when the merge only adds a lane or
+   an endpoint id. A lane whose image was not built keeps the tag its
+   endpoint has.
 6. Expect the cron to test master HEAD on cu132 within minutes of the
    merge, before the repoint or before the stale workers are flushed, so on
    the branch's image or a mix of old and new workers. A commit is tested
@@ -693,8 +1301,9 @@ in order:
    the run is not cancelled (a cron tick that queues behind a running run
    cancels a pending dispatch; dispatch it again if so). In each lane's
    `runs/master/<sha>/summary.json`, every workflow's `env.image_sha` must
-   equal the merge commit, the sha in the new `-<sha>` image tags; one that
-   does not ran on a stale worker: flush again and re-dispatch. Re-bless
+   equal the merge commit, the sha in the new `-<sha>` image tags (for an
+   image the merge did not build: the sha in the tag its endpoint has); one
+   that does not ran on a stale worker: flush again and re-dispatch. Re-bless
    drifted workflows with `from_run`.
 9. Publish the primary flip: `gh workflow run build-index.yml -f branch=master -f lane=py313-torch2.14.1-cu130`.
 10. The `RUNPOD_ENDPOINT_ID` secret (set 2026-08-18, so the cu128 endpoint) is
@@ -868,7 +1477,9 @@ with Actions read on the frontend repo) is optional and reserved for phase 2
 2. **RunPod**: create a Network Volume (≥200 GB, datacenter with 4090
    availability), then one serverless endpoint per lane from its image with
    the volume attached (see *Lanes*). Optionally set `HF_TOKEN` as an endpoint
-   env var for gated models.
+   env var for gated models. The volume's size is `endpoint_defaults.volume_gb`
+   in `manifest/lanes.json`: change it there when the volume grows, because
+   the lint holds the manifest's model files to 90 % of it.
 3. **Repo secrets** (this repo): `RUNPOD_API_KEY`, and optionally `HF_TOKEN`
    (gated models; sent with the sync job) and `PULSE_GH_TOKEN` (PR comments,
    see above). Every lane names its endpoint in `manifest/lanes.json`;
@@ -974,6 +1585,93 @@ workflow's in these keys, and an image workflow's files do not change at all:
   that one rule, so approving a changed text closes its failing chain.
 - A cell in the run index has `"k": "text"`; its `mse`, `psnr`, `pct` and
   `th` are null.
+
+A smoke-level workflow (`"level": "smoke"`, see [Smoke level](#smoke-level))
+publishes the same files, with new keys after the ones a reference-level
+workflow has. A reference-level image workflow's files do not change at all:
+
+- Its cell in `summary.json` and its `comparison.json` end with
+  `"level": "smoke"` and `smoke` (after `output_kind`, when the kind is not
+  image). `detail`, `vs_golden`, `vs_previous`, `thresholds_used`,
+  `golden_tag` and the `previous_*` keys are null, and `figures` is false.
+  A cell of a workflow that did not finish has the three lists of `smoke`
+  empty.
+- `smoke.files` lists the output files, at most 50: `name`, `type` (`image`,
+  `text`, `audio`, `mesh`, `video`, or null for an extension that is not
+  checked), `bytes` and `sha256` as the worker reported them, `sent: false`
+  for a file the worker listed and did not send, `published: false` for a
+  file that is not on the results branch, and what was measured. Image:
+  `width`, `height`, `std`, `flat_share`. Text: `chars`, `words`. Audio:
+  `sample_rate`, `channels`, `bits`, `seconds`, `bytes_per_second`,
+  `pcm_md5`. Mesh: `vertices`, `faces`, `extent`. Video: `width`, `height`,
+  `frames`, `seconds`, `bytes_per_frame_mp`.
+- `smoke.problems` lists why the run does not pass, at most 20:
+  `{"file": name or null, "check": id, "text": sentence}`. The check ids are
+  `missing`, `decode`, `size`, `expect`, `blank`, `flat`, `empty`, `repeat`,
+  `duration`, `silent`, `nonfinite`, `geometry` and `frames`. The verdict is
+  `pass` when the workflow finished and this list is empty. `smoke.notes`
+  holds sentences that are not failures. File names come from the worker:
+  escape them, and the sentences that quote them.
+- `output_sha256` is the sha256 of the main output: the first PNG by name
+  for an image workflow, the text rule above for a text workflow, and for an
+  audio workflow the first `.flac` by name that starts with the workflow id.
+  `thumbnail` is set whenever the run wrote a PNG that can be read: one PNG
+  that cannot does not cost the others their preview.
+- **Which output files are published.** A smoke-level output need not repeat
+  from run to run, and the results branch only stays small because equal
+  files are stored once. So an output file of a smoke run is published when
+  it is at most 1 MiB, or when it has the sha256 the same file name had in
+  the workflow's previous result on the lane. A file that repeats is stored
+  from its second run on, and one that never repeats is never stored. Any
+  other file stays in the run's artifact, which GitHub keeps 90 days, and
+  its entry says `"published": false`. `run.json`, `comparison.json`, the
+  thumbnails and the measured facts are always published.
+- A cell in the run index has `"l": "smoke"`, after `k`. Its `mse`, `psnr`,
+  `pct`, `pv` and `g` are null, and `d` is `"inherited"` for a failure of a
+  workflow whose last verdict was already `fail`.
+- An open failing chain (`first_bad` in the index head) that a smoke cell
+  started carries `"level": "smoke"`. A workflow that changes its level while
+  it is red starts a new chain there, and the `prior_verdict` of a smoke cell
+  looks through an earlier failure at reference level: a failed smoke check
+  and an output that differs from a reference are not one failure. The
+  lane's `goldens` in `index/lanes.json` hold no entry for a smoke workflow,
+  and a chain is listed only for a workflow that is enabled on the lane.
+- A summary of a lane with the `nightly` or `weekly` cadence can carry
+  `published_new_bytes`: the bytes of the output files of its smoke-level
+  workflows that the run published and the previous result had not (what a
+  reference-level workflow published is not in it). Its report shows the
+  number. It carries `ranges` when a workflow is red: per workflow id
+  `{"prev", "commits_between", "compare_url"}`, the commits between the
+  workflow's own last red or green result and this commit. A workflow on its
+  first run has no entry. An index entry carries them as `wr`, per workflow
+  `{"n", "url", "prev"}`, and a chain that started in such an entry carries
+  `{"n", "url"}` as `range`. When a later run passed inside that range (the
+  chain's `prev_good` is no longer the range's `prev`), the chain's `range`
+  has `n` null and the compare link from `prev_good` to the chain's commit.
+- A summary with `"partial": {"done": n, "of": m}` is one that a nightly or
+  weekly run pushed before it had every result. The run's final summary
+  replaces it and has no such key. Read one that has it as "this run did not
+  finish": `n` workflows have a result (a workflow that the deadline did not
+  reach has a cell and is not counted), and the run index has no entry for
+  it.
+- A cell with `"worker_status": "not_reached"` (verdict `infra_error`) is a
+  workflow that a run did not start, because its job could still have been
+  running at the run's deadline. It has `error`, a sentence, and no
+  `run.json`. The `run.json` of a job that used up its whole time on a
+  nightly or weekly lane has `"reason": "timed_out"`. A cell with
+  `"tries": 2` is the result of the second job such a run gave the workflow
+  at its end.
+- `attempt` counts the lane's runs of the commit. A run that names its
+  workflows, or that publishes nothing, is none: its summary records the
+  attempts counted so far (at least 1). The report of such a run names no
+  attempt, and says of an untested workflow on a per-commit lane that the run
+  changes nothing for the cron.
+- An index entry with `"named": true` (after `s`, before `wr`) is that of a
+  summary with `scope`: a run that named its workflows at a commit without a
+  full result. No other entry has the key, and the lane's full run of the
+  commit takes it away. `latest`, in the index head and in the lane's
+  `branches` in `index/lanes.json`, is the newest entry without it, and null
+  when the lane has no such entry.
 
 ## Notes
 

@@ -248,6 +248,29 @@ def test_backfill_then_incremental_upsert(tmp_path):
     assert on_remote["count"] == 4
 
 
+def test_a_backfill_leaves_out_what_a_run_that_did_not_finish_pushed(tmp_path):
+    """A nightly or weekly run pushes a summary with `partial` every few
+    workflows, and its final publish writes the index. A run that died is in
+    no history table, and a rebuild of the index must not put it there."""
+    files = _seed_files()
+    died = _summary("ddd", 1725321600, "pass", IDENT, DIFF, "ccc", sha="s3")
+    files["regression/runs/master/ddd/summary.json"] = {**died, "partial": {"done": 1, "of": 9}}
+    remote = make_remote(tmp_path, files)
+    store = storage.GitHubStorage("local/test", "results", tmp_path / "wt", remote_url=str(remote))
+    builder = index_builder.IndexBuilder(store, "master", LANE, 1, LANES)
+    assert builder.backfill(with_meta=False, log=lambda *_: None) == 3
+    head = store.download_json(builder.head_path())
+    assert [e["c"] for e in head["entries"]] == ["ccc", "bbb", "aaa"]
+    assert head["first_bad"]["flux"]["commit"] == "bbb"  # the partial pass closed nothing
+    # A run of named workflows at that commit does not merge into what the dead
+    # run left. It replaces it with a summary of its own (`scope`), and its
+    # publish puts the commit in the index: a rebuild does too.
+    store.publish_summary("master", "ddd", {**died, "scope": ["flux"]})
+    store.finalize("a re-test at ddd")
+    assert builder.backfill(with_meta=False, log=lambda *_: None) == 4
+    assert store.download_json(builder.head_path())["entries"][0]["c"] == "ddd"
+
+
 def test_accepted_drift_closes_the_chain_and_refresh_sees_a_new_bless(tmp_path):
     remote = make_remote(tmp_path, _seed_files())
     store = storage.GitHubStorage("local/test", "results", tmp_path / "wt", remote_url=str(remote))
@@ -374,3 +397,375 @@ def test_blessing_a_changed_text_closes_its_failing_chain(tmp_path):
     assert store.download_json(builder.head_path())["first_bad"] == {}
     assert store.download_json(builder.lanes_path())["lanes"][LANE]["goldens"]["llm"] == {
         "tag": "ccc", "sha": "t2"}
+
+
+# -- smoke-level workflows ------------------------------------------------------------
+def _smoke_summary(commit, ts, verdict, sha="m1", prior=None, ct=None, **cell):
+    wf = {"workflow_id": "mesh", "worker_status": "ok", "verdict": verdict, "detail": None,
+          "vs_golden": None, "vs_previous": None, "thresholds_used": None, "golden_tag": None,
+          "previous_commit": None, "previous_verdict": None, "figures": False,
+          "output_sha256": sha, "thumbnail": "mesh_00001_.webp",
+          "timings": {"prompt_exec_s": 104.2}, "vram_peak_mb": 21480.0, "comfy_version": "0.45.0",
+          "custom_nodes": None, "level": "smoke",
+          "smoke": {"files": [], "problems": [], "notes": []},
+          "prior_verdict": prior, "prior_commit": None, **cell}
+    summary = {"branch": "master", "commit": commit, "run_ts": ts,
+               "overall": "fail" if verdict in index_builder.RED else "pass",
+               "workflows": {"mesh": wf}}
+    if ct:
+        summary["commit_meta"] = {"subject": "x", "author": "dev", "pr": None, "committed_ts": ct}
+    return summary
+
+
+def _smoke_entry(*args, **kw):
+    return index_builder.entry_from_summary(_smoke_summary(*args, **kw), LANE, 1)
+
+
+def test_a_smoke_cell_names_its_level_and_has_no_comparison_numbers():
+    cell = _smoke_entry("a" * 40, 1700000100, "pass")["w"]["mesh"]
+    assert cell == {"v": "pass", "d": None, "sha": "m1", "mse": None, "psnr": None, "pct": None,
+                    "pv": None, "exec": 104.2, "vram": 21480.0, "g": None,
+                    "th": "mesh_00001_.webp", "l": "smoke"}
+    assert list(cell)[-1] == "l"
+    # After the kind, before the packs: `l` is the next key a reader of `k` meets.
+    packs = {"ComfyUI-KJNodes": {"import": "ok"}}
+    cell = _smoke_entry("a" * 40, 1700000100, "pass", output_kind="audio",
+                        custom_nodes=packs)["w"]["mesh"]
+    assert list(cell)[-3:] == ["k", "l", "cn"] and (cell["k"], cell["l"]) == ("audio", "smoke")
+    # Absent means reference. Nothing else than "smoke" is written.
+    for level in ("reference", None, "Smoke", 1, ["smoke"]):
+        assert "l" not in _smoke_entry("a" * 40, 1700000100, "pass", level=level)["w"]["mesh"]
+    image = index_builder.entry_from_summary(
+        _summary("d" * 40, 1700000300, "pass", IDENT, IDENT, "c" * 40, sha="s1"), LANE, 1)
+    assert "l" not in image["w"]["flux"] and "wr" not in image
+
+
+def test_a_standing_smoke_failure_is_marked_inherited():
+    """The mark a standing reference failure has, so a reader that looks for
+    "started here" does not announce the same smoke failure on every run."""
+    def detail(verdict, prior, **cell):
+        return _smoke_entry("b" * 40, 1700000100, verdict, prior=prior, **cell)["w"]["mesh"]["d"]
+
+    assert detail("fail", "fail") == "inherited"
+    assert detail("fail", "pass") is None           # new at this run
+    assert detail("fail", "execution_error") is None
+    assert detail("fail", None) is None             # its first run
+    assert detail("pass", "fail") is None
+    assert detail("execution_error", "fail") is None
+    # Nothing is compared at smoke level, so the cell's own detail says nothing.
+    assert detail("fail", "pass", detail="new_drift") is None
+    # A reference cell is classified as it always was, whatever came before it.
+    s = _summary("b" * 40, 1700000100, "fail", DIFF, DIFF, "a" * 40)
+    s["workflows"]["flux"]["prior_verdict"] = "fail"
+    assert index_builder.entry_from_summary(s, LANE, 1)["w"]["flux"]["d"] == "new_drift"
+
+
+def test_a_smoke_chain_opens_with_its_level_and_closes_on_the_next_pass():
+    runs = [_smoke_entry("a", 1, "pass"), _smoke_entry("b", 2, "fail", prior="pass"),
+            _smoke_entry("c", 3, "infra_error"), _smoke_entry("d", 4, "fail", prior="fail")]
+    assert index_builder.first_bad(runs) == {"mesh": {
+        "commit": "b", "run_ts": 2, "kind": "fail", "prev_good": "a", "pr": None, "author": None,
+        "golden": None, "runs": 2, "level": "smoke"}}
+    assert index_builder.first_bad([*runs, _smoke_entry("e", 5, "pass", prior="fail")]) == {}
+    assert index_builder.smoke_workflows(list(reversed(runs))) == {"mesh"}
+
+
+def test_a_workflow_that_changes_its_level_while_it_is_red_starts_a_new_chain():
+    """An output that differs from its reference and a failed smoke check are
+    not one failure. The chain used to keep the level and the reference of
+    the cell that opened it: a smoke failure read as an output that changed
+    against a reference the workflow no longer has, and the other way round."""
+    moved = [_entry("p", 0, "pass", wf="mesh"), _entry("a", 1, "fail", wf="mesh"),
+             _smoke_entry("b", 2, "fail"), _smoke_entry("c", 3, "fail", prior="fail")]
+    assert index_builder.first_bad(moved[:2])["mesh"] == {
+        "commit": "a", "run_ts": 1, "kind": "fail", "prev_good": "p", "pr": None, "author": None,
+        "golden": "v0.33.2", "runs": 1}
+    # The smoke chain starts at the first smoke failure. The last pass is kept.
+    assert index_builder.first_bad(moved)["mesh"] == {
+        "commit": "b", "run_ts": 2, "kind": "fail", "prev_good": "p", "pr": None, "author": None,
+        "golden": None, "runs": 2, "level": "smoke"}
+    # Back at reference level, still red: a reference chain again, from there.
+    back = [*moved, _entry("d", 4, "fail", wf="mesh"), _entry("e", 5, "execution_error", wf="mesh")]
+    assert index_builder.first_bad(back)["mesh"] == {
+        "commit": "d", "run_ts": 4, "kind": "fail", "prev_good": "p", "pr": None, "author": None,
+        "golden": "v0.33.2", "runs": 2}
+    # A change of the kind of failure alone is one chain, as it was.
+    kinds = [_entry("a", 1, "execution_error", wf="mesh"), _entry("b", 2, "fail", wf="mesh")]
+    assert (index_builder.first_bad(kinds)["mesh"]["commit"],
+            index_builder.first_bad(kinds)["mesh"]["runs"]) == ("a", 2)
+
+    # The failure before it, for the cell of the first smoke check: a reference
+    # failure is looked through, so the smoke failure is not inherited from it.
+    assert index_builder.prior_verdicts(moved[:2], "b") == {
+        "mesh": {"commit": "a", "verdict": "fail"}}
+    assert index_builder.prior_verdicts(moved[:2], "b", smoke=["mesh"]) == {
+        "mesh": {"commit": "p", "verdict": "pass"}}
+    assert index_builder.prior_verdicts(moved[1:2], "b", smoke={"mesh"}) == {}
+    # A smoke failure before it is the same failure, and an execution error or
+    # a pass at either level is a result.
+    assert index_builder.prior_verdicts(moved, "d", smoke={"mesh"})["mesh"] == {
+        "commit": "c", "verdict": "fail"}
+    assert index_builder.prior_verdicts(back, "f", smoke={"mesh"})["mesh"] == {
+        "commit": "e", "verdict": "execution_error"}
+    # Only for the workflows that are named: another one keeps the rule it had.
+    assert index_builder.prior_verdicts(moved[:2], "b", smoke={"other"})["mesh"]["commit"] == "a"
+
+
+def test_the_newest_cell_says_whether_a_workflow_is_at_smoke_level():
+    moved = [_entry("a", 1, "fail", wf="mesh"), _smoke_entry("b", 2, "fail", prior="fail")]
+    assert index_builder.smoke_workflows(moved) == {"mesh"}
+    # The newest cell decides, in commit order: this workflow is at reference level again.
+    back = [*moved, _entry("c", 3, "pass", wf="mesh")]
+    assert index_builder.smoke_workflows(back) == set()
+    assert index_builder.smoke_workflows([]) == set()
+
+
+def test_an_entry_carries_the_range_of_each_workflow_and_a_chain_the_one_it_opened_with():
+    ranges = {"mesh": {"prev": "p" * 40, "commits_between": 7, "compare_url": "u7"},
+              "other": {"prev": "q" * 40, "commits_between": None, "compare_url": "u"},
+              "odd": "not a range"}
+    summary = {**_smoke_summary("b", 2, "fail", prior="pass"), "ranges": ranges}
+    entry = index_builder.entry_from_summary(summary, LANE, 1)
+    # `prev` is where the count starts: the workflow's last result when the run was made.
+    assert entry["wr"] == {"mesh": {"n": 7, "url": "u7", "prev": "p" * 40},
+                           "other": {"n": None, "url": "u", "prev": "q" * 40}}
+    assert list(entry)[-1] == "wr"
+    for none in ({}, None, ["mesh"]):
+        assert "wr" not in index_builder.entry_from_summary({**summary, "ranges": none}, LANE, 1)
+    chain = index_builder.first_bad([_smoke_entry("p" * 40, 1, "pass"), entry,
+                                     _smoke_entry("c", 3, "fail", prior="fail")])["mesh"]
+    # "A run that covered 7 commits": the chain's commit is only the newest of them.
+    assert chain == {"commit": "b", "run_ts": 2, "kind": "fail", "prev_good": "p" * 40,
+                     "pr": None, "author": None, "golden": None, "runs": 2, "level": "smoke",
+                     "range": {"n": 7, "url": "u7"}}
+    # The range is that of the run that opened the chain, for this workflow.
+    late = index_builder.entry_from_summary(
+        {**_smoke_summary("c", 3, "fail", prior="fail"), "ranges": ranges}, LANE, 1)
+    assert "range" not in index_builder.first_bad([_smoke_entry("b", 2, "fail"), late])["mesh"]
+    other = {**entry, "wr": {"other": {"n": 3, "url": "u", "prev": "q" * 40}}}
+    assert "range" not in index_builder.first_bad([other])["mesh"]
+
+
+def test_a_pass_inside_the_range_of_a_chain_takes_its_count_away():
+    """A step of a search for the commit: a run of the one workflow at a
+    commit inside the range. When it passes, the chain has a nearer last pass
+    and fewer commits to look at than its first run counted. The index stated
+    the old count next to the new last pass."""
+    first, middle, last = "1" * 40, "5" * 40, "9" * 40
+    compare = "https://github.com/Comfy-Org/ComfyUI/compare"
+    ranges = {"mesh": {"prev": first, "commits_between": 8,
+                       "compare_url": f"{compare}/{first}...{last}"}}
+    failing = index_builder.entry_from_summary(
+        {**_smoke_summary(last, 9, "fail", prior="pass", ct=90), "ranges": ranges}, LANE, 1)
+    runs = [_smoke_entry(first, 1, "pass", ct=10), failing]
+    assert index_builder.first_bad(runs)["mesh"]["range"] == {
+        "n": 8, "url": f"{compare}/{first}...{last}"}
+    # The step is tested later and stands earlier: commit order decides.
+    step = _smoke_entry(middle, 12, "pass", prior="pass", ct=50)
+    chain = index_builder.first_bad([*runs, step])["mesh"]
+    assert (chain["commit"], chain["prev_good"]) == (last, middle)
+    assert chain["range"] == {"n": None, "url": f"{compare}/{middle}...{last}"}
+    # A step that fails starts the chain itself, with the range it counted.
+    near = {"mesh": {"prev": middle, "commits_between": 2,
+                     "compare_url": f"{compare}/{middle}...{'7' * 40}"}}
+    failed_step = index_builder.entry_from_summary(
+        {**_smoke_summary("7" * 40, 13, "fail", prior="pass", ct=70), "ranges": near}, LANE, 1)
+    chain = index_builder.first_bad([*runs, step, failed_step])["mesh"]
+    assert (chain["commit"], chain["prev_good"], chain["runs"]) == ("7" * 40, middle, 2)
+    assert chain["range"] == {"n": 2, "url": f"{compare}/{middle}...{'7' * 40}"}
+    # The last step passes right before it: one commit is left, and still no number.
+    done = _smoke_entry("6" * 40, 14, "pass", prior="pass", ct=60)
+    chain = index_builder.first_bad([*runs, step, failed_step, done])["mesh"]
+    assert chain["range"] == {"n": None, "url": f"{compare}/{'6' * 40}...{'7' * 40}"}
+    assert index_builder.chain_range({"n": 3, "url": "u", "prev": "a"}, "a", "c") == {
+        "n": 3, "url": "u"}
+    # A range that does not say where it starts cannot be taken for the chain's.
+    assert index_builder.chain_range({"n": 3, "url": "u"}, "a", "c") == {
+        "n": None, "url": f"{compare}/a...c"}
+    # A chain without a pass before it has nothing to compare with.
+    assert index_builder.chain_range({"n": 3, "url": "u", "prev": "a"}, None, "c") == {
+        "n": None, "url": None}
+
+
+def test_merge_entry_takes_the_ranges_of_the_newest_summary():
+    old = {"c": "x", "t": 1, "o": "fail", "w": {"mesh": {"v": "fail"}, "b": {"v": "fail"}},
+           "wr": {"mesh": {"n": 7, "url": "u"}, "b": {"n": 7, "url": "u"}}}
+    new = {"c": "x", "t": 2, "o": "fail", "w": {"mesh": {"v": "pass"}},
+           "wr": {"b": {"n": 7, "url": "u"}}}
+    assert index_builder.merge_entry(old, new)["wr"] == {"b": {"n": 7, "url": "u"}}
+    # A summary without ranges has no red cell left that covers several commits.
+    assert "wr" not in index_builder.merge_entry(old, {"c": "x", "t": 2, "o": "pass",
+                                                       "w": {"mesh": {"v": "pass"}}})
+    assert "wr" not in index_builder.merge_entry({"c": "x", "t": 1, "w": {}},
+                                                 {"c": "x", "t": 2, "w": {}})
+
+
+def test_the_entry_of_a_run_that_named_its_workflows_says_so():
+    """A summary with `scope` is that of a run that named its workflows, at a
+    commit without a full result. Nothing in its entry said so: a reader could
+    only count its workflows against the lane's of today, and then took an
+    older full run for such a run once the lane had gained a workflow."""
+    full = _smoke_summary("b", 2, "fail", prior="pass")
+    plain = index_builder.entry_from_summary(full, LANE, 1)
+    assert "named" not in plain
+    entry = index_builder.entry_from_summary({**full, "scope": ["mesh"]}, LANE, 1)
+    # The entry of a full run with one key more, at its end.
+    assert list(entry) == [*plain, "named"] and entry["named"] is True
+    assert {k: v for k, v in entry.items() if k != "named"} == plain
+    # The ranges keep the last place.
+    ranges = {"mesh": {"prev": "p" * 40, "commits_between": 7, "compare_url": "u7"}}
+    both = index_builder.entry_from_summary({**full, "scope": ["mesh"], "ranges": ranges}, LANE, 1)
+    assert list(both)[-2:] == ["named", "wr"]
+    # Any `scope` marks it, also an empty one. A re-test that was merged into
+    # the lane's full result has none (`retests`), and is the lane's run still.
+    assert index_builder.entry_from_summary({**full, "scope": []}, LANE, 1)["named"] is True
+    retested = {**full, "retests": [{"run_ts": 3, "workflows": ["mesh"]}]}
+    assert "named" not in index_builder.entry_from_summary(retested, LANE, 1)
+    # A second run of named workflows at the commit keeps the mark. The lane's
+    # full run of the commit takes it away.
+    assert index_builder.merge_entry(entry, {**entry, "t": 3})["named"] is True
+    merged = index_builder.merge_entry(entry, {**plain, "t": 4})
+    assert "named" not in merged and merged["t"] == 4
+
+
+def test_a_run_that_named_its_workflows_is_not_the_lanes_latest_run(tmp_path):
+    """Pages read `latest`, in the head and in lanes.json, as the lane's run.
+    A run of one workflow at the newest commit took that place: a lane with a
+    failing workflow read as green, from a run that had not tested it."""
+    remote = make_remote(tmp_path, _seed_files())
+    store = storage.GitHubStorage("local/test", "results", tmp_path / "wt", remote_url=str(remote))
+    builder = index_builder.IndexBuilder(store, "master", LANE, 1, LANES)
+    builder.backfill(with_meta=False, log=lambda *_: None)
+
+    def latest():
+        lanes = store.download_json(builder.lanes_path())["lanes"][LANE]["branches"]["master"]
+        head = store.download_json(builder.head_path())
+        assert lanes["count"] == head["count"] == len(head["entries"])
+        return head["latest"], lanes["latest"], head["entries"][0]["c"]
+
+    full = {"commit": "ccc", "run_ts": 1725235200, "overall": "fail"}
+    assert latest() == (full, full, "ccc")
+
+    # One workflow alone, at a newer commit, and it passes.
+    named = _summary("ddd", 1725321600, "pass", IDENT, None, None, sha="s3")
+    builder.upsert([index_builder.entry_from_summary({**named, "scope": ["flux"]}, LANE, 1)])
+    assert latest() == (full, full, "ddd")
+    head = store.download_json(builder.head_path())
+    assert head["entries"][0]["named"] is True and head["count"] == 4
+    # Its row is in the history, and its pass closes the workflow's chain.
+    assert head["first_bad"] == {}
+    # The lane's own run of that commit takes the place, and the mark goes.
+    builder.upsert([index_builder.entry_from_summary({**named, "run_ts": 1725325200}, LANE, 1)])
+    newest = {"commit": "ddd", "run_ts": 1725325200, "overall": "pass"}
+    assert latest() == (newest, newest, "ddd")
+    assert "named" not in store.download_json(builder.head_path())["entries"][0]
+
+    # A lane that only ever had such runs has no latest run.
+    other = index_builder.IndexBuilder(store, "next", LANE, 1, LANES)
+    other.upsert([index_builder.entry_from_summary({**named, "scope": ["flux"]}, LANE, 1)])
+    assert store.download_json(other.head_path())["latest"] is None
+    assert store.download_json(other.head_path())["count"] == 1
+    assert store.download_json(other.lanes_path())["lanes"][LANE]["branches"]["next"] == {
+        "latest": None, "count": 1, "shards": ["2024-09"]}
+
+
+def test_a_run_of_another_workflow_does_not_open_an_accepted_chain_again(tmp_path):
+    """Accepted drift was read from the newest entry. A run that named one
+    workflow at a newer commit holds no cell of the others, so a chain that
+    a bless had accepted was listed as open until the lane's next full run:
+    a day on a nightly lane."""
+    remote = make_remote(tmp_path, _seed_files())
+    store = storage.GitHubStorage("local/test", "results", tmp_path / "wt", remote_url=str(remote))
+    builder = index_builder.IndexBuilder(store, "master", LANE, 1, LANES)
+    builder.backfill(with_meta=False, log=lambda *_: None)
+    store.upload_json("regression/golden/flux/current.json",
+                      {"tag": "v0.38.0", "output_sha256": "s2"})
+    builder.refresh()
+    assert store.download_json(builder.head_path())["first_bad"] == {}
+
+    # Another workflow alone, at a newer commit.
+    named = _summary("ddd", 1725321600, "pass", IDENT, None, None, sha="o1")
+    named["workflows"] = {"other": {**named["workflows"]["flux"], "workflow_id": "other"}}
+    builder.upsert([index_builder.entry_from_summary({**named, "scope": ["other"]}, LANE, 1)])
+    head = store.download_json(builder.head_path())
+    assert head["entries"][0]["named"] is True and set(head["entries"][0]["w"]) == {"other"}
+    assert head["first_bad"] == {}
+    # The golden of the workflow it did not test stays in the lane's list.
+    assert store.download_json(builder.lanes_path())["lanes"][LANE]["goldens"]["flux"] == {
+        "tag": "v0.38.0", "sha": "s2"}
+    # A run of the workflow itself still decides: an output that is not the golden opens it.
+    again = _summary("eee", 1725408000, "fail", DIFF, DIFF, "ccc", sha="s9")
+    builder.upsert([index_builder.entry_from_summary({**again, "scope": ["flux"]}, LANE, 1)])
+    assert set(store.download_json(builder.head_path())["first_bad"]) == {"flux"}
+
+
+def _reference_then_smoke(tmp_path):
+    """A workflow that passed at reference level (reference sha m1), then moved
+    to smoke level. Its reference files are still on the results branch."""
+    remote = make_remote(tmp_path, {
+        "regression/latest/master.json": {"commit": "aaa"},
+        "regression/golden/mesh/current.json": {"tag": "v1", "output_sha256": "m1"},
+        "regression/golden/flux/current.json": {"tag": "v0.33.2", "output_sha256": "s1"}})
+    store = storage.GitHubStorage("local/test", "results", tmp_path / "wt", remote_url=str(remote))
+    builder = index_builder.IndexBuilder(store, "master", LANE, 1, LANES)
+    first = _summary("aaa", 1722470400, "pass", IDENT, None, None, sha="s1")
+    first["workflows"]["mesh"] = {**first["workflows"]["flux"], "workflow_id": "mesh",
+                                  "golden_tag": "v1", "output_sha256": "m1"}
+    builder.upsert([index_builder.entry_from_summary(first, LANE, 1)])
+    return store, builder
+
+
+def test_a_smoke_failure_is_never_accepted_drift_of_a_left_over_reference(tmp_path, monkeypatch):
+    store, builder = _reference_then_smoke(tmp_path)
+    goldens = store.download_json(builder.lanes_path())["lanes"][LANE]["goldens"]
+    assert goldens == {"flux": {"tag": "v0.33.2", "sha": "s1"}, "mesh": {"tag": "v1", "sha": "m1"}}
+
+    # At smoke level it fails, with the very bytes the old reference has.
+    looked_up = []
+    lookup = builder._golden_sha
+    monkeypatch.setattr(builder, "_golden_sha", lambda wf: looked_up.append(wf) or lookup(wf))
+    second = _smoke_summary("bbb", 1725148800, "fail", sha="m1", prior="pass")
+    second["workflows"]["flux"] = _wf("fail", DIFF, DIFF, "aaa", sha="s1")
+    builder.upsert([index_builder.entry_from_summary(second, LANE, 1)])
+    head = store.download_json(builder.head_path())
+    # The chain stays: the sha of a reference that no longer counts closes nothing.
+    assert head["first_bad"]["mesh"]["commit"] == "bbb"
+    assert head["first_bad"]["mesh"]["level"] == "smoke"
+    # A reference workflow whose output is its blessed reference is accepted, as before.
+    assert "flux" not in head["first_bad"]
+    # No reference is read for the smoke workflow, and the lane no longer lists one.
+    assert looked_up == ["flux"]
+    assert store.download_json(builder.lanes_path())["lanes"][LANE]["goldens"] == {
+        "flux": {"tag": "v0.33.2", "sha": "s1"}}
+    builder.refresh()
+    assert "mesh" in store.download_json(builder.head_path())["first_bad"]
+
+    # Back at reference level, a bless names the workflow: its reference counts again.
+    builder.refresh(("mesh",))
+    assert store.download_json(builder.head_path())["first_bad"] == {}
+    assert store.download_json(builder.lanes_path())["lanes"][LANE]["goldens"]["mesh"] == {
+        "tag": "v1", "sha": "m1"}
+
+
+def test_a_chain_is_listed_only_while_the_lane_runs_its_workflow(tmp_path):
+    """A workflow that was renamed, moved to another cadence or removed while
+    it was red would keep its chain open for ever: no later run closes it."""
+    store, builder = _reference_then_smoke(tmp_path)
+    red = _smoke_summary("bbb", 1725148800, "fail", sha="m2", prior="pass")
+    red["workflows"]["flux"] = _wf("fail", DIFF, DIFF, "aaa", sha="s2")
+    builder.upsert([index_builder.entry_from_summary(red, LANE, 1)])
+    assert sorted(store.download_json(builder.head_path())["first_bad"]) == ["flux", "mesh"]
+
+    # The next run is of a manifest without `mesh`: run_regression.py names what the lane runs.
+    running = index_builder.IndexBuilder(store, "master", LANE, 1, LANES, active=["flux"])
+    third = _summary("ccc", 1725235200, "fail", DIFF, IDENT, "bbb", sha="s2")
+    running.upsert([index_builder.entry_from_summary(third, LANE, 1)])
+    head = store.download_json(running.head_path())
+    assert sorted(head["first_bad"]) == ["flux"] and head["first_bad"]["flux"]["runs"] == 2
+    # Its history stays, only the open chain goes.
+    assert [sorted(e["w"]) for e in head["entries"]] == [["flux"], ["flux", "mesh"],
+                                                        ["flux", "mesh"]]
+    # Without the ids (a bless, a backfill) every chain is listed, as before.
+    builder.refresh()
+    assert sorted(store.download_json(builder.head_path())["first_bad"]) == ["flux", "mesh"]
+    assert index_builder.IndexBuilder(store, "master", LANE, 1, LANES, active=()).active == set()

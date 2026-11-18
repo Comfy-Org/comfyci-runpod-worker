@@ -16,6 +16,21 @@ a summary that records infra errors (RunPod, queue, checkout, model volume,
 pack install: not a verdict on the commit), and a marker with no summary. A
 dispatch that names a commit always runs.
 
+A run that names its workflows tests only those. When the commit had no result
+of a full run yet, its summary lists them under `scope`. Such a summary is not
+the lane's result of the commit, so it counts as no summary here: the cron
+still tests the commit, and that run replaces the summary. Such a run pushes
+no start marker either, so it is not counted as an attempt.
+
+A nightly or weekly run pushes what it has every few workflows, with `partial`
+in the summary. A summary that still says so belongs to a run that did not
+finish. It counts as a start marker without a result: one more attempt.
+
+An untested workflow is a reason for the retry only when another run could
+test it. One whose models are not on the volume, whose model host refuses a
+file, or that the run's deadline did not reach (NO_RETRY) would end the same
+way, so a summary with only such workflows untested is left alone.
+
   python regression_skip.py --commit SHA [--explicit] [--summary FILE]
                             [--attempt FILE] [--latest FILE]
 
@@ -34,6 +49,10 @@ from pathlib import Path
 
 # Standard library only, like lanes.py: run_regression.py imports it too.
 MAX_ATTEMPTS = 2
+# Worker statuses of an untested workflow that another run right away would
+# not change: its models are not on the volume, the model host refuses a file,
+# or the run's deadline came before the workflow could start.
+NO_RETRY = frozenset({"missing_model", "model_access_error", "not_reached"})
 
 
 def _count(record: dict | None) -> int:
@@ -47,10 +66,24 @@ def _count(record: dict | None) -> int:
         return 1
 
 
+def is_scoped(summary: dict | None) -> bool:
+    """A summary of named workflows only (`scope`): not the lane's result of the commit."""
+    return bool(summary) and "scope" in summary
+
+
+def is_partial(summary: dict | None) -> bool:
+    """A summary a run pushed before it had every result (`partial`). The
+    run's final summary replaces it, so one that is still there belongs to a
+    run that did not finish."""
+    return bool(summary) and "partial" in summary
+
+
 def attempts(summary: dict | None, marker: dict | None = None) -> int:
     """Attempts already spent on a commit: the latest of its summary and its
-    start marker (a run that died after pushing its marker still counts)."""
-    return max(_count(summary), _count(marker))
+    start marker (a run that died after pushing its marker still counts, and
+    so does one that left a partial summary). A summary of named workflows
+    only is not an attempt."""
+    return max(_count(None if is_scoped(summary) else summary), _count(marker))
 
 
 def next_attempt(summary: dict | None, marker: dict | None = None) -> int:
@@ -58,11 +91,23 @@ def next_attempt(summary: dict | None, marker: dict | None = None) -> int:
     return attempts(summary, marker) + 1
 
 
+def untested(summary: dict) -> list[str]:
+    """The worker status of each workflow of a summary that was not tested
+    (None for a cell that names none)."""
+    return [(wr or {}).get("worker_status")
+            for wr in (summary.get("workflows") or {}).values()
+            if (wr or {}).get("verdict") == "infra_error"]
+
+
 def has_infra_error(summary: dict) -> bool:
-    if summary.get("has_infra_error"):
-        return True
-    return any((wr or {}).get("verdict") == "infra_error"
-               for wr in (summary.get("workflows") or {}).values())
+    """Whether a summary has an untested workflow that another run could
+    test: the reason for the cron's retry. A workflow whose status is in
+    NO_RETRY is not one. A summary that says it has infra errors and shows no
+    such cell is taken at its word."""
+    statuses = untested(summary)
+    if statuses:
+        return any(not (isinstance(status, str) and status in NO_RETRY) for status in statuses)
+    return bool(summary.get("has_infra_error"))
 
 
 def decide(commit: str, summary: dict | None = None, latest: dict | None = None,
@@ -78,10 +123,22 @@ def decide(commit: str, summary: dict | None = None, latest: dict | None = None,
         return False, f"{short} has a published summary that could not be read; {again}"
     if marker and marker.get("unreadable"):
         return False, f"{short} has an attempt marker that could not be read; {again}"
+    scoped = is_scoped(summary)
+    # A run that did not finish left what it had: counted as an attempt, like
+    # a start marker, and no more a result than one. No summary is both: only
+    # a full run pushes on its way, and a run of named workflows at such a
+    # commit replaces what it finds.
+    partial = is_partial(summary)
     n = attempts(summary, marker)
+    if scoped or partial:
+        summary = None
     if summary:
         verdict = f"overall {summary.get('overall')}"
         if not has_infra_error(summary):
+            held = sorted({s for s in untested(summary) if isinstance(s, str)})
+            if held:
+                verdict += (f", untested workflows that another run would not test either: "
+                            f"{', '.join(held)}")
             return False, f"{short} already published on this lane ({verdict}); {again}"
         if n < MAX_ATTEMPTS:
             return True, (f"{short} attempt {n} had infra errors; retrying "
@@ -90,12 +147,20 @@ def decide(commit: str, summary: dict | None = None, latest: dict | None = None,
                        f"attempts); {again}")
     if latest and latest.get("commit") == commit:
         return False, f"{short} is the lane's previous-run pointer; already tested"
+    if partial:
+        if n < MAX_ATTEMPTS:
+            return True, (f"{short} attempt {n} did not finish; retrying "
+                          f"(attempt {n + 1} of {MAX_ATTEMPTS})")
+        return False, f"{short} started {n} attempts on this lane and none finished; {again}"
     if marker:
         if n < MAX_ATTEMPTS:
             return True, (f"{short} attempt {n} started but published no result; retrying "
                           f"(attempt {n + 1} of {MAX_ATTEMPTS})")
         return False, (f"{short} started {n} attempts on this lane and none published a "
                        f"result; {again}")
+    if scoped:
+        return True, (f"{short} has a result for named workflows only on this lane; testing "
+                      "every workflow of the lane")
     return True, f"{short} has no published result on this lane yet"
 
 

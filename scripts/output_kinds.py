@@ -7,6 +7,9 @@ comparison with the reference is held to, whether it passes, what is rendered
 next to the outputs, which sha256 identifies the output, and whether a
 reference may be approved.
 
+"audio" is a kind without a comparator so far: an audio workflow runs at
+smoke level only (smoke.py), where no output is compared.
+
 Standard library only, like lanes.py and regression_skip.py: run_report.py
 imports the text helpers and renders without installing anything. The image
 comparator needs numpy and Pillow, so it lives in run_regression.py next to
@@ -32,7 +35,7 @@ import re
 import textwrap
 from pathlib import Path
 
-KINDS = ("image", "text")
+KINDS = ("image", "text", "audio")
 DEFAULT_KIND = "image"
 
 TEXT_EXTENSIONS = (".txt",)

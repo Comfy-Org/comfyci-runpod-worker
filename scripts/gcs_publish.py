@@ -44,13 +44,17 @@ def download_json(bucket: str, blob_path: str) -> dict | None:
     return json.loads(b.download_as_bytes())
 
 
-def upload_dir(bucket: str, blob_prefix: str, local_dir: Path):
+def upload_dir(bucket: str, blob_prefix: str, local_dir: Path, exclude=()):
+    """Upload every file under `local_dir`, except those whose path relative
+    to it (with "/") is in `exclude`."""
     local_dir = Path(local_dir)
     bkt = client().bucket(bucket)
+    held = set(exclude)
     for p in sorted(local_dir.rglob("*")):
         if p.is_file():
             rel = p.relative_to(local_dir).as_posix()
-            bkt.blob(f"{blob_prefix}/{rel}").upload_from_filename(str(p))
+            if rel not in held:
+                bkt.blob(f"{blob_prefix}/{rel}").upload_from_filename(str(p))
 
 
 def list_paths(bucket: str, blob_prefix: str) -> list[str]:

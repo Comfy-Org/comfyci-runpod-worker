@@ -3,6 +3,8 @@ writers, and recovery from a concurrent publisher."""
 import json
 import subprocess
 
+import pytest
+
 import storage
 
 
@@ -167,3 +169,135 @@ def test_a_checkpoint_with_nothing_written_pushes_nothing(tmp_path, remote, caps
     s = _store(tmp_path, remote, "a")
     s.checkpoint("nothing")
     assert "pushed" not in capsys.readouterr().out
+
+
+def test_a_run_folder_is_published_without_the_files_it_holds_back(tmp_path, remote):
+    """A smoke run keeps a large output file that did not repeat off the
+    results branch. The file stays in the runner's folder, for the artifact."""
+    run = tmp_path / "work" / "wf"
+    (run / "outputs" / "thumbs").mkdir(parents=True)
+    (run / "run.json").write_text("{}", encoding="utf-8")
+    (run / "outputs" / "wf_00001_.png").write_bytes(b"\x89PNG small")
+    (run / "outputs" / "wf_mesh_00001_.glb").write_bytes(b"glTF large")
+    (run / "outputs" / "thumbs" / "wf_00001_.webp").write_bytes(b"RIFF")
+    s = _store(tmp_path, remote, "a")
+    s.publish_workflow_run("master", "bbb", "wf", run, exclude=["outputs/wf_mesh_00001_.glb"])
+    # The same folder under another commit, with nothing held back.
+    s.publish_workflow_run("master", "ccc", "wf", run)
+    s.finalize("regression master@bbb: pass")
+    assert (run / "outputs" / "wf_mesh_00001_.glb").exists()
+    listed = subprocess.run(["git", "-C", str(remote), "ls-tree", "-r", "--name-only", "results",
+                             "regression/runs/master/bbb", "regression/runs/master/ccc"],
+                            capture_output=True, text=True, check=True).stdout.split()
+    assert listed == [
+        "regression/runs/master/bbb/wf/outputs/thumbs/wf_00001_.webp",
+        "regression/runs/master/bbb/wf/outputs/wf_00001_.png",
+        "regression/runs/master/bbb/wf/run.json",
+        "regression/runs/master/ccc/wf/outputs/thumbs/wf_00001_.webp",
+        "regression/runs/master/ccc/wf/outputs/wf_00001_.png",
+        "regression/runs/master/ccc/wf/outputs/wf_mesh_00001_.glb",
+        "regression/runs/master/ccc/wf/run.json"]
+
+
+def test_a_backend_that_predates_exclude_still_publishes_a_run_that_holds_nothing_back(tmp_path):
+    """A run of reference-level workflows calls the backend the way it always
+    did, so a store written before files could be held back keeps working."""
+    calls = []
+
+    class Old(storage.Storage):
+        def upload_dir(self, blob_prefix, local_dir):
+            calls.append((blob_prefix, local_dir))
+
+    old = Old("regression/lanes/x")
+    old.publish_workflow_run("master", "abc", "wf", tmp_path)
+    old.publish_workflow_run("master", "abc", "wf", tmp_path, exclude=())
+    assert calls == [("regression/lanes/x/runs/master/abc/wf", tmp_path)] * 2
+
+    class New(storage.Storage):
+        def upload_dir(self, blob_prefix, local_dir, exclude=()):
+            calls.append((blob_prefix, local_dir, list(exclude)))
+
+    New().publish_workflow_run("master", "abc", "wf", tmp_path, exclude=["outputs/a.glb"])
+    assert calls[-1] == ("regression/runs/master/abc/wf", tmp_path, ["outputs/a.glb"])
+
+
+def test_a_checkpoint_never_pushes_a_folder_that_is_half_copied(tmp_path, remote, monkeypatch):
+    """A nightly or weekly run pushes what it has while its worker threads
+    still copy their workflows' folders into the checkout. The copy and the
+    checkpoint take one lock: the push holds the whole folder or none of it."""
+    import threading
+
+    def pushed():
+        r = subprocess.run(["git", "-C", str(remote), "ls-tree", "-r", "--name-only", "results",
+                            "regression/runs/master/bbb/"], capture_output=True, text=True)
+        return r.stdout.split()
+
+    s = _store(tmp_path, remote, "a")
+    folder = tmp_path / "wf"
+    (folder / "outputs").mkdir(parents=True)
+    for name in ("comparison.json", "run.json", "outputs/wf_00001_.png"):
+        (folder / name).write_text(name, encoding="utf-8")
+    s.publish_summary("master", "bbb", {"commit": "bbb", "partial": {"done": 1, "of": 3}})
+
+    first_copied, go_on, copy = threading.Event(), threading.Event(), storage.shutil.copy2
+
+    def slow_copy(src, dest):
+        copy(src, dest)
+        first_copied.set()
+        assert go_on.wait(60)
+
+    monkeypatch.setattr(storage.shutil, "copy2", slow_copy)
+    worker = threading.Thread(target=s.publish_workflow_run, args=("master", "bbb", "wf", folder))
+    worker.start()
+    assert first_copied.wait(60)  # one file of three is in the checkout
+    pusher = threading.Thread(target=s.checkpoint, args=("regression master@bbb: 1 of 3",))
+    pusher.start()
+    pusher.join(1.5)
+    assert pusher.is_alive() and pushed() == [], "the checkpoint waits for the folder"
+    go_on.set()
+    worker.join(60)
+    pusher.join(120)
+    assert not worker.is_alive() and not pusher.is_alive()
+    base = "regression/runs/master/bbb"
+    assert pushed() == [f"{base}/summary.json", f"{base}/wf/comparison.json",
+                        f"{base}/wf/outputs/wf_00001_.png", f"{base}/wf/run.json"]
+    # The folder's own directory was added under the same lock: it is re-entrant.
+    assert s._git("status", "--porcelain").stdout.strip() == ""
+    # And a checkpoint with nothing new pushes nothing.
+    head = subprocess.run(["git", "-C", str(remote), "rev-parse", "results"],
+                          capture_output=True, text=True).stdout
+    s.checkpoint("nothing new")
+    assert subprocess.run(["git", "-C", str(remote), "rev-parse", "results"],
+                          capture_output=True, text=True).stdout == head
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")  # raised while the bucket client loads
+def test_the_bucket_backend_holds_the_same_files_back(tmp_path, monkeypatch):
+    import gcs_publish
+    uploaded = []
+
+    class Bucket:
+        def bucket(self, name):
+            return self
+
+        def blob(self, name):
+            self.name = name
+            return self
+
+        def upload_from_filename(self, path):
+            uploaded.append(self.name)
+
+    monkeypatch.setattr(gcs_publish, "client", Bucket)
+    run = tmp_path / "wf"
+    (run / "outputs").mkdir(parents=True)
+    (run / "run.json").write_text("{}", encoding="utf-8")
+    (run / "outputs" / "wf_00001_.png").write_bytes(b"\x89PNG")
+    (run / "outputs" / "wf_mesh_00001_.glb").write_bytes(b"glTF")
+    store = storage.GcsStorage("bucket", "regression/lanes/x")
+    base = "regression/lanes/x/runs/master/abc/wf"
+    store.publish_workflow_run("master", "abc", "wf", run, exclude=["outputs/wf_mesh_00001_.glb"])
+    assert uploaded == [f"{base}/outputs/wf_00001_.png", f"{base}/run.json"]
+    uploaded.clear()
+    store.publish_workflow_run("master", "abc", "wf", run)
+    assert uploaded == [f"{base}/outputs/wf_00001_.png", f"{base}/outputs/wf_mesh_00001_.glb",
+                        f"{base}/run.json"]

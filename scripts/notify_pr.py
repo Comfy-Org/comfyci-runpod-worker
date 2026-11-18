@@ -5,7 +5,9 @@ GPU outputs, and keep it up to date.
 Policy (per run summary, see run_regression.py --summary-out):
   - comment when a workflow's outputs changed here (detail 'new_drift') or a
     workflow hit an execution error where its prior run produced outputs, and
-    only when the tested commit is ahead of the previous run;
+    only when the tested commit is ahead of the previous run. A smoke-level
+    workflow is not compared with a golden: it is worth a comment when it
+    fails its smoke checks where its prior run passed them;
   - never for pass, inherited drift, infra errors or missing baselines;
   - an existing comment on the PR is updated in place (hidden marker, one
     comment per PR, authored by the token's user), and switched to a short
@@ -55,6 +57,8 @@ MAX_PAGES = 30
 TIMEOUT_S = 20
 VERDICT_LABELS = {"pass": "match", "fail": "changed", "execution_error": "error",
                   "infra_error": "infra error", "no_baseline": "no golden"}
+# A smoke-level workflow is checked, not compared: nothing matches and nothing changed.
+SMOKE_LABELS = {"pass": "smoke pass", "fail": "smoke check failed"}
 # The only shape of run link a comment carries: the summary is data, not code.
 RUN_URL = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[0-9]+")
 
@@ -83,9 +87,22 @@ def api(method: str, path: str, token: str | None = None, params: dict | None = 
 
 
 # -- policy -------------------------------------------------------------------
+def is_smoke(wr: dict) -> bool:
+    """A cell of a smoke-level workflow: it finished and wrote usable files, or not."""
+    return wr.get("level") == "smoke"
+
+
+def smoke_failed(wr: dict) -> bool:
+    return is_smoke(wr) and wr.get("verdict") == "fail"
+
+
 def change_kind(wr: dict) -> str | None:
     """'new_drift' / 'new_error' for a workflow worth a comment, else None."""
     v = wr.get("verdict")
+    if smoke_failed(wr):
+        # No output is compared at smoke level, so there is no drift to call
+        # new. A failed check is news when the workflow passed the time before.
+        return "new_error" if wr.get("prior_verdict") == "pass" else None
     if v == "fail" and wr.get("detail") == "new_drift":
         return "new_drift"
     # Only when the prior run produced outputs: a workflow with no prior verdict
@@ -168,9 +185,17 @@ def _row(wf_id: str, wr: dict) -> str:
     kind = change_kind(wr)
     change = {"new_drift": "new", "new_error": "new"}.get(kind) or (
         "inherited" if wr.get("detail") == "inherited" else "–")
+    if smoke_failed(wr) and wr.get("prior_verdict") == "fail":
+        # A smoke failure that was already there carries no `detail`: its
+        # prior verdict says so.
+        change = "inherited"
     psnr = "identical" if vg.get("identical") else _fmt(vg.get("mean_psnr_db"), ".2f")
     vram = wr.get("vram_peak_mb")
-    cells = [f"`{wf_id}`", VERDICT_LABELS.get(wr.get("verdict"), str(wr.get("verdict"))),
+    # A smoke row has its own two words. Its metric columns hold the mark of a
+    # missing number: nothing was compared.
+    verdict = SMOKE_LABELS.get(wr.get("verdict")) if is_smoke(wr) else None
+    cells = [f"`{wf_id}`",
+             verdict or VERDICT_LABELS.get(wr.get("verdict"), str(wr.get("verdict"))),
              change, psnr, _fmt(vg.get("mean_mse"), ".4g"),
              _fmt(vg.get("mean_pct_pixels_changed"), ".2f", "%"),
              _fmt((wr.get("timings") or {}).get("prompt_exec_s"), ".1f"),
@@ -248,7 +273,11 @@ def render_changed(summary: dict, lanes: dict | None, max_len: int = MAX_BODY) -
     wfs = summary.get("workflows") or {}
     kinds = {wf_id: change_kind(wr) for wf_id, wr in wfs.items()}
     sha7 = summary["commit"][:7]
+    # A new smoke failure is neither a changed output nor an execution error.
+    # Without one the headline is what it always was.
+    checks_failed = any(kinds[wf_id] and smoke_failed(wr) for wf_id, wr in wfs.items())
     headline = ("GPU output changed vs golden" if "new_drift" in kinds.values()
+                else "GPU workflow failed" if checks_failed
                 else "GPU workflow execution error")
     head = [f"**(PULSE)** {headline} · `{sha7}`", ""]
     table = ["| Workflow | Verdict | New / inherited | PSNR dB | Mean MSE | Pixels changed "
@@ -283,10 +312,19 @@ def render_changed(summary: dict, lanes: dict | None, max_len: int = MAX_BODY) -
 
 def render_resolved(summary: dict, lanes: dict | None) -> str:
     sha7 = summary["commit"][:7]
-    n = len(summary.get("workflows") or {})
+    wfs = summary.get("workflows") or {}
+    n = len(wfs)
+    checked = sum(is_smoke(wr) for wr in wfs.values())
+    if not checked:
+        clean = f"all {n} workflows match the golden (or have no golden yet)"
+    elif checked == n:
+        clean = f"all {n} workflows passed their smoke checks"
+    else:
+        # A smoke pass is not a match: the two are counted apart.
+        clean = (f"all {n} workflows pass: {n - checked} compared with the golden (a match, "
+                 f"or no golden yet) and {checked} checked at smoke level")
     lines = [f"**(PULSE)** No GPU output changes vs golden · `{sha7}`", "",
-             f"Re-checked at `{sha7}`: all {n} workflows match the golden "
-             "(or have no golden yet). The earlier report on this PR no longer applies."]
+             f"Re-checked at `{sha7}`: {clean}. The earlier report on this PR no longer applies."]
     lane = lane_line(summary, lanes)
     if lane:
         lines += ["", f"Lane: {lane}"]

@@ -151,6 +151,17 @@ def left_in_golden(store: storage.Storage, wf_id: str, tag: str, outputs: Path,
             "on the results branch, or use another ref")
 
 
+def unpublished_files(comparison: dict | None, sent: bool | None = None) -> list[str]:
+    """The output files a run's comparison.json lists as not published
+    (`"published": false` in `smoke.files`): none for a reference-level run.
+    With `sent`, only those the worker sent (True: the run held them back) or
+    did not send (False: no run has a copy of them)."""
+    files = ((comparison or {}).get("smoke") or {}).get("files")
+    return [str(f.get("name")) for f in (files if isinstance(files, list) else [])
+            if isinstance(f, dict) and f.get("published") is False
+            and (sent is None or (f.get("sent") is not False) is sent)]
+
+
 def promote_run(store: storage.Storage, branch: str, commit: str, wf_id: str, tag: str,
                 lane: str, generated_by: str, reason: str | None, workdir: Path,
                 comparator: output_kinds.Comparator | None = None) -> bool:
@@ -165,6 +176,23 @@ def promote_run(store: storage.Storage, branch: str, commit: str, wf_id: str, ta
     n = store.fetch_run_outputs(branch, commit, wf_id, outputs)
     if not run or not n:
         print(f"::error::[{wf_id}] no published outputs for {branch}/{commit}")
+        return False
+    # A smoke run publishes a large output file only when it repeats. A run
+    # that held one back is not whole on the results branch, and a reference
+    # made from it would lack that file. A file the worker did not send is
+    # held back by every run: no later one has it either.
+    comparison = store.download_json(f"{prefix}/runs/{branch}/{commit}/{wf_id}/comparison.json")
+    unsent = unpublished_files(comparison, sent=False)
+    if unsent:
+        print(f"::error::[{wf_id}] {branch}/{commit} cannot be a reference: the worker did not "
+              f"send {', '.join(unsent[:5])} (over its size limit), so no run can publish it. "
+              "Make the output smaller, or generate the reference with a golden run")
+        return False
+    held = unpublished_files(comparison, sent=True)
+    if held:
+        print(f"::error::[{wf_id}] {branch}/{commit} cannot be a reference: it was a smoke run "
+              f"that did not publish {', '.join(held[:5])}. Use a later run that shows the "
+              "same output: that one publishes every file")
         return False
     # An inherited floor describes the earlier reference. What the bless gate
     # asks about the output itself is read from the outputs that are promoted.
@@ -253,10 +281,31 @@ def main():
         if (args.workflows == "all" and e.get("enabled")) or wf_id in args.workflows.split(",")
     }
     # A golden only means something on a lane the workflow runs on: the lane
-    # filter applies to generating, promoting and blessing alike.
-    for wf_id in [w for w, e in selected.items() if not lanes_mod.workflow_runs_on_lane(e, lane)]:
-        print(f"[{wf_id}] not run on lane {lane} (manifest lanes: "
-              f"{', '.join(selected[wf_id]['lanes'])}); skipped")
+    # filter applies to generating, promoting and blessing alike. It knows the
+    # cadence too, so `all` on a lane takes that lane's workflows. On a retired
+    # lane only the manifest's `lanes` list counts.
+    for wf_id, e in list(selected.items()):
+        try:
+            why_not = lanes_mod.why_not_on_lane(e, lane, lanes["lanes"][lane])
+        except ValueError as err:
+            raise SystemExit(f"[{wf_id}] {err}; see manifest/workflows.json")
+        if why_not:
+            print(f"[{wf_id}] not run on lane {lane} ({why_not}); skipped")
+            del selected[wf_id]
+    # A smoke-level workflow is not compared, so it has no golden to generate,
+    # promote or bless: `all` leaves it out, and naming it is a mistake.
+    at_smoke = []
+    for wf_id, e in selected.items():
+        try:
+            if lanes_mod.level_of(e) == "smoke":
+                at_smoke.append(wf_id)
+        except ValueError as err:
+            raise SystemExit(f"[{wf_id}] {err}; see manifest/workflows.json")
+    if at_smoke and args.workflows != "all":
+        raise SystemExit("; ".join(f"{wf_id} is a smoke-level workflow: it has no reference"
+                                   for wf_id in at_smoke))
+    for wf_id in at_smoke:
+        print(f"::notice::[{wf_id}] is a smoke-level workflow: it has no reference; skipped")
         del selected[wf_id]
     if not selected:
         raise SystemExit(f"no workflows selected for lane {lane}")

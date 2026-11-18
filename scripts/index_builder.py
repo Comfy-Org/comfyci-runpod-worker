@@ -11,7 +11,14 @@ single fetch for years. Entries are ordered by commit time (falling back to
 run time), so re-testing an older commit on demand never reorders history.
 first_bad reports the start of each open failing chain (fail or
 execution_error), computed over every shard; a chain whose latest output is
-the currently blessed golden (accepted drift) is not reported.
+the currently blessed golden (accepted drift) is not reported. A cell of a
+smoke-level workflow carries `"l": "smoke"`: it has no golden, so its chain
+is never accepted drift, and the lane lists no golden for it.
+
+The entry of a run that named its workflows at a commit without a full result
+carries `"named": true`. It has a row like any other, and it is not the lane's
+run: `latest`, in the head and in lanes.json, is the newest entry without the
+mark.
 
 The builder is registered as a derived writer: it is re-run on the freshest
 tree whenever a publish has to retry, so concurrent lanes never lose each
@@ -138,8 +145,15 @@ def entry_from_summary(summary: dict, lane: str, layout: int,
         vg = wr.get("vs_golden") or {}
         vp = wr.get("vs_previous") or {}
         pv = vp.get("identical") if vp and not vp.get("error") else None
+        at_smoke = wr.get("level") == "smoke"
         detail = wr.get("detail")
-        if detail is None and wr.get("verdict") == "fail":
+        if at_smoke:
+            # Nothing is compared at smoke level. A failure that was already
+            # there is marked the way a standing reference failure is, so it
+            # is not shown as new on every run.
+            standing = wr.get("verdict") == "fail" and wr.get("prior_verdict") == "fail"
+            detail = "inherited" if standing else None
+        elif detail is None and wr.get("verdict") == "fail":
             prev_cell = (prev_entry or {}).get("w", {}).get(wf_id) or {}
             prev_verdict = wr.get("previous_verdict") or prev_cell.get("v")
             prev_golden = wr.get("previous_golden_tag") or prev_cell.get("g")
@@ -163,6 +177,9 @@ def entry_from_summary(summary: dict, lane: str, layout: int,
         if isinstance(kind, str) and kind != "image":
             # What the output is, when it is not an image: an image cell keeps its keys.
             w[wf_id]["k"] = kind
+        if at_smoke:
+            # Checked at smoke level, not compared: a reference cell keeps its keys.
+            w[wf_id]["l"] = "smoke"
         if wr.get("custom_nodes"):
             # Per custom-node pack the run requested: whether ComfyUI imported it.
             w[wf_id]["cn"] = {name: (info or {}).get("import")
@@ -171,7 +188,7 @@ def entry_from_summary(summary: dict, lane: str, layout: int,
     verdicts = [x["v"] for x in w.values()]
     run_id = summary.get("run_id")
     run_id = run_id if isinstance(run_id, int) and not isinstance(run_id, bool) else None
-    return {
+    entry = {
         "c": summary["commit"],
         "t": int(summary.get("run_ts") or 0),
         "o": summary.get("overall"),
@@ -191,6 +208,21 @@ def entry_from_summary(summary: dict, lane: str, layout: int,
         "w": w,
         "s": summary.get("suites") or None,
     }
+    if "scope" in summary:
+        # The run named its workflows, and the commit has no result of a full
+        # run: the entry holds those workflows alone, and is not the lane's
+        # run of the commit. Only such an entry has the key.
+        entry["named"] = True
+    ranges = summary.get("ranges")
+    if isinstance(ranges, dict) and ranges:
+        # Per workflow, the commits between its own last result and this one. A
+        # summary names them only where one run covers many commits. `prev` is
+        # that last result's commit: a later run can put a result inside the
+        # range, and the count is then no longer the chain's (`first_bad`).
+        entry["wr"] = {wf_id: {"n": r.get("commits_between"), "url": r.get("compare_url"),
+                               "prev": r.get("prev")}
+                       for wf_id, r in ranges.items() if isinstance(r, dict)}
+    return entry
 
 
 def merge_entry(old: dict | None, new: dict) -> dict:
@@ -200,6 +232,10 @@ def merge_entry(old: dict | None, new: dict) -> dict:
         return new
     merged = dict(old)
     merged.update({k: v for k, v in new.items() if k != "w" and v is not None})
+    if "wr" not in new:
+        merged.pop("wr", None)  # the ranges are those of the newest summary, or none
+    if "named" not in new:
+        merged.pop("named", None)  # a full run came after the run of named workflows
     if new.get("run") is not None:
         merged["run_repo"] = new.get("run_repo")  # the id and its repository name one run
     merged["t"] = max(old.get("t", 0), new.get("t", 0))
@@ -210,10 +246,32 @@ def merge_entry(old: dict | None, new: dict) -> dict:
     return merged
 
 
+def chain_range(covered: dict, prev_good: str | None, commit: str) -> dict:
+    """The `range` of a chain that starts at `commit`, from what the run there
+    recorded for the workflow (`covered`, the entry's `wr`): the commits since
+    the workflow's last result, counted when the run was made. A later run can
+    pass inside that range (a step of a search for the commit). The chain's
+    last pass (`prev_good`) is then newer than the range's start, and the
+    count is not the chain's any more: the range is given from the chain's own
+    last pass, without a count. Nothing here can count commits: only GitHub
+    knows how many lie between two tested ones."""
+    if covered.get("prev") == prev_good:
+        return {"n": covered.get("n"), "url": covered.get("url")}
+    url = (f"https://github.com/{commit_meta.DEFAULT_REPO}/compare/{prev_good}...{commit}"
+           if prev_good else None)
+    return {"n": None, "url": url}
+
+
 def first_bad(entries: list[dict]) -> dict:
     """Per workflow: the start of the currently open failing chain, walking the
     runs in commit order. Runs without a red or green verdict (infra errors,
-    missing baselines) neither start nor break a chain."""
+    missing baselines) neither start nor break a chain. A chain that a
+    smoke-level cell opened says so in `level`, and a workflow that changes
+    its level while it is red starts a new chain there: a failed smoke check
+    and an output that differs from a reference are not one failure. A chain
+    whose first run covered several commits for this workflow (the entry's
+    `wr`) carries that `range` (`chain_range`): its commit is then only the
+    newest of them."""
     chains: dict[str, dict | None] = {}
     last_good: dict[str, dict | None] = {}
     for e in sorted(entries, key=sort_key):
@@ -223,41 +281,72 @@ def first_bad(entries: list[dict]) -> dict:
                 chains[wf_id] = None
                 last_good[wf_id] = e
             elif v in RED:
-                if chains.get(wf_id) is None:
-                    chains[wf_id] = {"commit": e["c"], "run_ts": e["t"], "kind": v,
-                                     "prev_good": (last_good.get(wf_id) or {}).get("c"),
-                                     "pr": (e.get("m") or {}).get("pr"),
-                                     "author": (e.get("m") or {}).get("a"),
-                                     "golden": cell.get("g"), "runs": 0}
-                chains[wf_id]["runs"] += 1
+                at_smoke = cell.get("l") == "smoke"
+                chain = chains.get(wf_id)
+                if chain is None or (chain.get("level") == "smoke") != at_smoke:
+                    chain = chains[wf_id] = {
+                        "commit": e["c"], "run_ts": e["t"], "kind": v,
+                        "prev_good": (last_good.get(wf_id) or {}).get("c"),
+                        "pr": (e.get("m") or {}).get("pr"),
+                        "author": (e.get("m") or {}).get("a"),
+                        "golden": cell.get("g"), "runs": 0}
+                    if at_smoke:
+                        chain["level"] = "smoke"
+                    covered = (e.get("wr") or {}).get(wf_id)
+                    if isinstance(covered, dict):
+                        chain["range"] = chain_range(covered, chain["prev_good"], e["c"])
+                chain["runs"] += 1
     return {wf_id: chain for wf_id, chain in chains.items() if chain}
 
 
-def prior_verdicts(entries: list[dict], commit: str, committed_ts: int | None = None) -> dict:
+def smoke_workflows(entries: list[dict]) -> set[str]:
+    """The workflows whose newest cell is a smoke-level one, in commit order."""
+    newest: dict[str, dict] = {}
+    for e in sorted(entries, key=sort_key, reverse=True):
+        for wf_id, cell in (e.get("w") or {}).items():
+            newest.setdefault(wf_id, cell)
+    return {wf_id for wf_id, cell in newest.items() if cell.get("l") == "smoke"}
+
+
+def prior_verdicts(entries: list[dict], commit: str, committed_ts: int | None = None,
+                   smoke=()) -> dict:
     """Per workflow: the most recent red or green verdict before `commit` in
     commit order, as {wf_id: {"commit", "verdict"}}. Unlike the previous-run
     pointer (advanced only by fully comparable runs), this sees runs that had
     execution errors, so it tells a new execution error from a standing one.
     Entries newer than `committed_ts` (a re-test of an older commit) are
-    skipped; infra errors and missing baselines are looked through."""
+    skipped; infra errors and missing baselines are looked through.
+
+    `smoke`: the workflows that are at smoke level now. For those a failure at
+    reference level is looked through too. It says that an output differed
+    from its reference, which is no failed smoke check: a smoke failure after
+    it is not the same failure, and must not read as inherited from it."""
     out: dict[str, dict] = {}
     for e in sorted(entries, key=sort_key, reverse=True):
         if e.get("c") == commit or (committed_ts and sort_ts(e) > committed_ts):
             continue
         for wf_id, cell in (e.get("w") or {}).items():
             v = cell.get("v")
+            if v == "fail" and wf_id in smoke and cell.get("l") != "smoke":
+                continue
             if wf_id not in out and (v == "pass" or v in RED):
                 out[wf_id] = {"commit": e["c"], "verdict": v}
     return out
 
 
 class IndexBuilder:
-    def __init__(self, store, branch: str, lane: str, layout: int, lanes: dict | None = None):
+    def __init__(self, store, branch: str, lane: str, layout: int, lanes: dict | None = None,
+                 active=None):
+        """`active`: the workflow ids the lane runs today. An open failing
+        chain is then listed only for those, which closes the chain of a
+        workflow that was renamed, moved or removed while it was red. None
+        (a bless, a backfill): every chain is listed."""
         self.store = store
         self.branch = branch
         self.lane = lane
         self.layout = layout
         self.lanes = lanes if lanes is not None else load_lanes()
+        self.active = None if active is None else set(active)
         self.index_root = f"{store.root}/index"
 
     # -- paths -----------------------------------------------------------------
@@ -315,16 +404,36 @@ class IndexBuilder:
     def _write_aggregates(self, shards: dict[str, list[dict]], workflows=()):
         union = sorted((e for es in shards.values() for e in es), key=sort_key, reverse=True)
         months = sorted(m for m, es in shards.items() if es)
-        latest = union[0] if union else None
-        wf_ids = set((latest or {}).get("w", {})) | set(workflows)
-        goldens = {wf_id: self._golden_sha(wf_id) for wf_id in sorted(wf_ids)}
+        # The lane's latest run, as the head and lanes.json name it. A run
+        # that named its workflows (`named`) is not the lane's run of its
+        # commit: the newest entry without the mark stays the latest.
+        latest = next((e for e in union if not e.get("named")), None)
+        # Where each workflow stands now: its cell in the lane's latest run,
+        # or in a run of named workflows after it. Such a run holds the
+        # workflows it named and no other, so the newest entry alone would
+        # lose the rest: an accepted chain of one of them read as open again.
+        current: dict[str, dict] = {}
+        for e in union:
+            for wf_id, cell in e.get("w", {}).items():
+                current.setdefault(wf_id, cell)
+            if not e.get("named"):
+                break
+        wf_ids = set(current) | set(workflows)
+        # A smoke-level workflow has no reference. One that had a reference
+        # before keeps those files on the results branch, so they are not
+        # looked up: a smoke failure with the old reference's sha is no
+        # accepted drift. A workflow that was just blessed is at reference level.
+        unreferenced = smoke_workflows(union) - set(workflows)
+        goldens = {wf_id: self._golden_sha(wf_id) for wf_id in sorted(wf_ids - unreferenced)}
         chains = first_bad(union)
         for wf_id in list(chains):
             # Accepted drift: the latest output is the blessed golden itself.
-            cell = (latest or {}).get("w", {}).get(wf_id) or {}
+            cell = current.get(wf_id) or {}
             golden = goldens.get(wf_id) or {}
             if cell.get("sha") and golden.get("sha") == cell["sha"]:
                 del chains[wf_id]
+            elif self.active is not None and wf_id not in self.active:
+                del chains[wf_id]  # the lane no longer runs it
         self.store.upload_json(self.head_path(), {
             "schema_version": SCHEMA_VERSION, "branch": self.branch, "lane": self.lane,
             "layout": self.layout, "generated_ts": _now(), "count": len(union),
@@ -334,7 +443,7 @@ class IndexBuilder:
             "first_bad": chains,
             "entries": union[:HEAD_LIMIT],
         })
-        self._write_lanes(latest, len(union), months, goldens)
+        self._write_lanes(latest, len(union), months, goldens, unreferenced)
 
     def _golden_sha(self, wf_id: str) -> dict | None:
         prefix = self.store.prefix
@@ -351,7 +460,9 @@ class IndexBuilder:
         return {"tag": cur["tag"], "sha": sha}
 
     def _write_lanes(self, latest: dict | None, count: int, shards: list[str],
-                     goldens: dict):
+                     goldens: dict, unreferenced=()):
+        """`unreferenced`: workflows that are at smoke level now. A reference
+        the lane listed for one of them before is taken off the list."""
         existing = self.store.download_json(self.lanes_path()) or {}
         lanes_out = existing.get("lanes") or {}
         for lane_id, lane in self.lanes.get("lanes", {}).items():
@@ -369,6 +480,8 @@ class IndexBuilder:
         for wf_id, golden in goldens.items():
             if golden:
                 mine["goldens"][wf_id] = golden
+        for wf_id in unreferenced:
+            mine["goldens"].pop(wf_id, None)
         self.store.upload_json(self.lanes_path(), {
             "schema_version": SCHEMA_VERSION, "generated_ts": _now(),
             "primary": self.lanes.get("primary"), "lanes": lanes_out})
@@ -387,7 +500,11 @@ class IndexBuilder:
         summaries = []
         for p in paths:
             s = self.store.read_blob_json(p)
-            if s and s.get("commit") and s.get("run_ts"):
+            # A summary with `partial` is what a run that did not finish pushed
+            # on its way. No publish indexed it, so a rebuild does not either:
+            # a run that died is in no history table. A later run of named
+            # workflows at that commit does not merge into it: it replaces it.
+            if s and s.get("commit") and s.get("run_ts") and "partial" not in s:
                 summaries.append(s)
         summaries.sort(key=lambda s: (s["run_ts"], s["commit"]))
         log(f"index: {len(summaries)} summaries under {runs_prefix}")

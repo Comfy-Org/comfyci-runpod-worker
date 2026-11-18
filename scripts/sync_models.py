@@ -9,6 +9,11 @@ only the fallback for a registry whose primary has no endpoint. One endpoint
 writes the volume at a time: the workflow serialises syncs, and the sync state
 file is only updated after a completed download.
 
+Only the models of workflows that a lane reads from the volume are synced, the
+same workflows whose sizes the manifest lint adds up (lanes.volume_workflows).
+A workflow that runs only on lanes with `"model_storage": "job"`, or on lanes
+without a volume, is left out.
+
 Run automatically by .github/workflows/sync-models.yml whenever manifest/**
 changes; safe to run manually any time (idempotent).
 
@@ -25,6 +30,7 @@ import sys
 from pathlib import Path
 
 import index_builder
+import lanes as lanes_mod
 from run_regression import load_manifest
 from submit_and_poll import RunPodClient, _poll
 
@@ -55,9 +61,26 @@ def main():
     args = ap.parse_args()
 
     manifest = load_manifest(Path(args.manifest))
-    models, seen = [], set()
+    try:
+        lanes = index_builder.load_lanes()
+    except (OSError, ValueError):
+        lanes = None
+    # The volume holds the models of the workflows that a lane reads from it,
+    # and no other: the manifest lint adds up the sizes of the same workflows
+    # (lanes.volume_workflows), so what it lets through is what arrives here.
+    # A workflow that runs only on lanes whose models are fetched for each
+    # job, or that have no volume, is left out. Without a registry: every one.
+    try:
+        on_volume = None if lanes is None else set(lanes_mod.volume_workflows(manifest, lanes))
+    except ValueError as e:
+        raise SystemExit(f"{e}; see manifest/workflows.json")
+    models, seen, left_out = [], set(), []
     for wf_id, entry in manifest["workflows"].items():
         if args.workflows != "all" and wf_id not in args.workflows.split(","):
+            continue
+        if on_volume is not None and wf_id not in on_volume:
+            if entry.get("models"):
+                left_out.append(wf_id)
             continue
         # Sync disabled workflows too: the volume should be ready before enabling.
         for m in entry.get("models", []):
@@ -65,15 +88,13 @@ def main():
             if key not in seen:
                 seen.add(key)
                 models.append(m)
+    if left_out:
+        print(f"not synced, no lane reads their models from the volume: {', '.join(left_out)}")
 
     if not models:
         print("no models in manifest selection")
         return 0
 
-    try:
-        lanes = index_builder.load_lanes()
-    except (OSError, ValueError):
-        lanes = None
     endpoint_id, source = sync_endpoint(lanes)
     client = RunPodClient(endpoint_id)
     job_input = {"mode": "sync_models", "models": models}

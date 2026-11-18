@@ -31,6 +31,10 @@ on:
         description: show the published result of the commit in the run summary without testing it again; starts no GPU job and writes nothing
         type: boolean
         default: false
+      publish:
+        description: write the result to the results branch. Turn off for a first look at a new workflow (the commit is then tested whatever the lane has for it)
+        type: boolean
+        default: true
 
 # A report-only run reads the results branch and nothing else, so it gets a
 # group of its own: it neither waits for a real run nor cancels a pending one.
@@ -126,7 +130,10 @@ jobs:
       # A commit is tested once per lane: any published result (pass, fail or
       # execution_error) ends it; a result with infra errors, or a start marker
       # with no result (the run died before publishing), gets one retry; and a
-      # dispatch naming a commit always runs (scripts/regression_skip.py).
+      # dispatch naming a commit always runs (scripts/regression_skip.py). So
+      # does a dispatch with `publish` off: it writes nothing, so the result
+      # the lane has for the commit is no reason to skip it. A result of named
+      # workflows only (`scope` in the summary) does not count as tested.
       # A report-only dispatch tests nothing: it skips without asking.
       - name: Skip if already tested on this lane
         id: target
@@ -134,6 +141,7 @@ jobs:
           COMMIT: ${{ needs.lanes.outputs.commit }}
           INPUT_COMMIT: ${{ inputs.commit }}
           REPORT_ONLY: ${{ github.event_name == 'workflow_dispatch' && (inputs.report_only == true || inputs.report_only == 'true') }}
+          PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish == true || inputs.publish == 'true' }}
           PREFIX: ${{ matrix.prefix }}
         run: |
           echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
@@ -167,6 +175,7 @@ jobs:
           fi
           args=(--commit "$COMMIT" --summary "$SUMMARY" --attempt "$ATTEMPT" --latest "$LATEST")
           if [ -n "$INPUT_COMMIT" ]; then args+=(--explicit); fi
+          if [ "$PUBLISH" != "true" ]; then args+=(--explicit); fi
           python scripts/regression_skip.py "${args[@]}" >> "$GITHUB_OUTPUT"
       # Only a run that tests needs the packages: the skip check above and the
       # report below use the standard library, and most ticks skip.
@@ -182,17 +191,21 @@ jobs:
           COMMIT: ${{ steps.target.outputs.commit }}
           WORKFLOWS: ${{ inputs.workflows || 'all' }}
           LANE: ${{ matrix.lane }}
+          # A scheduled run has no inputs, and an empty input reads as false in
+          # an expression. So "publish" is "not a dispatch, or the box is ticked".
+          PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish == true || inputs.publish == 'true' }}
         # The summary file is written before the script exits, so the report
         # and PR comment steps below can read it even when this step fails.
+        # With `publish` off nothing is written to the results branch, and the
+        # report is built from the files on the runner.
         run: |
-          python scripts/run_regression.py \
-            --commit "$COMMIT" \
-            --branch master \
-            --lane "$LANE" \
-            --workflows "$WORKFLOWS" \
-            --workdir "$RUNNER_TEMP/regression-work" \
-            --results-workdir "$RUNNER_TEMP/results-checkout" \
-            --summary-out "$RUNNER_TEMP/summary.json"
+          args=(--commit "$COMMIT" --branch master --lane "$LANE"
+                --workflows "$WORKFLOWS"
+                --workdir "$RUNNER_TEMP/regression-work"
+                --results-workdir "$RUNNER_TEMP/results-checkout"
+                --summary-out "$RUNNER_TEMP/summary.json")
+          if [ "$PUBLISH" != "true" ]; then args+=(--skip-publish); fi
+          python scripts/run_regression.py "${args[@]}"
       # The run's own files (run.json, comparison.json, outputs, figures and the
       # summary), attached to the run: the copy to download, and the only one
       # when the publish to the results branch failed. GitHub keeps it 90 days.
@@ -234,8 +247,9 @@ jobs:
       # PULSE: one comment, updated in place, on the PR that landed the tested
       # commit when its outputs changed; code owners' PRs only, primary lane
       # only. dry-run (the default) only renders it into the job summary. See README.
+      # Not for a run with `publish` off: a comment links to published results.
       - name: PR comment (PULSE)
-        if: always() && steps.target.outputs.skip != 'true'
+        if: always() && steps.target.outputs.skip != 'true' && (github.event_name != 'workflow_dispatch' || inputs.publish == true || inputs.publish == 'true')
         continue-on-error: true
         env:
           PULSE_PR_COMMENTS: ${{ vars.PULSE_PR_COMMENTS || 'dry-run' }}
