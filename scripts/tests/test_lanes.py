@@ -960,9 +960,10 @@ def test_the_nightly_workflows_of_the_manifest_run_on_the_nightly_lane_alone():
     per-commit plan, whatever endpoints the lanes have. The nightly run plans
     it from the day its lane has an endpoint, and plans nothing before."""
     workflows = MANIFEST["workflows"]
+    first = ("hunyuan3d_2_1_t23d", "hunyuan3d_2_mv_turbo_mv23d", "ace_step_15_t2a")
     nightly = [wf_id for wf_id, entry in workflows.items()
                if lanes_mod.cadence_of(entry) == "nightly"]
-    assert {"hunyuan3d_2_1_t23d", "hunyuan3d_2_mv_turbo_mv23d", "ace_step_15_t2a"} <= set(nightly)
+    assert set(first) <= set(nightly)
     pending, ready = copy.deepcopy(REGISTRY), copy.deepcopy(REGISTRY)
     pending["lanes"][NIGHTLY]["endpoint_id"] = None
     ready["lanes"][NEW]["endpoint_id"] = "abc123"
@@ -982,9 +983,11 @@ def test_the_nightly_workflows_of_the_manifest_run_on_the_nightly_lane_alone():
          "workflows": ",".join(w for w in nightly if workflows[w]["enabled"])}]
     weekly = lanes_mod.cadence_matrix(ready, "weekly", manifest=MANIFEST)
     assert not {w for row in weekly for w in row["workflows"].split(",")} & set(nightly)
-    # The README's table of the nightly lane's workflows has a row for each.
+    # The README's table has a row for each of the lane's first three. It is
+    # asked of no other workflow: one that moves to the nightly cadence later
+    # needs that one word in the manifest and nothing else.
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    for wf_id in nightly:
+    for wf_id in first:
         assert f"\n| `{wf_id}` | " in readme, wf_id
 
 

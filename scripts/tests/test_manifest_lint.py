@@ -897,8 +897,9 @@ def test_the_3d_workflows_run_nightly_at_smoke_level_and_save_a_picture_and_a_me
         assert [(s["node"], s["class"], s["prefix"]) for s in smoke.expected_outputs(wf)] == [
             ("save_png", "SaveImage", wf_id), ("save_glb", "SaveGLB", f"{wf_id}_mesh")]
         # The names ComfyUI gives the two files. Each must be there. The
-        # picture sorts first: the worker sends files in name order up to its
-        # size limit, so a large mesh never holds the picture back.
+        # picture sorts first by name, and it is the smaller file. So when
+        # the two do not fit a job's answer together, the mesh is the file
+        # that is left out.
         png, glb = f"{wf_id}_00001_.png", f"{wf_id}_mesh_00001_.glb"
         assert png < glb
         assert _missing_files(wf_id, [png, glb]) == []
@@ -982,10 +983,17 @@ def test_the_audio_workflow_runs_nightly_at_smoke_level_and_saves_thirty_seconds
     # The latent has 25 frames a second and the VAE makes 1,920 samples of
     # each, at 48,000 Hz: a whole number of frames, so the file is 30.0 s long.
     assert round(seconds * 48000 / 1920) * 1920 / 48000 == seconds
-    # The file is sent in the job's answer, as base64. Even sound that FLAC
-    # cannot make smaller (16 bits, two channels) stays under 7 MiB, which is
-    # 9.8 MB as base64: RunPod's payload limit for `/run` is 10 MB.
-    assert seconds * 48000 * 2 * 2 < 7 * 1024 * 1024
+    # The file is sent in the job's answer, as base64. It has to stay under
+    # 7 MiB, which is 9.8 MB as base64: RunPod's payload limit for `/run` is
+    # 10 MB. A FLAC file can be larger than the samples it holds. The encoder
+    # cuts 48,000 Hz sound into blocks of 4,608 samples, and its largest
+    # frame keeps a block's samples as they are, with one more bit for the
+    # side channel and 24 bytes of headers: 19,032 bytes for 16 bits and two
+    # channels. So 30 s are 5.96 MB of frames at most, where the samples are
+    # 5.76 MB and noise came to 5.85 MB. The bound passes 7 MiB at 37 s. The
+    # 64 KiB are for the file's metadata, which holds the prompt.
+    blocks = -(-seconds * 48000 // 4608)
+    assert blocks * (24 + (33 * 4608 + 7) // 8) + 64 * 1024 < 7 * 1024 * 1024
     # Every seed is pinned: the sampler's, and the text encoder's, which
     # samples the audio codes.
     assert {nid for nid, n in wf.items() if "seed" in n["inputs"]} == {"3", "94"}

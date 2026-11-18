@@ -105,9 +105,11 @@ this repo per template.
    approved reference, the golden. `"level": "smoke"` puts it at **smoke
    level**: it only has to finish and to write usable files (see
    [Smoke level](#smoke-level)). A smoke-level entry has no golden, so its
-   `thresholds` and `golden_tag` are null and step 5 falls away. Use it where
-   an output cannot be the same on every run, or where nothing can compare
-   it yet. It does not catch a wrong but plausible output.
+   `thresholds` and `golden_tag` are null and step 5 falls away. Nothing has
+   to be approved before it runs, so it says `"enabled": true` in the pull
+   request that adds it. Use it where an output cannot be the same on every
+   run, or where nothing can compare it yet. It does not catch a wrong but
+   plausible output.
 
    A smoke-level entry can say what its author knows about the output in
    `expect`. Every key is optional: `width` and `height` (the PNG files),
@@ -183,10 +185,10 @@ this repo per template.
      for any workflow.
 
    **A 3D workflow** (a model that makes a mesh, like the
-   `hunyuan3d_2_1_t23d` entry) is written by hand too: the importer stops on
-   a template that saves no picture ("expected exactly one SaveImage
-   output"). Convert the template with `scripts/template_api_export.py`,
-   then make sure of this:
+   `hunyuan3d_2_1_t23d` entry) is an image workflow: a picture of the mesh
+   is its main output, and the mesh is a second file. The two Hunyuan3D
+   workflows here are graphs made by hand, after their templates. However
+   one is made, make sure of this:
 
    - The entry names no `output_kind`: the main output is a picture.
    - `RenderMesh` makes that picture from the mesh, and a `SaveImage` with
@@ -199,9 +201,10 @@ this repo per template.
      the frontend's 3D viewer, which a run does not have: save the mesh with
      `SaveGLB` there too.
    - The picture then sorts before the mesh by name: `<id>_00001_.png`,
-     `<id>_mesh_00001_.glb`. The worker sends a run's files in name order,
-     15 MiB in all, and only lists the rest. So a large mesh never holds the
-     picture back.
+     `<id>_mesh_00001_.glb`. It is the smaller file too. A run's files
+     travel in the job's answer, and the worker only lists what does not
+     fit. So a mesh that is too large is the file left out, never the
+     picture.
    - Keep the files small. The two Hunyuan3D workflows decode at
      `octree_resolution` 128 where their templates say 256, for a mesh file
      of a quarter the size.
@@ -209,8 +212,10 @@ this repo per template.
      is known only once it has run on the workers: `smoke.files` in each
      run's cell has the sha256 of every file.
 
-   **A sound workflow** (like the `ace_step_15_t2a` entry) is written by
-   hand for the same reason. Make sure of this:
+   **A sound workflow** (like the `ace_step_15_t2a` entry) saves a FLAC
+   file as its main output. `ace_step_15_t2a` is its template as
+   `scripts/template_api_export.py` converts it, with three values changed
+   by hand. However one is made, make sure of this:
 
    - The entry says `"output_kind": "audio"` and `"level": "smoke"`.
    - The graph ends in `SaveAudioAdvanced` with `format` `"flac"` and
@@ -872,7 +877,7 @@ exists, which is the state of both lanes today: neither has an endpoint. The
 nightly lane has its first workflows, and no workflow has the weekly cadence
 yet.
 
-The nightly lane's workflows, all at smoke level:
+The nightly lane's first three workflows, all at smoke level:
 
 | Workflow | What it runs | Files of a run | New on the volume |
 |---|---|---|---|
@@ -884,6 +889,16 @@ None of them has run on a worker yet: the lane has no endpoint. The model
 sync does not wait for one. A nightly workflow's models are counted against
 the volume and downloaded to it on the merge, like those of a per-commit
 workflow (`lanes.volume_workflows`).
+
+Once the lane has an endpoint, merge a new nightly workflow clear of the
+lane's next run. The sync starts on the merge and takes minutes for files of
+this size. A run that starts before it has ended cannot test the workflow
+(`missing_model`), and a workflow that stays untested makes a nightly run
+red.
+
+`hunyuan3d_2_1_t23d` joins its two pictures with `ImageBatch`, a node that
+ComfyUI marks as deprecated. If a commit removes it, the workflow ends in
+`validation_error` from that night on: put `BatchImagesNode` in its place.
 
 - **One lane per cadence.** Everything the suite stores about a commit on a
   lane assumes that one run wrote it: the summary, the start marker, the
