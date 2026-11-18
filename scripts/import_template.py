@@ -18,6 +18,10 @@ paste under ``workflows`` in ``manifest/workflows.json``. It does not edit the
 manifest: the entry still needs a ``timeout_s`` chosen for the model, and lands
 ``"enabled": false`` until a golden exists (see the README).
 
+It writes image workflows only. A template whose result is text (it ends in
+``PreviewAny`` or ``SaveText``) is refused with what to do by hand: the README's
+"Adding a workflow" section has the rules for a text workflow.
+
 Get the ``/object_info`` dump from the ComfyUI version the corpus runs against,
 with the workflow's models present so their combo values resolve:
 
@@ -51,12 +55,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from template_api_export import (  # noqa: E402
     ConversionError,
     Converter,
+    OUTPUT_PREFIXES,
     PREVIEW_PREFIXES,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
 
 SAVE_IMAGE = "SaveImage"
+# What a text template ends in: a preview that shows the text (and writes no
+# file) or a node that saves it.
+TEXT_SINKS = ("PreviewAny", "SaveText")
 MODEL_SUFFIXES = (".safetensors", ".sft", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".onnx")
 MARKDOWN_LINK = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
 
@@ -91,6 +99,41 @@ DIRECTORY_BY_LOADER_INPUT = {
     ("HypernetworkLoader", "hypernetwork_name"): "hypernetworks",
     ("PhotoMakerLoader", "photomaker_model_name"): "photomaker",
 }
+
+
+def refuse_text_output(prompt: dict[str, dict[str, Any]], workflow_id: str) -> None:
+    """Stop on a template whose result is text, before its previews are dropped.
+
+    Such a template saves no image, video, audio or 3D file and ends in a
+    ``PreviewAny`` nothing reads, or in a ``SaveText``. Collapsing the previews
+    would leave it with no output at all, and "expected exactly one SaveImage"
+    would not say why. A text workflow is compared as text (``"output_kind":
+    "text"``), which this importer does not write. A video or audio template
+    with a text preview on the side is not a text template: it keeps the
+    ``SaveImage`` refusal.
+    """
+    if any(node["class_type"].startswith(OUTPUT_PREFIXES) for node in prompt.values()):
+        return
+    read = {
+        value[0]
+        for node in prompt.values()
+        for value in node["inputs"].values()
+        if isinstance(value, list) and len(value) == 2
+    }
+    sinks = [
+        f"{node['class_type']} node {node_id}"
+        for node_id, node in prompt.items()
+        if node["class_type"] in TEXT_SINKS and node_id not in read
+    ]
+    if sinks:
+        raise ConversionError(
+            f"the template's output is text ({', '.join(sinks)}), and this importer "
+            "only writes image workflows. Convert it with template_api_export.py and "
+            "finish the file by hand: end it in SaveText with filename_prefix "
+            f'"{workflow_id}" and format "txt", make text generation greedy '
+            '(sampling_mode "off", mtp "off"), and add "output_kind": "text" to its '
+            'manifest entry. See "Adding a workflow" in the README.'
+        )
 
 
 def collapse_previews(prompt: dict[str, dict[str, Any]]) -> None:
@@ -290,15 +333,27 @@ def main() -> int:
     )
     object_info = json.loads(args.object_info.read_text(encoding="utf-8"))
 
-    prompt = Converter(object_info).convert(template, resolve_switches=True)
-    collapse_previews(prompt)
-    normalise_save(prompt, workflow_id)
-    Converter(object_info).prune(prompt)
+    # A template this importer cannot turn into a corpus entry is a refusal
+    # with its reason, not a traceback.
+    try:
+        prompt = Converter(object_info).convert(template, resolve_switches=True)
+        refuse_text_output(prompt, workflow_id)
+        collapse_previews(prompt)
+        normalise_save(prompt, workflow_id)
+        Converter(object_info).prune(prompt)
+    except ConversionError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
 
     path = ROOT / "manifest" / "workflows" / f"{workflow_id}_api.json"
     path.write_text(json.dumps(prompt, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"wrote {path.relative_to(ROOT)} ({len(prompt)} nodes)", file=sys.stderr)
-    print(json.dumps({workflow_id: build_entry(workflow_id, prompt, template, args.skip_sha)}, indent=2))
+    try:
+        entry = build_entry(workflow_id, prompt, template, args.skip_sha)
+    except ConversionError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps({workflow_id: entry}, indent=2))
     return 0
 
 

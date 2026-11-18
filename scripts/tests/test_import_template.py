@@ -1,12 +1,17 @@
 """The corpus-specific steps on top of the template -> API conversion."""
+import json
+import sys
+
 import pytest
 
+import import_template
 from import_template import (
     build_entry,
     collapse_previews,
     loaded_files,
     normalise_save,
     note_urls,
+    refuse_text_output,
     seed_overrides,
 )
 from template_api_export import ConversionError
@@ -220,3 +225,102 @@ def test_a_loaded_file_the_template_never_links_is_refused():
     prompt = {"1": {"class_type": "UNETLoader", "inputs": {"unet_name": "u.safetensors"}}}
     with pytest.raises(ConversionError, match="no download link"):
         build_entry("my_wf", prompt, {"nodes": []}, skip_sha=True)
+
+
+def _text_prompt(sink):
+    return {
+        "1": {"class_type": "CLIPLoader", "inputs": {"clip_name": "q.safetensors"}},
+        "3": {"class_type": "TextGenerateV2", "inputs": {"prompt": "hi", "clip": ["1", 0]}},
+        "4": sink,
+    }
+
+
+@pytest.mark.parametrize(
+    "sink, named",
+    [
+        ({"class_type": "PreviewAny", "inputs": {"source": ["3", 0]}}, "PreviewAny node 4"),
+        (
+            {"class_type": "SaveText", "inputs": {"text": ["3", 0], "filename_prefix": "x"}},
+            "SaveText node 4",
+        ),
+    ],
+)
+def test_a_template_whose_output_is_text_is_refused_with_what_to_do(sink, named):
+    """Dropping the preview would leave no output, and the SaveImage error
+    that follows would not say that the template is a text one."""
+    with pytest.raises(ConversionError) as refusal:
+        refuse_text_output(_text_prompt(sink), "llm_x")
+    message = str(refusal.value)
+    assert f"the template's output is text ({named})" in message
+    assert "only writes image workflows" in message
+    assert 'SaveText with filename_prefix "llm_x" and format "txt"' in message
+    assert 'sampling_mode "off", mtp "off"' in message and '"output_kind": "text"' in message
+
+
+def test_an_image_template_with_text_previews_is_not_taken_for_a_text_one():
+    # A preview on the way to a text encoder, and one nothing reads, next to a save.
+    prompt = {
+        **_text_prompt({"class_type": "PreviewAny", "inputs": {"source": ["3", 0]}}),
+        "5": {"class_type": "PreviewAny", "inputs": {"source": ["3", 0]}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": ["5", 0]}},
+        "9": {"class_type": "SaveImageAdvanced", "inputs": {"images": ["8", 0]}},
+    }
+    refuse_text_output(prompt, "wf")
+    collapse_previews(prompt)
+    assert sorted(prompt) == ["1", "3", "6", "9"] and prompt["6"]["inputs"]["text"] == ["3", 0]
+    # A video or audio template with a text preview on the side saves a file
+    # of its own: its refusal is the SaveImage one, not advice to compare the preview.
+    for save in ("SaveVideo", "SaveAudioAdvanced", "SaveGLB", "SaveWEBM", "SaveAnimatedWEBP"):
+        media = {
+            **_text_prompt({"class_type": "PreviewAny", "inputs": {"source": ["3", 0]}}),
+            "9": {"class_type": save, "inputs": {"video": ["8", 0]}},
+        }
+        refuse_text_output(media, "wf")
+        collapse_previews(media)
+        with pytest.raises(ConversionError, match="expected exactly one SaveImage output, found 0"):
+            normalise_save(media, "wf")
+    # No save and no text sink either: the usual refusal, further down, says so.
+    refuse_text_output({"1": {"class_type": "KSampler", "inputs": {}}}, "wf")
+    refuse_text_output({"1": {"class_type": "PreviewImage", "inputs": {"images": ["2", 0]}},
+                        "2": {"class_type": "KSampler", "inputs": {}}}, "wf")
+
+
+def test_the_command_refuses_a_text_template_without_a_traceback(tmp_path, monkeypatch, capsys):
+    """llm_qwen3vl_text_gen in short: a loader, a generator and a preview."""
+    template = {
+        "nodes": [
+            {"id": 5, "type": "CLIPLoader", "mode": 0, "inputs": [],
+             "outputs": [{"name": "CLIP", "type": "CLIP", "links": [5]}],
+             "widgets_values": ["q.safetensors"]},
+            {"id": 10, "type": "TextGenerateV2", "mode": 0,
+             "inputs": [{"name": "clip", "type": "CLIP", "link": 5}],
+             "outputs": [{"name": "generated_text", "type": "STRING", "links": [7]}],
+             "widgets_values": ["what's in the images"]},
+            {"id": 7, "type": "PreviewAny", "mode": 0,
+             "inputs": [{"name": "source", "type": "*", "link": 7}], "outputs": [],
+             "widgets_values": []},
+        ],
+        "links": [[5, 5, 0, 10, 0, "CLIP"], [7, 10, 0, 7, 0, "STRING"]],
+    }
+    object_info = {
+        "CLIPLoader": {"input": {"required": {"clip_name": [["q.safetensors"]]}},
+                       "input_order": {"required": ["clip_name"]}},
+        "TextGenerateV2": {"input": {"required": {"clip": ["CLIP", {}],
+                                                  "prompt": ["STRING", {"default": ""}]}},
+                           "input_order": {"required": ["clip", "prompt"]}},
+        "PreviewAny": {"input": {"required": {"source": ["*", {}]}},
+                       "input_order": {"required": ["source"]}, "output_node": True},
+    }
+    (tmp_path / "templates").mkdir()
+    (tmp_path / "templates" / "llm_x.json").write_text(json.dumps(template), encoding="utf-8")
+    (tmp_path / "object_info.json").write_text(json.dumps(object_info), encoding="utf-8")
+    (tmp_path / "manifest" / "workflows").mkdir(parents=True)
+    monkeypatch.setattr(import_template, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", [
+        "import_template.py", "llm_x", "--templates-dir", str(tmp_path / "templates"),
+        "--object-info", str(tmp_path / "object_info.json"), "--skip-sha"])
+    assert import_template.main() == 1
+    printed = capsys.readouterr()
+    assert printed.err.startswith("error: the template's output is text (PreviewAny node 7), ")
+    assert "Traceback" not in printed.err and printed.out == ""
+    assert list((tmp_path / "manifest" / "workflows").iterdir()) == []  # nothing was written

@@ -257,6 +257,166 @@ def test_dynamic_combo_choice_without_sub_inputs_adds_none():
     assert not [key for key in inputs if key.startswith("format.")]
 
 
+# TextGenerateV2 as ComfyUI defines it (tooltips and the long autogrow name
+# lists left out): its seed is a sub-input of a dynamic combo and does not set
+# control_after_generate.
+TEXT_NODES = {
+    "TextGenerateV2": {
+        "input": {
+            "required": {
+                "clip": ["CLIP", {}],
+                "prompt": ["STRING", {"default": "", "multiline": True}],
+                "max_length": ["INT", {"default": 512, "min": 1, "max": 32768}],
+                "sampling_mode": [
+                    "COMFY_DYNAMICCOMBO_V3",
+                    {
+                        "options": [
+                            {
+                                "key": "on",
+                                "inputs": {
+                                    "required": {
+                                        "temperature": ["FLOAT", {"default": 0.7}],
+                                        "top_k": ["INT", {"default": 64}],
+                                        "top_p": ["FLOAT", {"default": 0.95}],
+                                        "min_p": ["FLOAT", {"default": 0.05}],
+                                        "repetition_penalty": ["FLOAT", {"default": 1.05}],
+                                        "presence_penalty": ["FLOAT", {"default": 0.0}],
+                                        "seed": ["INT", {"default": 0, "min": 0}],
+                                    }
+                                },
+                            },
+                            {"key": "off", "inputs": {"required": {}}},
+                        ]
+                    },
+                ],
+            },
+            "optional": {
+                "images": ["COMFY_AUTOGROW_V3", {"template": {"names": ["image1", "image2"]}}],
+                "thinking": ["BOOLEAN", {"default": False}],
+                "use_default_template": ["BOOLEAN", {"default": True, "advanced": True}],
+                "mtp": ["COMBO", {"default": "auto", "options": ["auto", "off", "2", "tree2s1"]}],
+                "system_prompt": ["STRING", {"forceInput": True}],
+            },
+        },
+        "input_order": {
+            "required": ["clip", "prompt", "max_length", "sampling_mode"],
+            "optional": ["images", "thinking", "use_default_template", "mtp", "system_prompt"],
+        },
+    },
+    "CLIPLoader": {
+        "input": {
+            "required": {
+                "clip_name": [["qwen3vl_4b_fp8_scaled.safetensors"]],
+                "type": [["stable_diffusion", "ideogram4"]],
+            },
+            "optional": {"device": [["default", "cpu"], {"advanced": True}]},
+        },
+        "input_order": {"required": ["clip_name", "type"], "optional": ["device"]},
+    },
+    "PreviewAny": OBJECT_INFO["PreviewAny"],
+}
+
+
+def text_template(widgets):
+    """The loader, generator and preview of a text template, with the
+    generator's ``widgets_values`` as given."""
+    return {
+        "nodes": [
+            node(
+                5,
+                "CLIPLoader",
+                widgets=["qwen3vl_4b_fp8_scaled.safetensors", "ideogram4", "default"],
+                outputs=[{"name": "CLIP", "type": "CLIP", "links": [5]}],
+            ),
+            node(7, "PreviewAny", inputs=[{"name": "source", "type": "*", "link": 7}]),
+            node(
+                10,
+                "TextGenerateV2",
+                widgets=widgets,
+                inputs=[
+                    {"name": "clip", "type": "CLIP", "link": 5},
+                    {"name": "images.image1", "type": "IMAGE", "link": None},
+                    {"name": "system_prompt", "type": "STRING", "link": None},
+                ],
+                outputs=[{"name": "generated_text", "type": "STRING", "links": [7]}],
+            ),
+        ],
+        "links": [[5, 5, 0, 10, 0, "CLIP"], [7, 10, 0, 7, 0, "STRING"]],
+    }
+
+
+def test_a_control_word_stored_after_a_seed_that_asked_for_none_is_skipped():
+    """llm_qwen3vl_text_gen stores "randomize" after sampling_mode.seed although
+    the definition has no control_after_generate. Read as a value, it would
+    shift every widget after it: thinking "randomize", mtp true."""
+    stored = ["what's in the images", 512, "on", 0.7, 64, 0.95, 0.05, 1.05, 0, 0,
+              "randomize", False, True, "auto"]
+    inputs = Converter(TEXT_NODES).convert(text_template(stored))["10"]["inputs"]
+    assert inputs == {
+        "prompt": "what's in the images",
+        "max_length": 512,
+        "sampling_mode": "on",
+        "sampling_mode.temperature": 0.7,
+        "sampling_mode.top_k": 64,
+        "sampling_mode.top_p": 0.95,
+        "sampling_mode.min_p": 0.05,
+        "sampling_mode.repetition_penalty": 1.05,
+        "sampling_mode.presence_penalty": 0,
+        "sampling_mode.seed": 0,
+        "thinking": False,
+        "use_default_template": True,
+        "mtp": "auto",
+        "clip": ["5", 0],
+    }
+
+
+def test_a_seed_without_a_stored_control_word_reads_the_same_values():
+    """image_ming_image_01_design_t2i stores the same node without the word."""
+    stored = ["", 4096, "on", 0.7, 64, 0.95, 0.05, 1.05, 0, 0, False, True, "auto"]
+    inputs = Converter(TEXT_NODES).convert(text_template(stored))["10"]["inputs"]
+    assert (inputs["sampling_mode.seed"], inputs["thinking"]) == (0, False)
+    assert (inputs["use_default_template"], inputs["mtp"]) == (True, "auto")
+    # Greedy decoding has no seed at all, so nothing follows it.
+    greedy = Converter(TEXT_NODES).convert(text_template(["hi", 256, "off", False, True, "off"]))
+    assert greedy["10"]["inputs"] == {
+        "prompt": "hi",
+        "max_length": 256,
+        "sampling_mode": "off",
+        "thinking": False,
+        "use_default_template": True,
+        "mtp": "off",
+        "clip": ["5", 0],
+    }
+
+
+def test_a_control_word_the_next_widget_can_hold_is_its_value():
+    """Only a word the next widget cannot hold is taken for the stored control."""
+    object_info = {
+        "Sampler": {
+            "input": {
+                "required": {
+                    "seed": ["INT", {"default": 0}],
+                    "mode": [["fixed", "randomize"], {}],
+                    "label": ["STRING", {"default": ""}],
+                    "steps": ["INT", {"default": 20}],
+                }
+            },
+            "input_order": {"required": ["seed", "mode", "label", "steps"]},
+            "output_node": True,
+        }
+    }
+
+    def values(widgets):
+        workflow = {"nodes": [node(1, "Sampler", widgets=widgets)], "links": []}
+        return Converter(object_info).convert(workflow)["1"]["inputs"]
+
+    assert values([7, "randomize", "fixed", 30]) == {
+        "seed": 7, "mode": "randomize", "label": "fixed", "steps": 30}
+    # After a widget that is no seed, a control word is never dropped: it stays
+    # in place and the mismatch shows, as before.
+    assert values([7, "fixed", "note", "increment"])["steps"] == "increment"
+
+
 def test_a_combo_whose_options_live_on_the_node_is_refused():
     """Its widget layout is not in /object_info, so the array cannot be mapped."""
     object_info = {
