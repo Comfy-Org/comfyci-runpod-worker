@@ -81,10 +81,17 @@ this repo per template.
    from ComfyUI (**Workflow → Export (API)**) instead; `scripts/tests/test_template_api_export.py`
    documents which conversion rules are covered. A loader whose models/
    subdirectory it does not know is also a refusal, not a guess: add the
-   `(class_type, input name)` pair to `DIRECTORY_BY_LOADER_INPUT`.
+   `(class_type, input name)` pair to `DIRECTORY_BY_LOADER_INPUT`. A template
+   whose result is text is refused too: see "A text workflow" below.
 
 2. Paste the entry under `workflows` in `manifest/workflows.json` and choose a
    `timeout_s` the model can finish in. Leave `"enabled": false`.
+
+   `output_kind` says what the workflow's output is, and so how it is
+   compared. An entry without the key is an image workflow: its `SaveImage`
+   PNGs are compared pixel by pixel. `"output_kind": "text"` makes it a text
+   workflow: its `.txt` file is compared with the reference text. No other
+   value exists, and an unknown one stops a run before any GPU job starts.
 
    For a hand-exported workflow, the entry needs the same shape: `workflow_path`,
    `seed_overrides` (node id → input patch, belt-and-braces for the seed),
@@ -102,10 +109,35 @@ this repo per template.
    (names from `manifest/custom_nodes.json`) and restricts itself with `lanes`
    to the lanes whose image bakes them; see [Custom-node packs](#custom-node-packs).
 
+   **A text workflow** (a model that answers in text, like the
+   `llm_qwen38_27b_t2t` entry) is written by hand: the importer only writes
+   image workflows and stops on a text template with what to do. Convert the
+   template with `scripts/template_api_export.py`, then make sure of this:
+
+   - The entry says `"output_kind": "text"`.
+   - The graph ends in one `SaveText` node with `filename_prefix` equal to the
+     workflow id and `format` `"txt"`. ComfyUI then writes `<id>_00001.txt`,
+     the file that is compared. A template usually ends in `PreviewAny`, which
+     writes no file: replace it. Any second output node is prefixed `<id>_`,
+     and a second `SaveText` is compared too, by file name.
+   - Text generation is greedy: every `TextGenerate` node has
+     `sampling_mode` `"off"` and an `mtp` that is written out and is not
+     `"auto"` (use `"off"`). The text has to be the same on every run, because
+     it passes only on an exact match. `mtp` `"auto"` follows measured
+     timings, and the worker removes the `sampling_mode.<name>` values that
+     sampling needs.
+   - `seed_overrides` is `{}` (greedy decoding has no seed) and `thresholds`
+     is `null`. Only when an exact match is known not to hold, set
+     `"thresholds": {"min_text_similarity": 0.98}`, a number above 0 and at
+     most 1 (see [Verdicts](#verdicts)).
+   - Input images are listed under `models` with `"directory": "input"`, as
+     for any workflow.
+
 3. Check it. `python -m pytest scripts/tests -q` lints the manifest against
    every workflow it references (loaded files and `models` match both ways,
-   every node feeds the `SaveImage`, seed override targets, model folders,
-   `SaveImage` prefix = workflow id). Then confirm a real server accepts the
+   every node feeds an output node, seed override targets, model folders,
+   `SaveImage` prefix = workflow id; for a text workflow the `SaveText` rules
+   and greedy generation above). Then confirm a real server accepts the
    prompt, which is what catches a conversion that produced a valid-looking
    file with the wrong input names:
 
@@ -121,7 +153,10 @@ this repo per template.
    automatically, through a one-shot job on the primary lane's endpoint (every
    lane shares the volume, so one sync serves them all).
 5. Generate + bless a golden for it: run the **Golden baselines** workflow with
-   the current release tag and `workflows: <id>`, inspect, bless.
+   the current release tag and `workflows: <id>`, inspect, bless. For a text
+   workflow, read `golden/<id>/<tag>/outputs/<id>_00001.txt` before you bless
+   it: an empty or useless answer would pass from then on. A text golden whose
+   two runs differ is not blessed (see [Verdicts](#verdicts)).
 6. Flip `"enabled": true` in a follow-up PR.
 
 ## Verdicts
@@ -137,6 +172,51 @@ this repo per template.
 Thresholds come from the manifest entry if set, otherwise from the manifest
 defaults loosened to 3× the golden's own re-run noise floor
 (`noise_floor.json`), so nondeterministic workflows don't false-alarm.
+
+That is the rule for an image workflow. A text workflow (`"output_kind":
+"text"` in its entry) has another one:
+
+- **Pass rule.** The generated text must equal the golden's text. Line ends,
+  blanks at the end of a line and empty lines at the end of the file do not
+  count. Everything else does: a changed word, a second blank inside a line, a
+  letter's case. The image thresholds never apply, and `thresholds_used` is
+  null.
+- **A similarity limit, only on request.** An entry can set
+  `"thresholds": {"min_text_similarity": 0.98}`. A text that differs then
+  still passes when its similarity to the golden is at least that. Similarity
+  is the share of words the two texts have in common, in order (Python's
+  `difflib` ratio; over lines above 5,000 words, and above 5,000 lines the
+  share of the longer text that both start with). The same steps down are
+  taken when a match would take too long, which happens when two long texts
+  share little more than one frequent word: the work is counted in steps, not
+  seconds, so the result is the same on every machine, and
+  `similarity_basis` names the basis that was used. The noise floor never
+  loosens the rule by itself: one changed word moves the rest of a generated
+  text, so "3× the noise" means nothing for text.
+- **What cannot be compared fails.** No `.txt` file, a file over 1 MiB, a file
+  the worker listed and did not send, another number of text files than the
+  golden has, or a text file under another name: each is a `fail`, never a
+  pass, with or without a similarity limit.
+- **Bless gate.** Golden generation runs a text workflow twice, like every
+  workflow. A golden whose two runs differ is refused: `bless` and
+  `bless_only` print `::error::[<id>] golden <tag> is not blessed: ...`, leave
+  `current.json` alone and the job fails. The golden's files are uploaded all
+  the same: the first run's text, and in `noise_floor.json` the line and
+  column where the second run parts from it. The one exception is a golden
+  generated or promoted again under the tag that is current (`force`): a
+  refused one leaves the files of the current reference as they are, with or
+  without `bless`. An exact-match golden that does not match its own second
+  run would fail at random, and with PULSE on it would comment on pull
+  requests. Make the workflow deterministic, or set `min_text_similarity` in
+  its entry: the gate then opens only when the second run passes against the
+  first under that limit. A golden whose text is empty, or whose two runs
+  could not be compared, is refused too. A golden promoted from a run
+  (`from_run`) is held to the same: an empty text is not blessed, and a run
+  without a text file is not promoted.
+
+A text change that is new at a commit adds one line under the table of a
+PULSE comment: the similarity and the line and column of the first
+difference. The text itself never enters a comment.
 
 Each commit is tested once per lane. The cron runs every 5 minutes, the shortest
 interval GitHub schedules (GitHub can start a run late, or drop one, when it is
@@ -170,7 +250,8 @@ bit-identical to a previous run that already failed against the same golden,
 and null when there is nothing to compare against or the outputs match a
 previous run that did not fail (the golden changed, not the code). Inherited
 failures publish no figures (`figures: false`): the figures of the first
-failing commit already show the diff. `summary.json` carries
+failing commit already show the diff. A text workflow never has figures: its
+difference is shown from the two published texts. `summary.json` carries
 `schema_version: 2` and `has_infra_error` (infra errors never turn `overall`
 red), and `run_url` / `run_id`: the Actions run that tested the commit (null
 outside Actions). Each workflow also records `prior_verdict` / `prior_commit`:
@@ -217,6 +298,24 @@ on the runner.
   result;
 - for a workflow that passed without being bit-identical: its numbers next to
   the limits, the noise floor and the diff figures, folded;
+- for a text workflow, text where an image workflow has images. Its row in
+  the table links the `.txt` file and says "identical text", or the
+  similarity and the line where the texts part. A text that changed has a
+  block under "What needs attention": whether it is identical, the
+  similarity, the line and column of the first difference, and the character
+  and line counts, each against the reference, the previous tested commit and
+  the noise floor. Below that come the difference (removed text as `[-…-]`,
+  added text as `{+…+}`), then the generated text and the reference text,
+  folded, each with a link to its file, and the two commands that approve the
+  new text. When the two texts differ only in characters that cannot be shown,
+  or the reference has its text under another file name, a sentence says so
+  where the difference would be. A text that matches its reference is shown,
+  folded, under "Generated text", also when it differs from the run before.
+  A text is cut to its first 4,000 characters and the difference to 8,000,
+  and lines over 100 columns are folded; the heading says both, because the
+  line and column in the table count in the file. A file over 256 KB is
+  linked, not shown. Generated text is model output: it appears only inside
+  `<pre>` blocks, escaped, and is never printed to the job log;
 - every output file, a link to each `run.json`, schema notes, the status of
   custom-node packs, and the workflows that did not run on the lane;
 - the lane's newest 20 commits with their results, each linked to the run that
@@ -253,6 +352,8 @@ GitHub login (any account). The images in a summary load from the results
 branch, pinned to the commit the report read. A summary stays under GitHub's
 1 MiB limit: when a run is too large, log tails, tracebacks, file lists and
 history rows are shortened in that order, and the summary says which.
+Generated texts go last, first cut to 1,000 characters, then left out with a
+link to the file.
 
 **What stays on ci.comfy.org.** The site reads the same files. A summary is a
 page about one commit, so the views over many runs are only there: a lane's
@@ -825,6 +926,38 @@ frontend/                                  # ComfyUI_frontend CI index (see abov
 
 Run outputs also carry 256-px WebP previews under `<workflow_id>/outputs/thumbs/`
 for the run's job summary and the dashboard's list views.
+
+A text workflow (`"output_kind": "text"`) publishes its text where an image
+workflow publishes its PNGs:
+
+```
+runs/<branch>/<commit>/<workflow_id>/outputs/<workflow_id>_00001.txt   # the generated text
+golden/<workflow_id>/<tag>/outputs/<workflow_id>_00001.txt             # the reference text
+```
+
+It has no `figures/` and no `outputs/thumbs/`. Its files differ from an image
+workflow's in these keys, and an image workflow's files do not change at all:
+
+- `comparison.json` and `blessed.json` end with `"output_kind": "text"`, and
+  the workflow's cell in `summary.json` carries it too. An image workflow's
+  files never name a kind.
+- `vs_golden`, `vs_previous` and `noise_floor.json` carry `"kind": "text"`,
+  `identical`, `similarity` (0 to 1) with its `similarity_basis`, the
+  character, line and file counts of both sides, and `first_diff` when the
+  texts differ: `file`, `line` and `col` (from 1), `offset` (how many
+  characters the two share from the start), and `ref` and `cand`, the two
+  lines there (model output: escape them). The noise floor of a golden
+  promoted from a run has the counts of the promoted text itself; its
+  `identical` and `similarity` are the earlier golden's, with
+  `"measured": false`.
+- `thresholds_used` is null, or `{"min_text_similarity": x}` when the entry
+  sets one. `figures` is false and `thumbnail` is null.
+- `output_sha256` is the sha256 of the text file as the worker wrote it (with
+  several text files, the sha256 of their `<sha256>  <name>` lines). The cell,
+  `blessed.json`, `current.json` and the golden in `index/lanes.json` all use
+  that one rule, so approving a changed text closes its failing chain.
+- A cell in the run index has `"k": "text"`; its `mse`, `psnr`, `pct` and
+  `th` are null.
 
 ## Notes
 
