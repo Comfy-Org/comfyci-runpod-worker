@@ -420,9 +420,9 @@ workflows), is written by hand. The rules are the ones the command follows.
      run's cell has the sha256 of every file.
 
    **A sound workflow** (like the `ace_step_15_t2a` entry) saves a FLAC
-   file as its main output. `ace_step_15_t2a` is its template as
-   `scripts/template_api_export.py` converts it, with three values changed
-   by hand. However one is made, make sure of this:
+   file as its main output. `ace_step_15_t2a` is what the command at the
+   top of [Adding a workflow](#adding-a-workflow) writes, file and entry.
+   However one is made, make sure of this:
 
    - The entry says `"output_kind": "audio"` and `"level": "smoke"`.
    - The graph ends in `SaveAudioAdvanced` with `format` `"flac"` and
