@@ -152,10 +152,12 @@ jobs:
       # The rule of regression.yml, per lane: a commit that has the lane's
       # result is not tested again, so a night without a new commit costs
       # nothing and shows the published result. A result with infra errors, or
-      # a start marker with no result, gets one retry. A dispatch naming a
-      # commit always runs, and so does one with `publish` off. A result of
-      # named workflows only (`scope` in the summary) does not count as tested.
-      # This file has no report-only run, so REPORT_ONLY is always false.
+      # a start marker with no result, gets one retry. So does what a run that
+      # did not finish pushed on its way (`partial` in the summary). A dispatch
+      # naming a commit always runs, and so does one with `publish` off. A
+      # result of named workflows only (`scope` in the summary) does not count
+      # as tested. This file has no report-only run, so REPORT_ONLY is always
+      # false.
       - name: Skip if already tested on this lane
         id: target
         env:
@@ -212,9 +214,12 @@ jobs:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
           LANE: ${{ matrix.lane }}
         run: python scripts/runpod_endpoints.py status --lane "$LANE" --restore-workers
-      # The lane names its endpoint in manifest/lanes.json. `exec` makes the
-      # script the step's own process, so it is the one that gets the signals
-      # GitHub sends when a run is cancelled or reaches its time limit.
+      # The lane names its endpoint in manifest/lanes.json, and how many jobs
+      # the run has there at a time (`max_in_flight`). `exec` makes the script
+      # the step's own process, so it is the one that gets the signals GitHub
+      # sends when a run is cancelled or reaches its time limit. It then
+      # cancels its RunPod jobs in flight. What it pushed on its way, every 10
+      # workflows, stays on the results branch.
       - name: Run regression suite
         if: steps.target.outputs.skip != 'true'
         env:

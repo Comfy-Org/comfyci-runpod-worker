@@ -443,7 +443,12 @@ class IndexBuilder:
         summaries = []
         for p in paths:
             s = self.store.read_blob_json(p)
-            if s and s.get("commit") and s.get("run_ts"):
+            # A summary with `partial` is what a run that did not finish pushed
+            # on its way. No publish indexed it, so a rebuild does not either:
+            # a run that died is in no history table. Unless a later run tested
+            # workflows again at that commit (`retests`): its publish did.
+            if (s and s.get("commit") and s.get("run_ts")
+                    and not ("partial" in s and not s.get("retests"))):
                 summaries.append(s)
         summaries.sort(key=lambda s: (s["run_ts"], s["commit"]))
         log(f"index: {len(summaries)} summaries under {runs_prefix}")

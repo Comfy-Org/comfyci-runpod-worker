@@ -210,6 +210,11 @@ output is compared with its golden. A workflow at smoke level uses the same
 five names, and its `pass` and `fail` mean something else: see
 [Smoke level](#smoke-level).
 
+On a lane with the `nightly` or `weekly` cadence an `infra_error` that is
+still there at the end of the run is **red**: nothing tests the commit again
+the next minute there (see
+[How a nightly or weekly run goes](#how-a-nightly-or-weekly-run-goes)).
+
 Thresholds come from the manifest entry if set, otherwise from the manifest
 defaults loosened to 3× the golden's own re-run noise floor
 (`noise_floor.json`), so nondeterministic workflows don't false-alarm.
@@ -277,8 +282,16 @@ marker, `runs/master/<sha>/attempt.json` (attempt number, Actions run URL), so
 a run that dies before publishing its summary (a failed results push, a killed
 job) is still counted. A summary with infra errors, or a marker with no
 summary, gets one more attempt: two in all per commit per lane, counted in the
-summary's and the marker's `attempt`. A run that cannot push its marker stops
-before any GPU work. To test a commit again on purpose, dispatch **GPU
+summary's and the marker's `attempt`. Two cases follow from that rule. A
+workflow that another run right away would not test either is no reason for
+the retry: its models are not on the volume yet (`missing_model`), the model
+host refuses a file (`model_access_error`), or the run's deadline came before
+it could start (`not_reached`). A summary whose untested workflows are all of
+that kind is left alone, and its report says so. And a summary with `partial`
+(a nightly or weekly run pushes one every 10 workflows) belongs to a run that
+did not finish: it counts as a marker with no summary. A run that cannot push
+its marker stops before any GPU work.
+To test a commit again on purpose, dispatch **GPU
 regression** with `commit=<sha>` (and `lane=` for one lane), when no GPU
 regression run is in progress, or check afterwards that the dispatch ran:
 all runs share one concurrency group, and GitHub cancels a pending run as
@@ -321,7 +334,9 @@ has 3 workers. A job may wait 600 seconds in RunPod's queue, and 60 seconds
 more for each job submitted before it in the run (the order of the manifest).
 A job that waits longer is cancelled and submitted once more. The extra wait
 is added to the time the runner gives the job as a whole, its `timeout_s`
-plus 900 seconds.
+plus 900 seconds. That is the per-commit lane. A nightly or weekly lane has
+only a few jobs on its endpoint at a time (see
+[How a nightly or weekly run goes](#how-a-nightly-or-weekly-run-goes)).
 
 A failure vs golden is also classified against the previous tested run
 (`detail` in `summary.json`): `new_drift` when this commit's outputs differ
@@ -351,7 +366,7 @@ baselines** leaves it out of `workflows=all` and refuses it when it is named.
 | `pass` | it finished, every expected file is there and passes its checks | green |
 | `fail` | it finished, and a file is missing or does not pass. Also when it wrote no file at all (worker status `no_outputs`) | **red** |
 | `execution_error` | the workflow did not finish, as at reference level | **red** |
-| `infra_error` | not tested, as at reference level | warning, green |
+| `infra_error` | not tested, as at reference level | warning, green (red on a nightly or weekly lane) |
 | `no_baseline` | never: there is no reference to miss | |
 
 The checks are in `scripts/smoke.py`. They run on the CI runner, on the files
@@ -420,12 +435,23 @@ it cannot hold up the commits that wait for the run to end.
   On a lane with the `nightly` or `weekly` cadence a run covers many commits:
   its title names the range (`e9afbcc..05e878f (7 commits)`), and the table
   says how much new data the run published;
+- a warning under the title when the summary is one that a nightly or weekly
+  run pushed on its way and no final one replaced: "The run that tested this
+  commit did not finish: 40 of 55 workflows have a result". The table then
+  has a **Progress** row.
+  A **Tested again** row lists the workflows that a later run tested again
+  at the commit, and their rows in the table of workflows link that run;
 - "What needs attention", one block per workflow that did not pass. For a
   changed output: each metric next to its limit, the comparison with the
   previous tested commit, where the reference (the golden) came from, the diff
   figures and the two commands that approve the new output. For an execution
   or infra error: the worker status, the error message, the node, the
-  traceback and the tail of the server log. A changed output that was approved
+  traceback and the tail of the server log. On a nightly or weekly lane a
+  failure is placed by the workflow's own last result ("new since `e9afbcc`,
+  7 commits", with the command that tests one commit of that range), a
+  workflow that was not tested says whether the run tried it again and how to
+  test it now, and the workflows the run's deadline did not reach stand in
+  one list. A changed output that was approved
   as the reference after the run is labelled "accepted", is no longer counted
   as open and sits under a heading of its own. The label needs both: the
   output is the lane's reference today, and that reference is another one than
@@ -798,6 +824,82 @@ written. To show a published result of one of these lanes again without
 testing, dispatch **GPU regression** with `report_only: true` and
 `lane=<the lane>`: it lists every lane of the registry.
 
+#### How a nightly or weekly run goes
+
+A per-commit run is over in five minutes, and the cron tests its commit again
+when something went wrong. A nightly or weekly run can take hours and cost
+dollars, and the lane's next run is a day or a week away. So
+`scripts/run_regression.py` runs a lane of these two cadences in its own way:
+
+| | Per-commit lane | Nightly or weekly lane |
+|---|---|---|
+| Jobs on the endpoint at once | all | the lane's `max_in_flight`, or `--max-in-flight` |
+| Attempts for a job | 2, the second right away | 1, and one pass at the end of the run |
+| Wait in RunPod's queue | 600 s, plus 60 s for each job before it | 1,800 s |
+| A look at a job | every 10 s | every 3 s |
+| The run's own deadline | none | the lane's `timeout_minutes` minus 25, or `--deadline-minutes` |
+| A workflow that was not tested | a warning. The cron tests the commit once more | **red** (exit code 1) |
+| The previous-run pointer | moves when every workflow produced outputs | moves on every full run |
+
+- **A few jobs at a time.** Fifty jobs submitted at once to two workers would
+  mostly be cancelled for waiting in the queue. A job is submitted only when
+  one of the lane's slots is free, so its queue clock starts when a worker can
+  take it. The runner then hands the next job to a worker itself, and the
+  worker waits, billed, until it does. So the runner looks at a job every 3
+  seconds, and the endpoint keeps an idle worker for 60.
+- **The deadline.** GitHub ends the lane's job after `timeout_minutes`. Before
+  the run submits a job, it asks whether the job could still be running 25
+  minutes before that. A job can take its `timeout_s` plus 900 seconds, plus
+  the 1,200 seconds more it may wait in the queue. When that does not fit, no
+  job is submitted: the workflow's cell says `"worker_status": "not_reached"`
+  (verdict `infra_error`), and the run goes on with the next workflow, which
+  may be smaller. So no job is in flight when the deadline comes, and the last
+  25 minutes belong to the publish and the report.
+- **Checkpoints.** After every 10 workflows the run writes a summary of what
+  it has, with `"partial": {"done": 10, "of": 55}`, and pushes it with the
+  workflow folders written so far. A run that dies, is cancelled or loses its
+  network leaves that behind. **GPU regression** with `report_only: true` and
+  the lane shows it ("The run that tested this commit did not finish: 40 of
+  55 workflows have a result"), and the next run of the commit is its second
+  attempt. The run index is written by the final publish alone, so a run that
+  died is in no history table. A run that names its workflows pushes nothing
+  early.
+- **The pass at the end.** When every workflow has had its one attempt, those
+  that were not tested for a reason that can pass (the queue, the network, a
+  worker error) are tried once more, while the deadline allows. Not tried
+  again: a job that used up its whole time, because a second one can cost
+  another hour (RunPod ended it, or the runner gave up on it, and its
+  `run.json` says `"reason": "timed_out"`). And a workflow that another job
+  would not change: `missing_model`, `model_access_error`, `not_reached`,
+  `bad_request`.
+- **A red run.** The exit code is 1 when a workflow failed, as on every lane,
+  and also when one stayed untested. GitHub mails a red scheduled run, and
+  nothing else would tell anyone.
+- **A stopped run.** When a run is cancelled or reaches its time limit, GitHub
+  sends the step an interrupt, 7.5 seconds later a terminate, and 2.5 seconds
+  after that it kills the step. On the first signal the script cancels its
+  RunPod jobs in flight and ends. There is no time to push anything then,
+  which is what the checkpoints are for. The step starts the script with
+  `exec`, so the script itself is the process that gets the signals.
+- **Who broke it.** A nightly run covers about 6 commits and a weekly run
+  about 44, and a workflow's last result is not always in the run before. So
+  the summary says, for each red workflow, how many commits lie between the
+  workflow's own last red or green result and this commit: `ranges`, with
+  `{"prev", "commits_between", "compare_url"}` per workflow id. The report
+  words the failure from it ("new since `e9afbcc`, 7 commits"), and a
+  workflow without an earlier result reads "first run". The open failing
+  chain carries the range too, so nobody is pointed at the pull request of
+  the newest of 44 commits. To find the commit, test single commits of the
+  range. The report prints the command:
+
+  ```
+  gh workflow run nightly-weekly.yml --repo Comfy-Org/comfyci-runpod-worker \
+      -f cadence=weekly -f commit=<sha> -f workflows=<id>
+  ```
+
+  Each such step publishes under its own commit with `scope`, moves no
+  pointer, and shortens the chain: six steps halve 44 commits down to one.
+
 The keys a lane may add. Every one is optional, and `validate` checks its
 type:
 
@@ -808,8 +910,8 @@ type:
 | `disk_gb` | `runpod_endpoints.py create`, `status` | container disk of the endpoint's workers (default `endpoint_defaults.disk_gb`, 40) |
 | `idle_timeout_s` | `runpod_endpoints.py create`, `status` | how long a worker stays up after a job (default `endpoint_defaults.workers.idleTimeout`, 20) |
 | `env` | `runpod_endpoints.py create` | environment variables of the endpoint, on top of `endpoint_defaults.env` |
-| `timeout_minutes` | `lanes.py cadence`, `nightly-weekly.yml` | the time limit of the lane's job (default 360, GitHub's own) |
-| `max_in_flight` | nothing yet | how many jobs a run may have on the endpoint at once. A run submits all its jobs at once today |
+| `timeout_minutes` | `lanes.py cadence`, `nightly-weekly.yml`, `run_regression.py` | the time limit of the lane's job (default 360, GitHub's own). On a nightly or weekly lane the run's own deadline is this minus 25 |
+| `max_in_flight` | `run_regression.py` | how many jobs a run has on the endpoint at once (default: all of them, as on the per-commit lanes). `--max-in-flight` overrides it |
 | `model_storage` | the manifest lint | `"job"`: the lane's models are not on the network volume, so they do not count against its size. Nothing fetches models for a job yet, so such a lane cannot run. Default `"volume"` |
 
 None of them is published: the run index copies a fixed list of lane keys.
@@ -1382,11 +1484,22 @@ workflow has. A reference-level image workflow's files do not change at all:
   listed only for a workflow that is enabled on the lane.
 - A summary of a lane with the `nightly` or `weekly` cadence can carry
   `published_new_bytes`: the bytes of the output files the run published
-  that the previous result had not. Its report shows the number. An index
-  entry can carry `wr`, per workflow `{"n", "url"}`: the commits between the
-  workflow's own last result and this one, copied from the summary's
-  `ranges`. A chain that started in such an entry carries that as `range`.
-  Nothing writes `ranges` yet.
+  that the previous result had not. Its report shows the number. It carries
+  `ranges` when a workflow is red: per workflow id `{"prev",
+  "commits_between", "compare_url"}`, the commits between the workflow's own
+  last red or green result and this commit. A workflow on its first run has
+  no entry. An index entry carries them as `wr`, per workflow `{"n", "url"}`,
+  and a chain that started in such an entry carries that as `range`.
+- A summary with `"partial": {"done": n, "of": m}` is one that a nightly or
+  weekly run pushed before it had every result. The run's final summary
+  replaces it and has no such key. Read one that has it as "this run did not
+  finish": it holds the cells of `n` workflows, and the run index has no
+  entry for it.
+- A cell with `"worker_status": "not_reached"` (verdict `infra_error`) is a
+  workflow that a run did not start, because its job could still have been
+  running at the run's deadline. It has `error`, a sentence, and no
+  `run.json`. The `run.json` of a job that used up its whole time on a
+  nightly or weekly lane has `"reason": "timed_out"`.
 
 ## Notes
 

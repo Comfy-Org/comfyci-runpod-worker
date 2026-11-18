@@ -3,6 +3,12 @@
 Infrastructure flakiness is isolated here: a job stuck IN_QUEUE beyond the
 queue deadline is cancelled and retried once; anything that still fails maps
 to status "infra_error" so the CI job can warn instead of going red.
+
+A nightly or weekly run asks for one attempt (`attempts=1`) and decides itself,
+at its end, what to try again. Its failure record then says when the job used
+up its whole time (`"reason": "timed_out"`), which is not worth a second try.
+The client remembers the jobs it has submitted that RunPod has not ended, so a
+run that is stopped can cancel them.
 """
 from __future__ import annotations
 
@@ -20,6 +26,15 @@ RUNPOD_API = "https://api.runpod.ai/v2"
 POLL_INTERVAL_S = 10
 QUEUE_DEADLINE_S = 600
 COLD_START_ALLOWANCE_S = 900
+# The states in which RunPod has ended a job: nothing is left to cancel.
+ENDED_STATES = ("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT")
+# `reason` in the failure record of a job that used up its whole time: RunPod
+# ended it at the endpoint's limit, or the runner gave up at its poll deadline.
+TIMED_OUT = "timed_out"
+# Seconds one cancel call may wait for RunPod, to connect and again to be
+# answered, when a stopped run cancels its jobs: GitHub kills the step 10
+# seconds after its first signal.
+STOP_CANCEL_TIMEOUT_S = 3
 
 # custom_node_install_error: a pack could not be fetched or its requirements
 # could not be pip-installed on the worker (network, not the commit under test).
@@ -53,23 +68,45 @@ class RunPodClient:
         self.base = f"{RUNPOD_API}/{endpoint_id}"
         key = api_key or os.environ["RUNPOD_API_KEY"]
         self.headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        # The jobs this client submitted that RunPod has not ended, as far as
+        # the client was told: what a run that is stopped has to cancel.
+        self.live: set[str] = set()
 
     def run(self, job_input: dict) -> str:
         r = requests.post(f"{self.base}/run", headers=self.headers,
                           json={"input": job_input}, timeout=60)
         r.raise_for_status()
-        return r.json()["id"]
+        job_id = r.json()["id"]
+        self.live.add(job_id)
+        return job_id
 
     def status(self, job_id: str) -> dict:
         r = requests.get(f"{self.base}/status/{job_id}", headers=self.headers, timeout=60)
         r.raise_for_status()
-        return r.json()
+        body = r.json()
+        if body.get("status") in ENDED_STATES:
+            self.live.discard(job_id)
+        return body
 
-    def cancel(self, job_id: str):
+    def cancel(self, job_id: str, timeout: float = 60):
+        self.live.discard(job_id)
         try:
-            requests.post(f"{self.base}/cancel/{job_id}", headers=self.headers, timeout=60)
+            requests.post(f"{self.base}/cancel/{job_id}", headers=self.headers, timeout=timeout)
         except requests.RequestException:
             pass
+
+    def cancel_live(self, timeout: float = STOP_CANCEL_TIMEOUT_S) -> list[str]:
+        """Cancel every job of this client that RunPod has not ended, one call
+        each, and return their ids. For a run that is being stopped: nobody
+        would read those jobs, and they would be billed to their end."""
+        job_ids = sorted(self.live)
+        for job_id in job_ids:
+            self.cancel(job_id, timeout)
+        return job_ids
+
+
+class JobTimeout(TimeoutError):
+    """The runner gave up on a job at its poll deadline: it used up its time."""
 
 
 def poll_deadline_s(exec_timeout_s: float, queue_deadline_s: float = QUEUE_DEADLINE_S) -> float:
@@ -81,8 +118,10 @@ def poll_deadline_s(exec_timeout_s: float, queue_deadline_s: float = QUEUE_DEADL
 
 
 def _poll(client: RunPodClient, job_id: str, exec_timeout_s: float,
-          queue_deadline_s: float = QUEUE_DEADLINE_S) -> dict:
-    """Poll until COMPLETED/FAILED. Returns RunPod's status body; raises TimeoutError.
+          queue_deadline_s: float = QUEUE_DEADLINE_S,
+          poll_interval_s: float = POLL_INTERVAL_S) -> dict:
+    """Poll until COMPLETED/FAILED. Returns RunPod's status body; raises TimeoutError
+    (JobTimeout when the job was past its poll deadline, not waiting in the queue).
 
     Transient network failures (runner DNS blips etc.) are tolerated for up to
     ~5 minutes before giving up — the job keeps running server-side either way.
@@ -99,17 +138,17 @@ def _poll(client: RunPodClient, job_id: str, exec_timeout_s: float,
             net_errors += 1
             if net_errors > 30:
                 raise
-            time.sleep(POLL_INTERVAL_S)
+            time.sleep(poll_interval_s)
             continue
         state = st.get("status")
-        if state in ("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"):
+        if state in ENDED_STATES:
             return st
         if state == "IN_QUEUE" and time.monotonic() - t0 > queue_deadline_s:
             client.cancel(job_id)
             raise TimeoutError(f"job {job_id} stuck IN_QUEUE > {queue_deadline_s}s")
-        time.sleep(POLL_INTERVAL_S)
+        time.sleep(poll_interval_s)
     client.cancel(job_id)
-    raise TimeoutError(f"job {job_id} exceeded deadline ({allowed_s}s)")
+    raise JobTimeout(f"job {job_id} exceeded deadline ({allowed_s}s)")
 
 
 def _write_outputs(output_entries: list[dict], dest: Path) -> list[dict]:
@@ -138,7 +177,8 @@ def run_workflow_job(client: RunPodClient, workflow_id: str, workflow_json: dict
                      comfy_flags: list[str], workdir: Path,
                      comfy_repo: str | None = None, lane: str | None = None,
                      custom_nodes: list[dict] | None = None,
-                     queue_deadline_s: float = QUEUE_DEADLINE_S) -> dict:
+                     queue_deadline_s: float = QUEUE_DEADLINE_S, attempts: int = 2,
+                     poll_interval_s: float = POLL_INTERVAL_S) -> dict:
     """Submit + poll one workflow with a single retry on infra flakes.
 
     Returns a run record: {"status": ..., "outputs_dir": ..., worker fields...}.
@@ -148,7 +188,14 @@ def run_workflow_job(client: RunPodClient, workflow_id: str, workflow_json: dict
     the worker installs before the server starts; the record carries the
     worker's per-pack install and import report under the same key.
     `queue_deadline_s` is how long the job may wait in RunPod's queue before it
-    is cancelled (and submitted once more).
+    is cancelled (and submitted once more). `poll_interval_s` is the pause
+    between two looks at the job.
+
+    `attempts` is how often the job is submitted at most: 2, the retry above.
+    With 1 the caller decides about another attempt, so the failure record
+    tells it what it needs for that: `"reason": "timed_out"` when the job used
+    up its whole time (RunPod ended it, or the runner gave up at the poll
+    deadline). Another attempt of such a job can cost as much again.
     """
     job_input = {
         "mode": "run",
@@ -163,15 +210,18 @@ def run_workflow_job(client: RunPodClient, workflow_id: str, workflow_json: dict
         "custom_nodes": list(custom_nodes or []),
     }
     last_err = None
-    for attempt in (1, 2):
+    spent = False  # the last attempt used up its whole time
+    for attempt in range(1, attempts + 1):
         try:
             job_id = client.run(job_input)
-            st = _poll(client, job_id, timeout_s, queue_deadline_s)
+            st = _poll(client, job_id, timeout_s, queue_deadline_s, poll_interval_s)
         except (requests.RequestException, TimeoutError) as e:
             last_err = str(e)[:1000]
+            spent = isinstance(e, JobTimeout)
             continue
         if st.get("status") != "COMPLETED":
             last_err = f"runpod status {st.get('status')}: {str(st.get('error'))[:1000]}"
+            spent = st.get("status") == "TIMED_OUT"
             continue
         out = st.get("output") or {}
         record = {k: out.get(k) for k in
@@ -194,8 +244,11 @@ def run_workflow_job(client: RunPodClient, workflow_id: str, workflow_json: dict
         outputs_dir = workdir / "outputs"
         record["outputs"] = _write_outputs(out.get("outputs") or [], outputs_dir)
         record["outputs_dir"] = str(outputs_dir)
-        if record["status"] in RETRYABLE_STATUSES and attempt == 1:
+        if record["status"] in RETRYABLE_STATUSES and attempt < attempts:
             last_err = f"worker infra status {record['status']}: {json.dumps(record.get('error'))[:500]}"
             continue
         return record
-    return {"status": "infra_error", "error": {"message": last_err}, "attempt": 2}
+    failed = {"status": "infra_error", "error": {"message": last_err}, "attempt": attempts}
+    if spent and attempts == 1:
+        failed["reason"] = TIMED_OUT
+    return failed

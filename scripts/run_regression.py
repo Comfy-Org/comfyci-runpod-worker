@@ -10,10 +10,30 @@ Exit code: 1 iff any enabled workflow's verdict is "fail" or "execution_error".
 Infrastructure problems and missing baselines are GitHub warnings, never
 failures, so RunPod flakiness cannot block core merges.
 
+A nightly or weekly lane (cadence "nightly" or "weekly" in manifest/lanes.json)
+runs many workflows once, for an hour or more, and nothing tests its commit
+again the next minute. So such a run behaves in its own way:
+
+- It has `max_in_flight` jobs on the endpoint at once (the lane's key), each
+  with one attempt, 1800 s for the queue and a look every 3 s.
+- It has a deadline of its own: the lane's `timeout_minutes` minus 25. A
+  workflow whose job could still be running then is not started. Its cell
+  says `not_reached`.
+- After every 10 workflows it pushes what it has, with `partial` in the
+  summary, so a run that dies leaves its results behind.
+- At its end it tries once more what was not tested for a reason that can
+  pass. Not a job that used up its whole time, and not one that another
+  attempt could not change.
+- When GitHub stops it, it cancels its RunPod jobs before it goes.
+- Its exit code is also 1 when a workflow stayed untested: the next run is a
+  day or a week away, and a red run is what GitHub mails.
+- Its summary says for each red workflow how many commits lie between the
+  workflow's own last result and this commit (`ranges`).
+
 Usage (CI):
   python run_regression.py --commit $GITHUB_SHA --branch master \
       [--manifest ../manifest/workflows.json] [--workflows all] \
-      [--summary-out summary.json]
+      [--summary-out summary.json] [--max-in-flight N] [--deadline-minutes N]
 Env: RUNPOD_API_KEY, RUNPOD_ENDPOINT_ID; GITHUB_TOKEN to push results in
 Actions (github storage) or GOOGLE_APPLICATION_CREDENTIALS (gcs storage).
 """
@@ -24,7 +44,10 @@ import concurrent.futures
 import json
 import math
 import os
+import shutil
+import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -37,13 +60,34 @@ import packs
 import regression_skip
 import smoke
 import storage
-from submit_and_poll import INFRA_STATUSES, QUEUE_DEADLINE_S, RunPodClient, run_workflow_job
+from submit_and_poll import (INFRA_STATUSES, QUEUE_DEADLINE_S, STOP_CANCEL_TIMEOUT_S, TIMED_OUT,
+                             RunPodClient, poll_deadline_s, run_workflow_job)
 
 HERE = Path(__file__).resolve().parent
 # A run submits all its jobs at once, and the endpoint has fewer workers than a
 # run has jobs. Each job further back in the line may wait this much longer in
 # RunPod's queue, so none is cancelled only for standing behind its own run.
 QUEUE_DEADLINE_STEP_S = 60
+# A nightly or weekly run submits a job only when one of its `max_in_flight`
+# slots is free, so the queue clock starts when a worker can take the job. The
+# long deadline is for a worker that RunPod cannot start at once. The runner
+# hands the next job to a worker itself, and the worker waits (billed) until
+# it does: so it looks at a job every 3 s, not every 10.
+LONG_QUEUE_DEADLINE_S = 1800
+LONG_POLL_INTERVAL_S = 3
+# The last minutes of such a lane's job belong to the publish and the report:
+# the run's own deadline is the lane's `timeout_minutes` minus this.
+DEADLINE_MARGIN_MIN = 25
+# Such a run pushes what it has after this many workflows.
+CHECKPOINT_EVERY = 10
+# The worker status of a workflow that the run's deadline did not reach.
+NOT_REACHED = "not_reached"
+# What an untested workflow's status must not be for the pass at the end of a
+# nightly or weekly run to try it again: another job would end the same way.
+NO_SECOND_TRY = regression_skip.NO_RETRY | {"bad_request"}
+# What GitHub sends a step's process when the run is cancelled or out of time:
+# an interrupt, 7.5 s later a terminate, and 2.5 s after that it kills.
+STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)
 # custom_node_error: a custom-node pack the workflow requested did not import on
 # the commit under test (whether or not the workflow uses any of its nodes).
 EXEC_FAIL_STATUSES = {"execution_error", "validation_error", "timeout", "prompt_rejected",
@@ -262,6 +306,11 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
 
     endpoint_id = entry.get("endpoint_id") or args.endpoint_id
     client = RunPodClient(endpoint_id)
+    # A nightly or weekly run keeps its clients: when it is stopped it cancels
+    # the jobs they have in flight. main() puts the list on `args`.
+    clients = getattr(args, "clients", None)
+    if clients is not None:
+        clients.append(client)
     pack_records = packs.records_for(entry, repo_root)
     print(f"[{wf_id}] submitting to RunPod (endpoint {endpoint_id}, lane {args.lane_id}"
           + (f", packs {', '.join(r['name'] for r in pack_records)}" if pack_records else "") + ")")
@@ -276,6 +325,8 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
         lane=args.lane_id,
         custom_nodes=pack_records,
         queue_deadline_s=queue_deadline,
+        # Only a nightly or weekly run says more: one attempt, a shorter poll interval.
+        **(getattr(args, "job_options", None) or {}),
     )
     published = {k: v for k, v in run_rec.items() if k != "outputs_dir"}  # runner-local path
     (workdir / "run.json").write_text(json.dumps(published, indent=2), encoding="utf-8")
@@ -381,7 +432,6 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
     for sub in ("_golden", "_previous"):
         d = workdir / sub
         if d.exists():
-            import shutil
             shutil.rmtree(d)
     if not args.skip_publish and held:
         # The files held back stay in this folder, so the run's artifact has them.
@@ -517,6 +567,144 @@ def merge_retest(old: dict, new: dict) -> dict:
     return merged
 
 
+# -- a nightly or weekly run ------------------------------------------------------------
+def _count(text: str) -> int:
+    """A command-line number that counts something: a whole number above 0."""
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be a whole number above 0")
+    return value
+
+
+def lane_count(lane: dict, key: str) -> int | None:
+    """What a lane says under a key that counts something (`max_in_flight`,
+    `timeout_minutes`): None when it says nothing. Anything but a whole number
+    above 0 is a configuration error, which `lanes.py validate` reports too."""
+    value = lane.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise SystemExit(f"{key} of the lane must be a whole number above 0, not {value!r}; "
+                         "see manifest/lanes.json")
+    return value
+
+
+def run_deadline(minutes: int | None, lane: dict, long_cadence: bool) -> float | None:
+    """The time after which the run submits no job whose worst case would pass
+    it, in seconds since the epoch, or None: no deadline. `minutes` is
+    --deadline-minutes, counted from now. Without it a nightly or weekly lane
+    has its `timeout_minutes` (GitHub's limit for the job) minus
+    DEADLINE_MARGIN_MIN, and a per-commit lane has none."""
+    if minutes is None and long_cadence:
+        limit = lane_count(lane, "timeout_minutes") or lanes_mod.DEFAULT_TIMEOUT_MINUTES
+        minutes = max(limit - DEADLINE_MARGIN_MIN, 0)
+    return None if minutes is None else time.time() + minutes * 60
+
+
+def job_worst_case_s(entry: dict, defaults: dict, queue_deadline: float, attempts: int) -> float:
+    """Seconds after which the runner has given up on a workflow's job at the
+    latest: its poll deadline, once for each attempt."""
+    return attempts * poll_deadline_s(entry_value(entry, defaults, "timeout_s"), queue_deadline)
+
+
+def not_reached_cell(wf_id: str, entry: dict, left_s: float, need_s: float) -> dict:
+    """The cell of a workflow that was not started, because its job could
+    still have been running at the run's deadline. No job was submitted."""
+    cell = {"workflow_id": wf_id, "worker_status": NOT_REACHED, "verdict": "infra_error",
+            "error": (f"not started: its job can take {need_s / 60:.0f} min, and "
+                      f"{max(left_s, 0) / 60:.0f} min were left before the run's deadline")}
+    if lanes_mod.level_of(entry) == "smoke":  # every cell of a smoke workflow names its level
+        cell["level"] = "smoke"
+    return cell
+
+
+def run_record(workdir: Path, wf_id: str) -> dict:
+    """The record process_workflow wrote for a workflow of this run ({}: none)."""
+    try:
+        record = json.loads((workdir / wf_id / "run.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return record if isinstance(record, dict) else {}
+
+
+def worth_another_try(cell: dict, record: dict) -> bool:
+    """Whether the pass at the end of a nightly or weekly run tries a workflow
+    again: it was not tested, and for a reason that can pass (the queue, the
+    network, a worker error, a failed model download). Not when another job
+    would end the same way (NO_SECOND_TRY), and not when its job used up its
+    whole time: a second one can cost another hour. `record` is its run.json."""
+    if cell.get("verdict") != "infra_error" or cell.get("worker_status") in NO_SECOND_TRY:
+        return False
+    return record.get("reason") != TIMED_OUT
+
+
+def own_ranges(cells: list[dict], commit: str, commits_since) -> dict:
+    """Per red workflow: the commits between its own last red or green result
+    (`prior_commit`) and `commit`, as commit_meta.fetch_range answers
+    (`commits_since(prev)`). A nightly or weekly run covers many commits, and
+    its workflows did not all have their last result in the run before. A
+    workflow without an earlier result has no range: it is on its first run."""
+    ranges = {}
+    for cell in cells:
+        prior = cell.get("prior_commit")
+        if cell.get("verdict") in ("fail", "execution_error") and prior and prior != commit:
+            found = commits_since(prior)
+            if found:
+                ranges[cell["workflow_id"]] = found
+    return ranges
+
+
+def cancel_in_flight(clients: list) -> list[str]:
+    """Cancel every RunPod job the run's clients still have in flight, all at
+    once, and return their ids. Each call has a few seconds: GitHub kills the
+    step 10 seconds after its first signal."""
+    cancelled: list[str] = []
+    threads = [threading.Thread(target=lambda c=client: cancelled.extend(c.cancel_live()),
+                                daemon=True)
+               for client in list(clients) if getattr(client, "live", None)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(2 * STOP_CANCEL_TIMEOUT_S)
+    return sorted(cancelled)
+
+
+def stop_handler(clients: list, stopping: threading.Event, leave=os._exit):
+    """The handler for GitHub's stop signals. Without one the RunPod jobs in
+    flight would run on, billed, with nobody to read them. It cancels them and
+    ends the process: there is no time to push anything, which is what the
+    checkpoints are for. `stopping` keeps the run from starting another job
+    in between. `leave` ends the process (the code is 128 plus the signal)."""
+    def handle(signum, frame):
+        again = stopping.is_set()
+        stopping.set()
+        try:
+            if not again:  # the second signal finds the cancels sent
+                cancelled = cancel_in_flight(clients)
+                print(f"::error::stopped by signal {signum}: cancelled {len(cancelled)} RunPod "
+                      f"job(s) in flight ({', '.join(cancelled) or 'none'})", flush=True)
+        except Exception:  # noqa: BLE001 - whatever goes wrong here, the process ends
+            pass
+        finally:
+            leave(128 + signum)
+    return handle
+
+
+def install_stop_handler(clients: list, stopping: threading.Event):
+    """Handle STOP_SIGNALS with `stop_handler`. Returns a function that puts
+    the earlier handlers back. Signals reach the main thread only: called from
+    another one, this changes nothing."""
+    if threading.current_thread() is not threading.main_thread():
+        return lambda: None
+    handler = stop_handler(clients, stopping)
+    earlier = {sig: signal.signal(sig, handler) for sig in STOP_SIGNALS}
+
+    def restore():
+        for sig, was in earlier.items():
+            signal.signal(sig, signal.SIG_DFL if was is None else was)
+    return restore
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", default=str(HERE.parent / "manifest" / "workflows.json"))
@@ -531,6 +719,13 @@ def main():
     ap.add_argument("--summary-out", default=None,
                     help="also write the run summary here (for the PR comment step); "
                          "written once results are published, whatever the verdict")
+    ap.add_argument("--max-in-flight", type=_count, default=None,
+                    help="jobs on the endpoint at once (default: the lane's max_in_flight, "
+                         "else all of them)")
+    ap.add_argument("--deadline-minutes", type=_count, default=None,
+                    help="minutes from now after which no job is submitted that could still "
+                         "be running then (default on a nightly or weekly lane: its "
+                         "timeout_minutes minus 25; on a per-commit lane: none)")
     storage.add_storage_args(ap)
     args = ap.parse_args()
 
@@ -623,6 +818,19 @@ def main():
                 comparator_for(entry)
         except ValueError as e:
             raise SystemExit(f"[{wf_id}] {e}; see manifest/workflows.json")
+    # How the jobs are run. A per-commit lane submits them all at once, and
+    # has no deadline. A nightly or weekly lane says how many it has on the
+    # endpoint at a time, and stops submitting when its time runs out (see the
+    # top of this file). Read here, before the start marker: a value that
+    # cannot be used is a configuration error too.
+    long_cadence = lanes_mod.is_long_cadence(lane)
+    in_flight = min(len(selected), args.max_in_flight or lane_count(lane, "max_in_flight")
+                    or len(selected))
+    deadline = run_deadline(args.deadline_minutes, lane, long_cadence)
+    if long_cadence:
+        print(f"lane {lane_id}: {len(selected)} workflow(s), {in_flight} job(s) at a time, one "
+              f"attempt each, and {(deadline - time.time()) / 60:.0f} min until the run's "
+              "deadline")
 
     # A run that names its workflows is a re-test or a first look, not the
     # lane's run of the commit: it pushes no start marker, so the cron does not
@@ -647,53 +855,165 @@ def main():
     args.previous_smoke = previous_smoke_files(store, args.branch, prior_entries, args.commit,
                                                at_smoke)
 
-    results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(selected)) as pool:
-        futs = {pool.submit(process_workflow, wf_id, entry, defaults, args, repo_root,
-                            store, queue_deadline_s(position)): wf_id
-                for position, (wf_id, entry) in enumerate(selected.items())}
-        for fut in concurrent.futures.as_completed(futs):
-            wf_id = futs[fut]
-            try:
-                results.append(fut.result())
-            except Exception as e:
-                print(f"[{wf_id}] harness error: {e!r}")
-                results.append({"workflow_id": wf_id, "worker_status": "harness_error",
-                                "verdict": "infra_error", "error": repr(e)[:1000]})
-                if wf_id in at_smoke:  # every cell of a smoke workflow names its level
-                    results[-1]["level"] = "smoke"
+    results: dict[str, dict] = {}  # workflow id -> its cell, filled by the main thread
+    position = {wf_id: i for i, wf_id in enumerate(selected)}
+    stopping = threading.Event()
+    tries = 2  # of a job: the second right away, inside run_workflow_job
+    if long_cadence:
+        # One attempt, and one pass at the end of the run for what can be tried
+        # again: by then an outage of some minutes is over.
+        tries = 1
+        args.job_options = {"attempts": 1, "poll_interval_s": LONG_POLL_INTERVAL_S}
+        args.clients = []
 
-    results.sort(key=lambda r: r["workflow_id"])
-    verdicts = {r["workflow_id"]: r["verdict"] for r in results}
-    overall = ("fail" if any(v in ("fail", "execution_error") for v in verdicts.values())
-               else "pass")
-    meta = commit_meta.fetch_commit_meta(args.commit)
-    priors = index_builder.prior_verdicts(prior_entries, args.commit,
-                                          (meta or {}).get("committed_ts"))
-    for r in results:
-        prior = priors.get(r["workflow_id"]) or {}
-        r["prior_verdict"] = prior.get("verdict")
-        r["prior_commit"] = prior.get("commit")
-    run_url, run_id = actions_run()
-    summary = {"schema_version": 2, "branch": args.branch, "commit": args.commit,
-               "run_ts": int(time.time()), "overall": overall,
-               "has_infra_error": any(v == "infra_error" for v in verdicts.values()),
-               "lane": lane_id,
-               "attempt": attempt,
-               # The Actions run that tested the commit (null outside Actions):
-               # its page carries the full report, and the index links rows to it.
-               "run_url": run_url, "run_id": run_id,
-               # The worker image and host every workflow ran on (they share one endpoint).
-               "env": next((r.get("env") for r in results if r.get("env")), None),
-               "commit_meta": meta,
-               "tested_range": (commit_meta.fetch_range(prev_commit, args.commit)
-                                if prev_commit and prev_commit != args.commit else None),
-               "workflows": {r["workflow_id"]: r for r in results}}
-    long_cadence = lanes_mod.is_long_cadence(lanes["lanes"][lane_id])
-    if long_cadence and not args.skip_publish:
-        # Only a nightly or weekly lane says how much it added to the results
-        # branch: a summary of a per-commit lane keeps the keys it always had.
-        summary["published_new_bytes"] = published_new_bytes(results, args.previous_smoke)
+    def queue_wait(wf_id: str) -> float:
+        return LONG_QUEUE_DEADLINE_S if long_cadence else queue_deadline_s(position[wf_id])
+
+    def run_one(wf_id: str, again: bool = False) -> dict | None:
+        """The cell of one workflow. With a deadline, the run first asks
+        whether the job's worst case still fits before it. When it does not,
+        no job is submitted: the cell says `not_reached`, or, in the pass at
+        the end (`again`), the cell the workflow has stays (None)."""
+        entry = selected[wf_id]
+        if stopping.is_set():
+            raise RuntimeError("the run is being stopped")
+        if deadline is not None:
+            left = deadline - time.time()
+            need = job_worst_case_s(entry, defaults, queue_wait(wf_id), tries)
+            if need > left:
+                print(f"[{wf_id}] not started: its job can take {need / 60:.0f} min, and "
+                      f"{max(left, 0) / 60:.0f} min are left before the run's deadline")
+                return None if again else not_reached_cell(wf_id, entry, left, need)
+        if again:
+            # The folder is the second attempt's: what the first left in it goes.
+            shutil.rmtree(Path(args.workdir) / wf_id, ignore_errors=True)
+        return process_workflow(wf_id, entry, defaults, args, repo_root, store,
+                                queue_wait(wf_id))
+
+    def run_pass(wf_ids: list[str], again: bool = False):
+        """Run these workflows, `in_flight` at a time, and yield each cell as
+        it comes. A job is submitted only when one of those slots is free."""
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(len(wf_ids), in_flight)) as pool:
+            futs = {pool.submit(run_one, wf_id, again): wf_id for wf_id in wf_ids}
+            for fut in concurrent.futures.as_completed(futs):
+                wf_id = futs[fut]
+                try:
+                    cell = fut.result()
+                except Exception as e:
+                    print(f"[{wf_id}] harness error: {e!r}")
+                    cell = {"workflow_id": wf_id, "worker_status": "harness_error",
+                            "verdict": "infra_error", "error": repr(e)[:1000]}
+                    if wf_id in at_smoke:  # every cell of a smoke workflow names its level
+                        cell["level"] = "smoke"
+                if cell is not None:
+                    results[wf_id] = cell
+                    yield cell
+
+    asked: dict = {"meta": None, "ranges": {}}  # what GitHub answered about the commit
+
+    def commit_info() -> dict | None:
+        if not asked["meta"]:
+            asked["meta"] = commit_meta.fetch_commit_meta(args.commit)
+        return asked["meta"]
+
+    def commits_since(prev: str) -> dict | None:
+        """The commits between `prev` and this commit, asked once. An answer
+        without a count (GitHub did not answer) is asked for again."""
+        if (asked["ranges"].get(prev) or {}).get("commits_between") is None:
+            asked["ranges"][prev] = commit_meta.fetch_range(prev, args.commit)
+        return asked["ranges"][prev]
+
+    def summarise(partial: dict | None = None) -> dict:
+        """The summary of the cells the run has. With `partial` it is one that
+        is pushed before the run has them all, and says so."""
+        cells = sorted(results.values(), key=lambda r: r["workflow_id"])
+        verdicts = {r["workflow_id"]: r["verdict"] for r in cells}
+        overall = ("fail" if any(v in ("fail", "execution_error") for v in verdicts.values())
+                   else "pass")
+        meta = commit_info()
+        priors = index_builder.prior_verdicts(prior_entries, args.commit,
+                                              (meta or {}).get("committed_ts"))
+        for r in cells:
+            prior = priors.get(r["workflow_id"]) or {}
+            r["prior_verdict"] = prior.get("verdict")
+            r["prior_commit"] = prior.get("commit")
+        run_url, run_id = actions_run()
+        summary = {"schema_version": 2, "branch": args.branch, "commit": args.commit,
+                   "run_ts": int(time.time()), "overall": overall,
+                   "has_infra_error": any(v == "infra_error" for v in verdicts.values()),
+                   "lane": lane_id,
+                   "attempt": attempt,
+                   # The Actions run that tested the commit (null outside Actions):
+                   # its page carries the full report, and the index links rows to it.
+                   "run_url": run_url, "run_id": run_id,
+                   # The worker image and host every workflow ran on (they share one endpoint).
+                   "env": next((r.get("env") for r in cells if r.get("env")), None),
+                   "commit_meta": meta,
+                   "tested_range": (commits_since(prev_commit)
+                                    if prev_commit and prev_commit != args.commit else None),
+                   "workflows": {r["workflow_id"]: r for r in cells}}
+        # What follows is said by a nightly or weekly lane only: a summary of a
+        # per-commit lane keeps the keys it always had.
+        if long_cadence:
+            # The run covers many commits, and the lane's previous run says
+            # little about one workflow: each red one gets its own range.
+            ranges = own_ranges(cells, args.commit, commits_since)
+            if ranges:
+                summary["ranges"] = ranges
+        if long_cadence and not args.skip_publish:
+            # How much the run added to the results branch.
+            summary["published_new_bytes"] = published_new_bytes(cells, args.previous_smoke)
+        if partial:
+            summary["partial"] = partial
+        return summary
+
+    # A nightly or weekly run that publishes pushes what it has every few
+    # workflows, so a run that dies, is cancelled or loses its network leaves
+    # its results behind. The index is written by the final publish alone, so
+    # such a run is not in the history tables. A run that names its workflows
+    # pushes nothing early: its summary is merged into the lane's at the end,
+    # and a partial one would take that one's place.
+    checkpoints = long_cadence and not named and not args.skip_publish
+
+    def checkpoint():
+        done = len(results)
+        try:
+            store.publish_summary(args.branch, args.commit,
+                                  summarise({"done": done, "of": len(selected)}))
+            store.checkpoint(f"regression {args.branch}@{args.commit[:8]}: "
+                             f"{done} of {len(selected)} workflows")
+        except Exception as e:  # noqa: BLE001 - a safety net: its failure must not end the run
+            print(f"::warning::the checkpoint after {done} workflows failed, the run goes "
+                  f"on: {e!r}")
+
+    restore_handlers = install_stop_handler(args.clients, stopping) if long_cadence else None
+    try:
+        ran = saved = 0
+        for cell in run_pass(list(selected)):
+            if cell.get("worker_status") != NOT_REACHED:
+                ran += 1
+            if checkpoints and ran - saved >= CHECKPOINT_EVERY:
+                checkpoint()
+                saved = ran
+        # The pass at the end: the one retry a job has, moved from "seconds
+        # later" to "when everything else is done".
+        again = [wf_id for wf_id in selected if long_cadence and worth_another_try(
+            results[wf_id], run_record(Path(args.workdir), wf_id))]
+        if again:
+            if checkpoints and ran > saved:
+                checkpoint()  # the pass can take an hour: what there is goes out first
+            print(f"not tested, tried once more: {', '.join(again)}")
+            for cell in run_pass(again, again=True):
+                print(f"[{cell['workflow_id']}] second attempt: {cell['verdict']}")
+    finally:
+        if restore_handlers:
+            restore_handlers()
+
+    summary = summarise()
+    cells = list(summary["workflows"].values())
+    verdicts = {r["workflow_id"]: r["verdict"] for r in cells}
+    overall = summary["overall"]
 
     if named and published and not args.skip_publish:
         # The commit already has a result on the lane: only the cells of the
@@ -713,7 +1033,7 @@ def main():
         # comparable: every workflow at least produced outputs. A full run of a
         # nightly or weekly lane always moves it: among that many workflows one
         # often has an error, and the pointer would stand still.
-        comparable = all(r["verdict"] in ("pass", "fail", "no_baseline") for r in results)
+        comparable = all(r["verdict"] in ("pass", "fail", "no_baseline") for r in cells)
         if not named and (comparable or long_cadence):
             store.update_latest(args.branch,
                                 {"commit": args.commit, "run_ts": summary["run_ts"],
@@ -728,17 +1048,23 @@ def main():
     if args.summary_out:
         write_summary(Path(args.summary_out), summary)
 
-    for r in results:
+    # A workflow that stayed untested fails a nightly or weekly run: nothing
+    # tests the commit again before the lane's next run, a day or a week
+    # later, and a red run is the one GitHub mails.
+    untested = [r["workflow_id"] for r in cells if long_cadence and r["verdict"] == "infra_error"]
+    for r in cells:
         v = r["verdict"]
         line = f"{r['workflow_id']}: {v} (worker={r['worker_status']})"
-        if v in ("fail", "execution_error"):
+        if v in ("fail", "execution_error") or r["workflow_id"] in untested:
             print(f"::error::{line}")
         elif v in ("infra_error", "no_baseline"):
             print(f"::warning::{line}")
         else:
             print(line)
     print(f"overall: {overall}")
-    return 1 if overall == "fail" else 0
+    if untested:
+        print(f"not tested: {', '.join(untested)}. That fails a nightly or weekly run.")
+    return 1 if overall == "fail" or untested else 0
 
 
 if __name__ == "__main__":

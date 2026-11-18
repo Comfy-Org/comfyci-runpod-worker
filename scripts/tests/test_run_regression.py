@@ -1,4 +1,6 @@
 """run_regression: pure decision helpers and the summary handed to later steps."""
+import os
+
 import pytest
 
 import index_builder
@@ -1707,10 +1709,10 @@ def test_a_full_run_of_a_nightly_lane_always_moves_the_pointer(tmp_path, monkeyp
     assert code == 1 and summary["workflows"]["wf_b"]["verdict"] == "execution_error"
     assert lane.json(latest) == {"commit": "c2", "run_ts": LEVEL_NOW + 86400,
                                  "workflows": ["wf_a", "wf_b"]}
-    # Not tested at all is no reason either.
+    # Not tested at all is no reason either. On this lane it makes the run red.
     lane.status["wf_b"] = "worker_error"
     code, summary = lane.run("c3", "nightly", now=LEVEL_NOW + 2 * 86400)
-    assert code == 0 and summary["has_infra_error"] is True
+    assert code == 1 and summary["overall"] == "pass" and summary["has_infra_error"] is True
     assert lane.json(latest)["commit"] == "c3"
     # A run that names its workflows never moves it, on this lane as on any other.
     lane.status["wf_b"] = "ok"
@@ -1924,3 +1926,918 @@ def test_the_comparators_are_those_of_the_kinds_that_can_have_a_reference():
         run_regression.comparator_for({"output_kind": "audio"})
     with pytest.raises(ValueError, match="unknown output_kind 'mesh'"):
         run_regression.comparator_for({"output_kind": "mesh"})
+
+
+# -- a nightly or weekly run ------------------------------------------------------------
+# How such a lane runs its jobs: a few at a time, one attempt each, with a
+# deadline of its own, a push every 10 workflows, one pass at the end for what
+# can be tried again, and a red run when a workflow stayed untested.
+LONG_LANES = {"schema_version": 2, "primary": "main", "lanes": {
+    "main": {"cadence": "per-commit", "role": "primary", "layout": 1, "prefix": "regression",
+             "endpoint_id": "ep-main"},
+    "night": {"cadence": "nightly", "role": "lane", "layout": 2,
+              "prefix": "regression/lanes/night", "endpoint_id": "ep-long", "max_in_flight": 2,
+              "timeout_minutes": 120},
+    "week": {"cadence": "weekly", "role": "lane", "layout": 2,
+             "prefix": "regression/lanes/week", "endpoint_id": "ep-long", "max_in_flight": 2,
+             "timeout_minutes": 350}}}
+
+
+class Gpu:
+    """Stands in for process_workflow. `script` says per workflow what each
+    attempt answers (the last answer repeats): a verdict, or the fields of
+    its cell. A `reason` among them goes into the run record, where a job that
+    used up its time says so. `calls` lists the workflows in the order their
+    jobs started, and `seen` what each call was given."""
+
+    def __init__(self, script, clock=None, job_minutes=0):
+        import threading
+        self.script = {wf: a if isinstance(a, list) else [a] for wf, a in script.items()}
+        self.calls, self.seen, self.lock = [], [], threading.Lock()
+        self.clock, self.job_minutes, self.left_over = clock, job_minutes, None
+
+    def __call__(self, wf_id, entry, defaults, args, repo_root, store, queue_deadline):
+        import json
+        from pathlib import Path
+        with self.lock:
+            self.calls.append(wf_id)
+            attempt = self.calls.count(wf_id)
+            if self.clock:
+                self.clock.now += self.job_minutes * 60
+        self.seen.append((wf_id, queue_deadline, getattr(args, "job_options", None)))
+        answers = self.script[wf_id]
+        answer = answers[min(attempt, len(answers)) - 1]
+        answer = {"verdict": answer} if isinstance(answer, str) else dict(answer)
+        reason = answer.pop("reason", None)
+        cell = {"workflow_id": wf_id, "worker_status": "ok", "verdict": "pass", "detail": None,
+                "env": {"image": "img"}, **answer}
+        if cell["verdict"] == "infra_error" and "worker_status" not in answer:
+            cell["worker_status"] = "infra_error"
+        folder = Path(args.workdir) / wf_id
+        self.left_over = (folder / "run.json").exists()  # what the attempt before left
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "run.json").write_text(json.dumps(
+            {"status": cell["worker_status"], **({"reason": reason} if reason else {})}))
+        return cell
+
+
+class Clock:
+    """Stands in for the time module in run_regression: it moves when told."""
+
+    def __init__(self, now=NOW):
+        self.now = now
+
+    def time(self):
+        return self.now
+
+
+def _long_run(tmp_path, monkeypatch, store, gpu, *argv, lane="night", entries=None,
+              commit="new", registry=LONG_LANES):
+    """main() on a lane of LONG_LANES, for a manifest of the workflows in the
+    gpu's script (each of the lane's cadence, with `entries[wf]` added).
+    Returns (exit code, the --summary-out file)."""
+    import json
+    import sys
+    import commit_meta
+    import storage
+    cadence = registry["lanes"][lane]["cadence"]
+    manifest = tmp_path / "manifest" / "workflows.json"
+    manifest.parent.mkdir(exist_ok=True)
+    manifest.write_text(json.dumps({
+        "defaults": {"timeout_s": 600, "comfy_flags": [], "thresholds": {}},
+        "workflows": {wf_id: {"enabled": True, "workflow_path": "x", "models": [],
+                              "cadence": cadence, **(entries or {}).get(wf_id, {})}
+                      for wf_id in gpu.script}}), encoding="utf-8")
+    monkeypatch.setattr(index_builder, "load_lanes", lambda path=None: registry)
+    monkeypatch.setattr(storage, "from_args", lambda args: store)
+    monkeypatch.setattr(commit_meta, "fetch_commit_meta", lambda sha: None)
+    monkeypatch.setattr(commit_meta, "fetch_range", lambda prev, sha: {
+        "prev": prev, "commits_between": 3, "compare_url": f"{prev}...{sha}"})
+    monkeypatch.setattr(run_regression, "process_workflow", gpu)
+    out = tmp_path / "summary-out.json"
+    out.unlink(missing_ok=True)
+    monkeypatch.setattr(sys, "argv", [
+        "run_regression.py", "--commit", commit, "--branch", "master", "--lane", lane,
+        "--manifest", str(manifest), "--workdir", str(tmp_path / "work"),
+        "--summary-out", str(out), *argv])
+    code = run_regression.main()
+    return code, json.loads(out.read_text(encoding="utf-8"))
+
+
+class CountingEndpoint:
+    """Stands in for RunPod: counts the jobs that are on the endpoint at one
+    time. A job stays in progress until `together` jobs have been there at
+    once (or 10 s have passed), so the count does not depend on timing."""
+
+    def __init__(self, together):
+        import threading
+        self.lock, self.together = threading.Lock(), together
+        self.on, self.most, self.jobs, self.looks, self.started = 0, 0, 0, {}, {}
+
+    def client(self, endpoint_id):
+        return self
+
+    def run(self, job_input):
+        import time
+        with self.lock:
+            self.jobs += 1
+            self.on += 1
+            self.most = max(self.most, self.on)
+            job_id = f"job-{self.jobs}"
+            self.looks[job_id], self.started[job_id] = [job_input["workflow_id"], 0], time.time()
+        return job_id
+
+    def status(self, job_id):
+        import base64
+        import time
+        with self.lock:
+            self.looks[job_id][1] += 1
+            waited = time.time() - self.started[job_id]
+            if self.looks[job_id][1] < 3 or (self.most < self.together and waited < 10):
+                return {"status": "IN_PROGRESS"}
+            self.on -= 1
+        name, data = f"{self.looks[job_id][0]}_00001_.png", _picture()
+        return {"status": "COMPLETED", "delayTime": 5, "executionTime": 9, "output": {
+            "status": "ok", "timings": {"prompt_exec_s": 3.0}, "outputs": [
+                {"filename": name, "bytes": len(data), "sha256": _sha(data),
+                 "data_b64": base64.b64encode(data).decode()}]}}
+
+    def cancel(self, job_id):
+        pytest.fail(f"{job_id} was cancelled")
+
+
+def _counted_run(tmp_path, monkeypatch, lane_id, registry, together, *argv):
+    """Six smoke workflows through main(), process_workflow and
+    run_workflow_job, on an endpoint that counts its jobs. Returns (exit code,
+    the endpoint, the keyword arguments each job was submitted with)."""
+    import types
+    import submit_and_poll
+    cadence = registry["lanes"][lane_id]["cadence"]
+    lane = LevelLane(tmp_path, monkeypatch, {
+        f"wf_{i}": {"level": "smoke", "cadence": cadence} for i in range(6)})
+    monkeypatch.setattr(index_builder, "load_lanes", lambda path=None: registry)
+    endpoint, jobs, submit, pauses = CountingEndpoint(together), [], \
+        submit_and_poll.run_workflow_job, []
+
+    def job(client, wf_id, workflow, **kw):
+        jobs.append(kw)
+        return submit(client, wf_id, workflow, **kw)
+
+    def pause(seconds):
+        import time
+        pauses.append(seconds)
+        time.sleep(0.01)
+
+    monkeypatch.setattr(run_regression, "run_workflow_job", job)
+    monkeypatch.setattr(run_regression, "RunPodClient", endpoint.client)
+    monkeypatch.setattr(submit_and_poll, "time", types.SimpleNamespace(
+        monotonic=submit_and_poll.time.monotonic, sleep=pause))
+    code, summary = lane.run("c1", lane_id, "--skip-publish", *argv)
+    assert [cell["verdict"] for cell in summary["workflows"].values()] == ["pass"] * 6
+    return code, endpoint, jobs, pauses
+
+
+def test_a_lane_with_max_in_flight_2_never_has_more_than_2_jobs_on_its_endpoint(tmp_path,
+                                                                               monkeypatch):
+    """Fifty jobs submitted at once to an endpoint with two workers would
+    mostly be cancelled for waiting in the queue. The lane says how many it
+    has there at a time, and no flag is needed for it."""
+    night = {**LEVEL_LANES["lanes"]["nightly"], "max_in_flight": 2}
+    registry = {**LEVEL_LANES, "lanes": {**LEVEL_LANES["lanes"], "nightly": night}}
+    code, endpoint, jobs, pauses = _counted_run(tmp_path / "a", monkeypatch, "nightly", registry, 2)
+    assert code == 0 and (endpoint.jobs, endpoint.most, endpoint.on) == (6, 2, 0)
+    # What else such a lane gives a job: one attempt, 1800 s for the queue, a look every 3 s.
+    assert {(kw["attempts"], kw["queue_deadline_s"], kw["poll_interval_s"]) for kw in jobs} == {
+        (1, 1800, 3)}
+    assert set(pauses) == {3}
+    # The flag only overrides the lane.
+    code, endpoint, _, _ = _counted_run(tmp_path / "b", monkeypatch, "nightly", registry, 3,
+                                        "--max-in-flight", "3")
+    assert (endpoint.jobs, endpoint.most) == (6, 3)
+    code, endpoint, _, _ = _counted_run(tmp_path / "c", monkeypatch, "nightly", registry, 1,
+                                        "--max-in-flight", "1")
+    assert (endpoint.jobs, endpoint.most) == (6, 1)
+    # A lane that says nothing has them all there at once, as every lane had.
+    code, endpoint, jobs, pauses = _counted_run(tmp_path / "d", monkeypatch, "nightly",
+                                                LEVEL_LANES, 6)
+    assert (endpoint.jobs, endpoint.most) == (6, 6)
+    # The per-commit lane: every job at once, and nothing new in what a job is given.
+    code, endpoint, jobs, pauses = _counted_run(tmp_path / "e", monkeypatch, "main",
+                                                LEVEL_LANES, 6)
+    assert code == 0 and (endpoint.jobs, endpoint.most) == (6, 6)
+    assert sorted(kw["queue_deadline_s"] for kw in jobs) == [600, 660, 720, 780, 840, 900]
+    assert not [kw for kw in jobs if "attempts" in kw or "poll_interval_s" in kw]
+    assert set(pauses) == {10}
+    # It takes the cap too when it is asked to.
+    code, endpoint, _, _ = _counted_run(tmp_path / "f", monkeypatch, "main", LEVEL_LANES, 2,
+                                        "--max-in-flight", "2")
+    assert (endpoint.jobs, endpoint.most) == (6, 2)
+
+
+def test_what_a_lane_says_about_its_jobs_is_checked_before_anything_is_written(tmp_path,
+                                                                             monkeypatch):
+    class ReadOnlyStore(FakeStore):
+        def __getattr__(self, name):
+            pytest.fail(f"{name}: nothing is written before the check")
+
+    for key, value in (("max_in_flight", 0), ("max_in_flight", "2"), ("max_in_flight", True),
+                       ("timeout_minutes", -5), ("timeout_minutes", 1.5)):
+        night = {**LONG_LANES["lanes"]["night"], key: value}
+        registry = {**LONG_LANES, "lanes": {**LONG_LANES["lanes"], "night": night}}
+        gpu = Gpu({"a": "pass"})
+        with pytest.raises(SystemExit, match=f"{key} of the lane must be a whole number above 0"):
+            _long_run(tmp_path, monkeypatch, ReadOnlyStore({}), gpu, registry=registry)
+        assert gpu.calls == []
+    for flag in ("--max-in-flight", "--deadline-minutes"):
+        for value in ("0", "-1", "two"):
+            with pytest.raises(SystemExit):
+                _long_run(tmp_path, monkeypatch, ReadOnlyStore({}), Gpu({"a": "pass"}), flag, value)
+    assert run_regression.lane_count({}, "max_in_flight") is None
+    assert run_regression.lane_count({"max_in_flight": 3}, "max_in_flight") == 3
+
+
+def test_a_workflow_whose_job_could_pass_the_runs_deadline_is_not_started(tmp_path, monkeypatch,
+                                                                         capsys):
+    """GitHub ends a job after its time limit, and a RunPod job in flight then
+    runs on with nobody to read it. So a run does not submit a job whose worst
+    case would pass its own deadline. A smaller job later in the line still
+    runs. The run is red: a workflow was not tested."""
+    clock = Clock()
+    monkeypatch.setattr(run_regression, "time", clock)
+    # On such a lane the runner gives up on a job after its timeout plus 900 s
+    # plus the 1200 s more it may wait in the queue: 95 minutes for `big`, 45
+    # for `small`. 60 minutes are left.
+    entries = {"big": {"timeout_s": 3600}, "small": {"timeout_s": 600}}
+    gpu = Gpu({"big": "pass", "small": "pass"})
+    store = RecordingStore()
+    code, summary = _long_run(tmp_path, monkeypatch, store, gpu, "--deadline-minutes", "60",
+                              "--max-in-flight", "1", entries=entries)
+    assert code == 1 and gpu.calls == ["small"]
+    assert summary["workflows"]["big"] == {
+        "workflow_id": "big", "worker_status": "not_reached", "verdict": "infra_error",
+        "error": "not started: its job can take 95 min, and 60 min were left before the run's "
+                 "deadline",
+        "prior_verdict": None, "prior_commit": None}
+    assert summary["workflows"]["small"]["verdict"] == "pass"
+    assert (summary["overall"], summary["has_infra_error"]) == ("pass", True)
+    out = capsys.readouterr().out
+    assert ("lane night: 2 workflow(s), 1 job(s) at a time, one attempt each, and 60 min until "
+            "the run's deadline\n") in out
+    assert "[big] not started: its job can take 95 min, and 60 min are left" in out
+    assert "::error::big: infra_error (worker=not_reached)\n" in out
+    assert "not tested: big. That fails a nightly or weekly run.\n" in out
+    # Nothing of it is in the runner's folder, and it is not tried at the end.
+    assert not (tmp_path / "work" / "big").exists()
+    # It is the lane's run of the commit all the same: published, and the pointer moves.
+    assert store.events[-4:] == ["summary", "latest", "index", "regression master@new: pass"]
+    # The cron leaves the commit alone: another run would not reach it either.
+    import regression_skip
+    assert not regression_skip.decide("new", store.published_summary("master", "new"))[0]
+
+    # Without the flag the deadline is the lane's timeout_minutes minus 25, counted
+    # from the start of the run: 95 minutes on this lane, which `big` just fits.
+    gpu = Gpu({"big": "pass", "small": "pass"})
+    code, _ = _long_run(tmp_path, monkeypatch, RecordingStore(), gpu, entries=entries)
+    assert code == 0 and sorted(gpu.calls) == ["big", "small"]
+    night = {**LONG_LANES["lanes"]["night"], "timeout_minutes": 119}
+    registry = {**LONG_LANES, "lanes": {**LONG_LANES["lanes"], "night": night}}
+    gpu = Gpu({"big": "pass", "small": "pass"})
+    code, _ = _long_run(tmp_path, monkeypatch, RecordingStore(), gpu, entries=entries,
+                        registry=registry)
+    assert code == 1 and gpu.calls == ["small"]
+    # A lane that names no limit has GitHub's own 360 minutes.
+    night = {k: v for k, v in LONG_LANES["lanes"]["night"].items() if k != "timeout_minutes"}
+    assert run_regression.run_deadline(None, night, True) == NOW + (360 - 25) * 60
+    assert run_regression.run_deadline(None, {"timeout_minutes": 10}, True) == NOW
+    assert run_regression.run_deadline(90, {"timeout_minutes": 10}, True) == NOW + 90 * 60
+
+    # Time goes by while the jobs run: each takes 20 minutes here, one at a time.
+    # After two of them 55 of the 95 minutes are left, 10 more than a job needs,
+    # and after three there are 35.
+    clock.now = NOW
+    gpu = Gpu(dict.fromkeys("abcde", "pass"), clock, job_minutes=20)
+    code, summary = _long_run(tmp_path, monkeypatch, RecordingStore(), gpu,
+                              "--max-in-flight", "1")
+    assert code == 1 and gpu.calls == ["a", "b", "c"]
+    assert [cell["worker_status"] for cell in summary["workflows"].values()] == [
+        "ok", "ok", "ok", "not_reached", "not_reached"]
+    # A smoke-level workflow that was not reached names its level, like every cell of one.
+    cell = run_regression.not_reached_cell("wf", {"level": "smoke"}, 30.0, 2700.0)
+    assert list(cell) == ["workflow_id", "worker_status", "verdict", "error", "level"]
+    assert cell["error"].startswith("not started: its job can take 45 min, and 0 min were left")
+
+
+def test_the_per_commit_lane_has_no_deadline_unless_it_is_given_one(tmp_path, monkeypatch,
+                                                                   capsys):
+    clock = Clock()
+    monkeypatch.setattr(run_regression, "time", clock)
+    assert run_regression.run_deadline(None, LONG_LANES["lanes"]["main"], False) is None
+    gpu = Gpu({"a": "pass", "b": "pass"})
+    code, summary = _long_run(tmp_path, monkeypatch, RecordingStore(), gpu, lane="main",
+                              entries={"a": {"timeout_s": 86400}})
+    assert code == 0 and sorted(gpu.calls) == ["a", "b"]
+    # Its log is the one it had: no line about jobs at a time or a deadline.
+    assert capsys.readouterr().out == "a: pass (worker=ok)\nb: pass (worker=ok)\noverall: pass\n"
+    # With the flag: a job there has two attempts, so its worst case counts twice.
+    assert run_regression.job_worst_case_s({}, {"timeout_s": 600}, 600, 2) == 2 * 1500
+    assert run_regression.job_worst_case_s({"timeout_s": 60}, {"timeout_s": 600}, 1800, 1) == 2160
+    gpu = Gpu({"a": "pass", "b": "pass"})
+    code, summary = _long_run(tmp_path, monkeypatch, RecordingStore(), gpu, "--deadline-minutes",
+                              "55", lane="main", entries={"a": {"timeout_s": 900}})
+    # `a` could take 2 x (900 + 900) s, an hour. `b`, second in line, 2 x (600 + 900 + 60) s:
+    # 52 minutes. A workflow that was not tested is a warning on this lane, as it was.
+    assert code == 0 and gpu.calls == ["b"]
+    assert summary["workflows"]["a"]["worker_status"] == "not_reached"
+    assert summary["has_infra_error"] is True
+
+
+class CheckpointStore(RecordingStore):
+    """RecordingStore that keeps every summary it was given, and can fail a
+    checkpoint."""
+
+    def __init__(self, files=None, fail_at=()):
+        super().__init__(files)
+        self.summaries, self.pushes, self.fail_at = [], 0, fail_at
+
+    def publish_summary(self, branch, commit, summary):
+        import json
+        super().publish_summary(branch, commit, summary)
+        self.summaries.append(json.loads(json.dumps(summary)))
+
+    def checkpoint(self, message):
+        self.pushes += 1
+        self.events.append(message if "workflows" in message else "checkpoint")
+        if self.pushes in self.fail_at:
+            raise RuntimeError("could not push checkpoint: remote hung up")
+
+
+def test_a_nightly_or_weekly_run_pushes_what_it_has_every_10_workflows(tmp_path, monkeypatch,
+                                                                      capsys):
+    """A weekly run takes hours, and GitHub ends its job after six. A run
+    that published once, at its end, would have spent the money and left
+    nothing. The summary of a checkpoint says that it is one."""
+    import regression_skip
+    ids = [f"wf_{i:02d}" for i in range(25)]
+    store = CheckpointStore()
+    gpu = Gpu({**dict.fromkeys(ids, "pass"), "wf_03": "execution_error"})
+    code, summary = _long_run(tmp_path, monkeypatch, store, gpu, "--max-in-flight", "1",
+                              lane="week")
+    assert code == 1 and gpu.calls == ids
+    assert store.events == [
+        "snapshot", "marker", "checkpoint",
+        "summary", "regression master@new: 10 of 25 workflows",
+        "summary", "regression master@new: 20 of 25 workflows",
+        "summary", "latest", "index", "regression master@new: fail"]
+    first, second, final = store.summaries
+    keys = SUMMARY_KEYS + ["published_new_bytes"]
+    assert list(first) == keys + ["partial"] and first["partial"] == {"done": 10, "of": 25}
+    assert second["partial"] == {"done": 20, "of": 25} and list(second["workflows"]) == ids[:20]
+    assert list(first["workflows"]) == ids[:10] and first["overall"] == "fail"
+    assert (first["attempt"], first["lane"], first["commit"]) == (1, "week", "new")
+    assert all("prior_verdict" in cell for cell in first["workflows"].values())
+    # The final summary has no such key: it is the lane's result of the commit.
+    assert list(final) == keys and final == summary and list(final["workflows"]) == ids
+    # A run that died after its first checkpoint: the cron gives the commit one more run.
+    run, why = regression_skip.decide("new", first, marker=store.attempt_marker("master", "new"))
+    assert run and "did not finish" in why
+    assert not regression_skip.decide("new", final)[0]
+
+    # A checkpoint that cannot be pushed is a warning. The run goes on and publishes.
+    store = CheckpointStore(fail_at=(2,))
+    gpu = Gpu(dict.fromkeys(ids, "pass"))
+    code, summary = _long_run(tmp_path, monkeypatch, store, gpu, "--max-in-flight", "1",
+                              lane="week")
+    assert code == 0 and len(store.summaries) == 3 and "partial" not in store.summaries[-1]
+    assert store.events[-1] == "regression master@new: pass"
+    assert ("::warning::the checkpoint after 10 workflows failed, the run goes on: "
+            "RuntimeError('could not push checkpoint: remote hung up')") in capsys.readouterr().out
+
+    # Not a run that names its workflows: its summary is merged into the lane's
+    # at the end, and a partial one would have taken that one's place.
+    store = CheckpointStore({"regression/runs/master/new/summary.json": summary})
+    code, merged = _long_run(tmp_path, monkeypatch, store, Gpu(dict.fromkeys(ids, "pass")),
+                             "--workflows", ",".join(ids[:12]), "--max-in-flight", "1",
+                             lane="week")
+    assert code == 0 and len(store.summaries) == 1 and "partial" not in merged
+    assert store.events == ["snapshot", "summary", "index", "regression master@new: pass"]
+    # Not a run that writes nothing.
+    store = CheckpointStore()
+    _long_run(tmp_path, monkeypatch, store, Gpu(dict.fromkeys(ids, "pass")), "--skip-publish",
+              lane="week")
+    assert store.events == [] and store.summaries == []
+    # And not the per-commit lane: its run is over in minutes.
+    store = CheckpointStore()
+    code, summary = _long_run(tmp_path, monkeypatch, store, Gpu(dict.fromkeys(ids, "pass")),
+                              lane="main")
+    assert store.events == ["snapshot", "marker", "checkpoint", "summary", "latest", "index",
+                            "regression master@new: pass"]
+    assert list(summary) == SUMMARY_KEYS
+
+
+def test_workflows_that_were_not_reached_do_not_count_for_a_checkpoint(tmp_path, monkeypatch):
+    """When the deadline comes, every workflow left gets its cell at once.
+    That is not ten more results to push."""
+    clock = Clock()
+    monkeypatch.setattr(run_regression, "time", clock)
+    ids = [f"wf_{i:02d}" for i in range(40)]
+    store = CheckpointStore()
+    gpu = Gpu(dict.fromkeys(ids, "pass"), clock, job_minutes=5)
+    code, summary = _long_run(tmp_path, monkeypatch, store, gpu, "--max-in-flight", "1")
+    # 95 minutes, 45 for a job's worst case, 5 minutes a job: 11 jobs start.
+    assert code == 1 and gpu.calls == ids[:11]
+    assert [e for e in store.events if "workflows" in e] == [
+        "regression master@new: 10 of 40 workflows"]
+    assert sum(cell["worker_status"] == "not_reached"
+               for cell in summary["workflows"].values()) == 29
+
+
+def test_the_pass_at_the_end_tries_again_what_can_pass_and_nothing_else(tmp_path, monkeypatch,
+                                                                       capsys):
+    """One attempt in the pool, and one more when everything else is done:
+    by then an outage of some minutes is over. A job that used up its whole
+    time is not tried again (a second one can cost another hour), nor is a
+    workflow that another job could not change."""
+    untested = {"verdict": "infra_error"}
+    script = {
+        "fetch": [{**untested, "worker_status": "model_fetch_error"}, "pass"],
+        "queue": [untested, "fail"],                      # the queue, the network
+        "worker": [{**untested, "worker_status": "worker_error"}] * 2,   # still not tested
+        "spent": [{**untested, "reason": "timed_out"}, "pass"],
+        "gated": [{**untested, "worker_status": "model_access_error"}, "pass"],
+        "absent": [{**untested, "worker_status": "missing_model"}, "pass"],
+        "broken": [{**untested, "worker_status": "bad_request"}, "pass"],
+        "red": "execution_error", "green": "pass"}
+    gpu = Gpu(script)
+    store = RecordingStore()
+    code, summary = _long_run(tmp_path, monkeypatch, store, gpu, "--max-in-flight", "1")
+    assert gpu.calls[:9] == list(script)  # the pool, in the manifest's order
+    assert sorted(gpu.calls[9:]) == ["fetch", "queue", "worker"]
+    assert {wf: (cell["verdict"], cell["worker_status"])
+            for wf, cell in summary["workflows"].items()} == {
+        "absent": ("infra_error", "missing_model"), "broken": ("infra_error", "bad_request"),
+        "fetch": ("pass", "ok"), "gated": ("infra_error", "model_access_error"),
+        "green": ("pass", "ok"), "queue": ("fail", "ok"), "red": ("execution_error", "ok"),
+        "spent": ("infra_error", "infra_error"), "worker": ("infra_error", "worker_error")}
+    assert code == 1 and summary["overall"] == "fail"
+    out = capsys.readouterr().out
+    assert "not tested, tried once more: fetch, queue, worker\n" in out
+    assert "[fetch] second attempt: pass\n" in out
+    # The folder of a second attempt is its own: what the first left is gone.
+    assert gpu.left_over is False
+    # What the pool produced is pushed before the pass starts, and the result after it.
+    assert store.events == ["snapshot", "marker", "checkpoint", "summary", "checkpoint",
+                            "summary", "latest", "index", "regression master@new: fail"]
+
+    # When the second attempt tests everything, the run is green.
+    gpu = Gpu({"fetch": script["fetch"], "green": "pass"})
+    code, summary = _long_run(tmp_path, monkeypatch, RecordingStore(), gpu)
+    assert code == 0 and sorted(gpu.calls) == ["fetch", "fetch", "green"]
+    assert summary["has_infra_error"] is False
+    # A workflow whose only problem is that it was not tested makes the run red.
+    gpu = Gpu({"gated": script["gated"], "green": "pass"})
+    code, summary = _long_run(tmp_path, monkeypatch, RecordingStore(), gpu)
+    assert code == 1 and (summary["overall"], sorted(gpu.calls)) == ("pass", ["gated", "green"])
+    # A run that names its workflows has the pass too.
+    gpu = Gpu({"fetch": script["fetch"], "green": "pass"})
+    code, summary = _long_run(tmp_path, monkeypatch, RecordingStore(), gpu, "--workflows",
+                              "fetch")
+    assert code == 0 and gpu.calls == ["fetch", "fetch"] and summary["scope"] == ["fetch"]
+
+    # The per-commit lane has no such pass: its job had its second attempt
+    # right away, and the cron tests the commit once more. Its exit code is
+    # the one it always was.
+    gpu = Gpu({"worker": script["worker"], "green": "pass"})
+    code, summary = _long_run(tmp_path, monkeypatch, RecordingStore(), gpu, lane="main")
+    assert code == 0 and sorted(gpu.calls) == ["green", "worker"]
+    assert summary["has_infra_error"] is True
+    assert [seen[2] for seen in gpu.seen] == [None, None]
+
+    assert run_regression.NO_SECOND_TRY == {"missing_model", "model_access_error",
+                                            "not_reached", "bad_request"}
+    worth = run_regression.worth_another_try
+    assert worth({"verdict": "infra_error", "worker_status": "harness_error"}, {})
+    assert not worth({"verdict": "infra_error", "worker_status": "not_reached"}, {})
+    assert not worth({"verdict": "execution_error", "worker_status": "timeout"}, {})
+    assert not worth({"verdict": "infra_error", "worker_status": "infra_error"},
+                     {"reason": "timed_out"})
+    assert run_regression.run_record(tmp_path / "nowhere", "wf") == {}
+    (tmp_path / "work" / "odd").mkdir()
+    (tmp_path / "work" / "odd" / "run.json").write_text("[1]")
+    assert run_regression.run_record(tmp_path / "work", "odd") == {}
+
+
+def test_the_pass_at_the_end_starts_no_job_that_could_pass_the_deadline(tmp_path, monkeypatch):
+    """The cell of the first attempt stays: it says why the workflow was not
+    tested, which `not_reached` would hide."""
+    clock = Clock()
+    monkeypatch.setattr(run_regression, "time", clock)
+    flaky = [{"verdict": "infra_error", "worker_status": "worker_error"}, "pass"]
+    # 95 minutes, and each job takes 30: after the two of the pool 35 are left,
+    # 10 short of the 45 a job may need.
+    gpu = Gpu({"a": flaky, "b": "pass"}, clock, job_minutes=30)
+    code, summary = _long_run(tmp_path, monkeypatch, RecordingStore(), gpu,
+                              "--max-in-flight", "1")
+    assert code == 1 and gpu.calls == ["a", "b"]
+    assert summary["workflows"]["a"]["worker_status"] == "worker_error"
+    # With 10 minutes a job there is time for it.
+    clock.now = NOW
+    gpu = Gpu({"a": flaky, "b": "pass"}, clock, job_minutes=10)
+    code, summary = _long_run(tmp_path, monkeypatch, RecordingStore(), gpu,
+                              "--max-in-flight", "1")
+    assert code == 0 and gpu.calls == ["a", "b", "a"]
+
+
+def test_a_pass_at_the_end_is_checkpointed_before_it_starts(tmp_path, monkeypatch):
+    """The second attempts can take an hour. What the pool produced goes out
+    first, if it has not all gone out yet."""
+    ids = [f"wf_{i:02d}" for i in range(12)]
+    flaky = [{"verdict": "infra_error", "worker_status": "worker_error"}, "pass"]
+    store = CheckpointStore()
+    gpu = Gpu({**dict.fromkeys(ids, "pass"), "wf_05": flaky})
+    code, summary = _long_run(tmp_path, monkeypatch, store, gpu, "--max-in-flight", "1")
+    assert code == 0 and gpu.calls == [*ids, "wf_05"]
+    assert [e for e in store.events if "workflows" in e] == [
+        "regression master@new: 10 of 12 workflows", "regression master@new: 12 of 12 workflows"]
+    assert [s.get("partial") for s in store.summaries] == [
+        {"done": 10, "of": 12}, {"done": 12, "of": 12}, None]
+    assert store.summaries[1]["workflows"]["wf_05"]["verdict"] == "infra_error"
+    assert summary["workflows"]["wf_05"]["verdict"] == "pass"
+    # Nothing new since the last push: no second one.
+    ids = ids[:10]
+    store = CheckpointStore()
+    gpu = Gpu({**dict.fromkeys(ids, "pass"), "wf_05": flaky})
+    _long_run(tmp_path, monkeypatch, store, gpu, "--max-in-flight", "1")
+    assert [e for e in store.events if "workflows" in e] == [
+        "regression master@new: 10 of 10 workflows"]
+
+
+# -- who broke it: each workflow's own range ------------------------------------------------
+def _published(lane):
+    """Every JSON file of the lane's store, as run_report reads a results tree."""
+    import json
+    root = lane.tmp / "store"
+    return {p.relative_to(root).as_posix(): json.loads(p.read_text(encoding="utf-8"))
+            for p in root.rglob("*.json")}
+
+
+def test_a_weekly_failure_is_placed_by_the_workflows_own_last_result(tmp_path, monkeypatch):
+    """A weekly run covers about 44 commits, and a workflow's last result is
+    not always in the run before: that run may not have tested it. So the
+    summary says for each red workflow how many commits lie between its own
+    last result and this commit, and the report words the failure from that.
+    A workflow without an earlier result is on its first run. A step of a
+    bisect, at an older commit, reads its own short range."""
+    import io
+    import json
+    import commit_meta
+    import numpy as np
+    import run_report
+    from PIL import Image
+    week = {"cadence": "weekly", "role": "lane", "layout": 2, "label": "weekly",
+            "prefix": "regression/lanes/weekly", "endpoint_id": "ep-nightly", "max_in_flight": 2}
+    registry = {**LEVEL_LANES, "lanes": {**LEVEL_LANES["lanes"], "weekly": week}}
+    smoke = {"level": "smoke", "cadence": "weekly"}
+    lane = LevelLane(tmp_path, monkeypatch, {
+        "wf_exec": smoke, "wf_music": smoke, "wf_ok": smoke, "wf_new": {**smoke, "enabled": False}})
+    monkeypatch.setattr(index_builder, "load_lanes", lambda path=None: registry)
+    asked = []
+
+    def commits_between(prev, sha):
+        # The number in a commit's name is its place on master.
+        asked.append(prev)
+        return {"prev": prev, "commits_between": max(int(sha[1:]) - int(prev[1:]), 0),
+                "compare_url": f"https://github.com/Comfy-Org/ComfyUI/compare/{prev}...{sha}"}
+
+    monkeypatch.setattr(commit_meta, "fetch_range", commits_between)
+    black = io.BytesIO()
+    Image.fromarray(np.zeros((64, 64, 3), dtype=np.uint8)).save(black, "PNG")
+    for wf_id in lane.files:
+        lane.files[wf_id] = {f"{wf_id}_00001_.png": _picture()}
+    first, second, third, step = "c0000100", "c0000144", "c0000188", "c0000105"
+    prefix, day = "regression/lanes/weekly", 86400
+
+    # Week 1: everything passes. Week 2: one workflow is not tested, twice.
+    assert lane.run(first, "weekly")[0] == 0
+    lane.status["wf_music"] = "worker_error"
+    code, summary = lane.run(second, "weekly", now=LEVEL_NOW + 7 * day)
+    assert code == 1 and summary["overall"] == "pass" and "ranges" not in summary
+    assert lane.json(f"{prefix}/latest/master.json")["commit"] == second
+
+    # Week 3: an execution error, a smoke failure of the workflow that week 2
+    # did not test, and a new workflow that fails its first run.
+    manifest = json.loads(lane.manifest.read_text(encoding="utf-8"))
+    manifest["workflows"]["wf_new"]["enabled"] = True
+    lane.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+    lane.status.update(wf_exec="timeout", wf_music="ok")
+    for wf_id in ("wf_music", "wf_new"):
+        lane.files[wf_id] = {f"{wf_id}_00001_.png": black.getvalue()}
+    asked.clear()
+    code, summary = lane.run(third, "weekly", now=LEVEL_NOW + 14 * day)
+    assert code == 1 and summary["overall"] == "fail"
+    assert {wf: (cell["verdict"], cell["prior_verdict"], cell["prior_commit"])
+            for wf, cell in summary["workflows"].items()} == {
+        "wf_exec": ("execution_error", "pass", second), "wf_music": ("fail", "pass", first),
+        "wf_new": ("fail", None, None), "wf_ok": ("pass", "pass", second)}
+    compare = "https://github.com/Comfy-Org/ComfyUI/compare"
+    # The run covers the 44 commits since the lane's previous full run.
+    assert summary["tested_range"] == {"prev": second, "commits_between": 44,
+                                       "compare_url": f"{compare}/{second}...{third}"}
+    # Each red workflow has its own range. The one on its first run has none.
+    assert summary["ranges"] == {
+        "wf_exec": {"prev": second, "commits_between": 44,
+                    "compare_url": f"{compare}/{second}...{third}"},
+        "wf_music": {"prev": first, "commits_between": 88,
+                     "compare_url": f"{compare}/{first}...{third}"}}
+    assert list(summary) == RUN_SUMMARY_KEYS + ["ranges", "published_new_bytes"]
+    assert sorted(asked) == [first, second], "GitHub is asked once for each range"
+    # A full run of such a lane moves the pointer, red or not.
+    assert lane.json(f"{prefix}/latest/master.json") == {
+        "commit": third, "run_ts": LEVEL_NOW + 14 * day,
+        "workflows": ["wf_exec", "wf_music", "wf_new", "wf_ok"]}
+    # The index carries the ranges, and each chain the one it started with.
+    head = lane.json("regression/index/master/weekly.json")
+    assert head["entries"][0]["wr"] == {
+        "wf_exec": {"n": 44, "url": f"{compare}/{second}...{third}"},
+        "wf_music": {"n": 88, "url": f"{compare}/{first}...{third}"}}
+    assert head["first_bad"]["wf_music"]["range"]["n"] == 88
+    assert "range" not in head["first_bad"]["wf_new"]
+
+    def report(commit):
+        return run_report.lane_report(run_report.DictReader(_published(lane), "d" * 40),
+                                      registry, commit, "master", "weekly").split("\n")
+
+    lines = report(third)
+    assert lines[0] == "## ❌ GPU regression · weekly · `c000014`..`c000018` (44 commits)"
+    assert ("3 of 4 workflows failed: 2 new in this run, 1 on its first run. 1 passed its smoke "
+            "checks.") in lines
+    assert "#### ❌ `wf_music`: smoke check failed (new since `c000010`, 88 commits)" in lines
+    assert "#### ❌ `wf_exec`: execution error (new since `c000014`, 44 commits)" in lines
+    assert "#### ❌ `wf_new`: smoke check failed (first run)" in lines
+    assert not [line for line in lines if line.startswith("#### ") and "new at this commit" in line]
+    assert (f"It last passed at [`c000010`](https://github.com/Comfy-Org/ComfyUI/commit/{first}). "
+            f"88 commits since then: [compare]({compare}/{first}...{third}). To test one commit "
+            "of that range (needs write access to the worker repository):") in lines
+    assert ("The workflow did not finish on this commit. Worker status: <code>timeout</code>. "
+            "Before this commit it last ran to the end at [`c000014`](https://github.com/"
+            f"Comfy-Org/ComfyUI/commit/{second}) (smoke pass): the error started after that "
+            f"commit. 44 commits since then: [compare]({compare}/{second}...{third}). To test one "
+            "commit of that range (needs write access to the worker repository):") in lines
+    for wf_id in ("wf_exec", "wf_music"):
+        assert ("gh workflow run nightly-weekly.yml --repo Comfy-Org/comfyci-runpod-worker "
+                f"-f cadence=weekly -f commit=<sha> -f workflows={wf_id}") in lines
+    assert run_report.FIRST_RUN in lines
+
+    # A step of the bisect: the workflow alone, 5 commits after its last pass.
+    asked.clear()
+    code, summary = lane.run(step, "weekly", "--workflows", "wf_music",
+                             now=LEVEL_NOW + 15 * day)
+    assert code == 1 and summary["scope"] == ["wf_music"]
+    assert summary["workflows"]["wf_music"]["prior_commit"] == first
+    assert summary["ranges"] == {"wf_music": {"prev": first, "commits_between": 5,
+                                             "compare_url": f"{compare}/{first}...{step}"}}
+    # The run's own range starts at the pointer, which is ahead of this commit.
+    assert summary["tested_range"]["commits_between"] == 0
+    assert lane.json(f"{prefix}/latest/master.json")["commit"] == third
+    lines = report(step)
+    assert "#### ❌ `wf_music`: smoke check failed (new since `c000010`, 5 commits)" in lines
+    assert "1 of 1 workflow failed: 1 new in this run." in lines
+    assert not [line for line in lines if "new at this commit" in line and "Result labels" not in
+                line]
+    # The chain now starts at the step: 5 commits to look at, not 88.
+    chain = lane.json("regression/index/master/weekly.json")["first_bad"]["wf_music"]
+    assert (chain["commit"], chain["prev_good"], chain["range"]["n"]) == (step, first, 5)
+
+    # A range of one commit is the tested commit itself.
+    lane.status["wf_ok"] = "timeout"
+    code, summary = lane.run("c0000189", "weekly", now=LEVEL_NOW + 21 * day)
+    assert summary["ranges"]["wf_ok"]["commits_between"] == 1
+    # A failure that was already there has its range too: back to its last result.
+    assert summary["ranges"]["wf_music"]["prev"] == third
+    lines = report("c0000189")
+    assert "#### ❌ `wf_ok`: execution error (new at this commit)" in lines
+    assert ("The workflow did not finish on this commit. Worker status: <code>timeout</code>. "
+            "Before this commit it last ran to the end at [`c000018`](https://github.com/"
+            f"Comfy-Org/ComfyUI/commit/{third}) (smoke pass), so the error is new at this commit."
+            ) in lines
+    # Only a red cell with an earlier result at another commit has a range.
+    assert run_regression.own_ranges(
+        [{"workflow_id": "a", "verdict": "fail", "prior_commit": "p"},
+         {"workflow_id": "b", "verdict": "pass", "prior_commit": "p"},
+         {"workflow_id": "c", "verdict": "execution_error", "prior_commit": None},
+         {"workflow_id": "d", "verdict": "fail", "prior_commit": "here"},
+         {"workflow_id": "e", "verdict": "infra_error", "prior_commit": "p"}],
+        "here", lambda prev: {"prev": prev}) == {"a": {"prev": "p"}}
+
+
+def test_a_retest_on_a_weekly_lane_keeps_the_other_cells_and_their_ranges(tmp_path, monkeypatch):
+    """Running one workflow of a weekly run again must not cost the other
+    fifty. The summary stays the lane's run of the commit: its cells byte for
+    byte, its range, its ranges, and what it said it published."""
+    import io
+    import json
+    import commit_meta
+    import numpy as np
+    from PIL import Image
+    week = {"cadence": "weekly", "role": "lane", "layout": 2,
+            "prefix": "regression/lanes/weekly", "endpoint_id": "ep-nightly", "max_in_flight": 2}
+    registry = {**LEVEL_LANES, "lanes": {**LEVEL_LANES["lanes"], "weekly": week}}
+    smoke = {"level": "smoke", "cadence": "weekly"}
+    lane = LevelLane(tmp_path, monkeypatch, {"wf_a": smoke, "wf_b": smoke, "wf_c": smoke})
+    monkeypatch.setattr(index_builder, "load_lanes", lambda path=None: registry)
+    asked = []
+    monkeypatch.setattr(commit_meta, "fetch_range", lambda prev, sha: asked.append(prev) or {
+        "prev": prev, "commits_between": int(sha[1:]) - int(prev[1:]), "compare_url": "u"})
+    black = io.BytesIO()
+    Image.fromarray(np.zeros((64, 64, 3), dtype=np.uint8)).save(black, "PNG")
+    for wf_id in lane.files:
+        lane.files[wf_id] = {f"{wf_id}_00001_.png": _picture()}
+    first, second, prefix = "c0000100", "c0000144", "regression/lanes/weekly"
+    assert lane.run(first, "weekly")[0] == 0
+
+    # The lane's run of the second commit: one failure, one workflow not tested.
+    lane.files["wf_a"] = {"wf_a_00001_.png": black.getvalue()}
+    lane.status["wf_b"] = "worker_error"
+    code, old = lane.run(second, "weekly", now=LEVEL_NOW + 7 * 86400)
+    assert code == 1 and (old["overall"], old["has_infra_error"]) == ("fail", True)
+    assert list(old) == RUN_SUMMARY_KEYS + ["ranges", "published_new_bytes"]
+    assert old["ranges"] == {"wf_a": {"prev": first, "commits_between": 44, "compare_url": "u"}}
+    path = f"{prefix}/runs/master/{second}/summary.json"
+    old_text, pointer = lane.text(path), lane.text(f"{prefix}/latest/master.json")
+
+    # A day later the workflow that was not tested is run again, alone.
+    lane.status["wf_b"] = "ok"
+    asked.clear()
+    code, new = lane.run(second, "weekly", "--workflows", "wf_b", now=LEVEL_NOW + 8 * 86400)
+    new_text = lane.text(path)
+    assert code == 0 and json.loads(new_text) == new
+    for wf_id in ("wf_a", "wf_c"):
+        assert _cell_text(new_text, wf_id) == _cell_text(old_text, wf_id), wf_id
+    assert new["workflows"]["wf_b"]["verdict"] == "pass"
+    assert list(new) == RUN_SUMMARY_KEYS + ["ranges", "published_new_bytes", "retests"]
+    for key in ("run_ts", "attempt", "tested_range", "ranges", "published_new_bytes"):
+        assert new[key] == old[key], key
+    assert (new["overall"], new["has_infra_error"]) == ("fail", False)
+    assert new["retests"] == [{"run_ts": LEVEL_NOW + 8 * 86400, "run_url": None, "run_id": None,
+                               "env": None, "workflows": ["wf_b"]}]
+    assert "partial" not in new and "scope" not in new
+    # It is not the lane's run of the commit: the pointer stays where it was.
+    assert lane.text(f"{prefix}/latest/master.json") == pointer
+    # The pointer stands at this commit and a green cell has no range: GitHub was not asked.
+    assert asked == []
+
+    # The failing workflow tested again: its range is worked out again, the rest kept.
+    code, again = lane.run(second, "weekly", "--workflows", "wf_a", now=LEVEL_NOW + 9 * 86400)
+    assert code == 1 and again["ranges"] == old["ranges"] and asked == [first]
+    assert [r["workflows"] for r in again["retests"]] == [["wf_b"], ["wf_a"]]
+    assert _cell_text(lane.text(path), "wf_c") == _cell_text(old_text, "wf_c")
+    # Fixed: its range goes, and the commit is clean.
+    lane.files["wf_a"] = {"wf_a_00001_.png": _picture()}
+    code, fixed = lane.run(second, "weekly", "--workflows", "wf_a", now=LEVEL_NOW + 10 * 86400)
+    assert code == 0 and "ranges" not in fixed and fixed["overall"] == "pass"
+    assert list(fixed) == RUN_SUMMARY_KEYS + ["published_new_bytes", "retests"]
+
+
+# -- the stop --------------------------------------------------------------------------
+class LiveClient:
+    """A RunPod client with jobs in flight, as the stop handler sees it."""
+
+    def __init__(self, *job_ids, log=None):
+        self.live, self.log = set(job_ids), log if log is not None else []
+
+    def cancel_live(self, timeout=None):
+        job_ids = sorted(self.live)
+        self.log.extend(job_ids)
+        self.live.clear()
+        return job_ids
+
+
+def test_a_stop_signal_cancels_the_jobs_in_flight_and_ends_the_process(capsys):
+    """GitHub sends an interrupt, 7.5 s later a terminate, then it kills.
+    Without a handler the RunPod jobs would run on, billed, to their end."""
+    import signal
+    import threading
+    log, left = [], []
+    stopping = threading.Event()
+    # A client per workflow: two have a job, one has ended its job, one is no client.
+    clients = [LiveClient("job-7", log=log), LiveClient(log=log), None,
+               LiveClient("job-9", "job-8", log=log)]
+    handle = run_regression.stop_handler(clients, stopping, leave=left.append)
+    handle(signal.SIGINT, None)
+    assert sorted(log) == ["job-7", "job-8", "job-9"] and stopping.is_set()
+    assert left == [128 + signal.SIGINT]
+    assert (f"::error::stopped by signal {int(signal.SIGINT)}: cancelled 3 RunPod job(s) in "
+            "flight (job-7, job-8, job-9)\n") in capsys.readouterr().out
+    # The second signal finds the cancels sent: it only ends the process.
+    clients.append(LiveClient("job-10", log=log))
+    handle(signal.SIGTERM, None)
+    assert left == [128 + signal.SIGINT, 128 + signal.SIGTERM] and "job-10" not in log
+    assert capsys.readouterr().out == ""
+    # No job in flight: nothing to cancel, and it still ends.
+    run_regression.stop_handler([], threading.Event(), leave=left.append)(signal.SIGTERM, None)
+    assert left[-1] == 143 and "cancelled 0 RunPod job(s) in flight (none)" in (
+        capsys.readouterr().out)
+    assert run_regression.cancel_in_flight([None, LiveClient()]) == []
+    assert run_regression.STOP_SIGNALS == (signal.SIGINT, signal.SIGTERM)
+
+
+def test_the_stop_handler_is_set_for_the_jobs_of_a_nightly_or_weekly_run_only(tmp_path,
+                                                                             monkeypatch):
+    import signal
+    process_workflow = run_regression.process_workflow
+    before = {sig: signal.getsignal(sig) for sig in run_regression.STOP_SIGNALS}
+    during = []
+
+    class Watching(Gpu):
+        def __call__(self, *args):
+            during.append({sig: signal.getsignal(sig) for sig in run_regression.STOP_SIGNALS})
+            return super().__call__(*args)
+
+    code, _ = _long_run(tmp_path, monkeypatch, RecordingStore(), Watching({"a": "pass"}))
+    assert code == 0 and len(during) == 1
+    for sig in run_regression.STOP_SIGNALS:
+        assert during[0][sig] is not before[sig] and callable(during[0][sig])
+        assert signal.getsignal(sig) is before[sig], "put back when the jobs are done"
+    # Put back also when the run ends in an error.
+    class Failing(RecordingStore):
+        def publish_summary(self, branch, commit, summary):
+            raise RuntimeError("the push failed")
+
+    with pytest.raises(RuntimeError, match="the push failed"):
+        _long_run(tmp_path, monkeypatch, Failing(), Gpu({"a": "pass"}))
+    assert {sig: signal.getsignal(sig) for sig in run_regression.STOP_SIGNALS} == before
+    # The per-commit lane is as it was: no handler.
+    during.clear()
+    _long_run(tmp_path, monkeypatch, RecordingStore(), Watching({"a": "pass"}), lane="main")
+    assert during == [before]
+    # process_workflow hands the run its clients, on such a lane only.
+    import types
+    made = []
+    monkeypatch.setattr(run_regression, "RunPodClient", lambda endpoint_id: made.append(
+        LiveClient()) or made[-1])
+    monkeypatch.setattr(run_regression, "run_workflow_job",
+                        lambda client, wf_id, workflow, **kw: {"status": "worker_error"})
+    (tmp_path / "wf_api.json").write_text("{}", encoding="utf-8")
+    args = types.SimpleNamespace(workdir=str(tmp_path / "w"), endpoint_id="ep", lane_id="night",
+                                 commit="new", repo_url=None, branch="master", skip_publish=True,
+                                 clients=[])
+    entry = {"workflow_path": "wf_api.json", "models": []}
+    process_workflow("wf", entry, DEFAULTS, args, tmp_path, None)
+    assert args.clients == made and len(made) == 1
+    del args.clients
+    process_workflow("wf", entry, DEFAULTS, args, tmp_path, None)
+    assert len(made) == 2
+
+
+@pytest.mark.skipif(os.name == "nt",
+                    reason="on Windows a signal does not interrupt the wait for a worker thread")
+def test_a_real_interrupt_reaches_the_run_while_it_waits_for_its_jobs(tmp_path, monkeypatch):
+    """The run's main thread waits for its worker threads. The handler must
+    run there and then, not when a job ends an hour later: it cancels the two
+    jobs in flight, and no job of the workflows still in line is submitted."""
+    import signal
+    import threading
+    import time
+    cancelled, submitted, in_flight, released = [], [], threading.Semaphore(0), threading.Event()
+
+    def client(endpoint_id):
+        return LiveClient(log=cancelled)
+
+    def job(client, wf_id, workflow, **kw):
+        submitted.append(wf_id)
+        client.live.add(f"job-{wf_id}")
+        in_flight.release()
+        assert released.wait(60), "the interrupt never came"
+        return {"status": "worker_error", "error": {"message": "cancelled"}}
+
+    def leave(code):
+        released.set()
+        raise SystemExit(code)
+
+    def install(clients, stopping):
+        earlier = signal.signal(signal.SIGINT, run_regression.stop_handler(clients, stopping,
+                                                                           leave=leave))
+        return lambda: signal.signal(signal.SIGINT, earlier)
+
+    def interrupt():
+        for _ in range(2):  # both slots of the lane hold a job
+            assert in_flight.acquire(timeout=60)
+        time.sleep(0.3)  # the run has handed its pool the other three and waits
+        os.kill(os.getpid(), signal.SIGINT)
+
+    lane = LevelLane(tmp_path, monkeypatch, {
+        f"wf_{i}": {"level": "smoke", "cadence": "nightly"} for i in range(5)})
+    night = {**LEVEL_LANES["lanes"]["nightly"], "max_in_flight": 2}
+    monkeypatch.setattr(index_builder, "load_lanes", lambda path=None: {
+        **LEVEL_LANES, "lanes": {**LEVEL_LANES["lanes"], "nightly": night}})
+    monkeypatch.setattr(run_regression, "RunPodClient", client)
+    monkeypatch.setattr(run_regression, "run_workflow_job", job)
+    monkeypatch.setattr(run_regression, "install_stop_handler", install)
+    before = signal.getsignal(signal.SIGINT)
+    killer = threading.Thread(target=interrupt)
+    killer.start()
+    with pytest.raises(SystemExit) as stopped:
+        lane.run("c1", "nightly", "--skip-publish")
+    killer.join(60)
+    assert stopped.value.code == 128 + signal.SIGINT
+    assert len(submitted) == 2 and sorted(cancelled) == sorted(f"job-{wf}" for wf in submitted)
+    assert signal.getsignal(signal.SIGINT) is before

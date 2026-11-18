@@ -173,6 +173,81 @@ def test_a_result_of_named_workflows_only_does_not_skip_the_full_run(tmp_path, c
     assert cap.out.strip() == "skip=false" and "testing: " in cap.err
 
 
+def test_a_summary_of_a_run_that_did_not_finish_gets_one_more_attempt(tmp_path, capsys):
+    """A nightly or weekly run pushes what it has every few workflows, with
+    `partial` in the summary. Its final summary has no such key. One that is
+    still there belongs to a run that died: it counts as a start marker
+    without a result."""
+    partial = {**_summary("pass", attempt=1, a="pass", b="pass"),
+               "partial": {"done": 2, "of": 55}}
+    run, why = regression_skip.decide(SHA, partial, latest={"commit": "a" * 40})
+    assert run and "attempt 1 did not finish" in why and "attempt 2 of 2" in why
+    # Beside its start marker, which every full run pushes first.
+    assert decide(summary=partial, marker={"attempt": 1})
+    # It is an attempt: the next run is the second, and after that the cron stops.
+    assert regression_skip.attempts(partial) == 1 and regression_skip.next_attempt(partial) == 2
+    second = {**partial, "attempt": 2}
+    run, why = regression_skip.decide(SHA, second, marker={"attempt": 2})
+    assert not run and "started 2 attempts" in why and "none finished" in why and "commit=" in why
+    # A second attempt that died before its first checkpoint left only its marker.
+    assert not decide(summary=partial, marker={"attempt": 2})
+    # What it holds so far is no result of the commit, whatever it is.
+    for cells in ({"a": "execution_error"}, {"a": "fail"}, {"a": "infra_error"}):
+        assert decide(summary={**_summary("fail", attempt=1, **cells),
+                               "partial": {"done": 1, "of": 3}}), cells
+    assert decide(summary=second, explicit=True)
+    # A run that published before moved the pointer here: the commit has its result.
+    assert not decide(summary=partial, latest={"commit": SHA})
+    # The final summary of the same run is a result like any other.
+    final = {key: value for key, value in partial.items() if key != "partial"}
+    run, why = regression_skip.decide(SHA, final)
+    assert not run and "already published" in why
+    assert regression_skip.is_partial(partial)
+    assert not regression_skip.is_partial(final) and not regression_skip.is_partial(None)
+    # The step's own call.
+    path = tmp_path / "summary.json"
+    path.write_text(json.dumps(partial), encoding="utf-8")
+    assert regression_skip.main(["--commit", SHA, "--summary", str(path)]) == 0
+    cap = capsys.readouterr()
+    assert cap.out.strip() == "skip=false" and "did not finish" in cap.err
+
+
+def _untested(*statuses, attempt=1):
+    """A published summary with one passing workflow and one untested workflow
+    for each worker status given."""
+    cells = {"sdxl_t2i": {"verdict": "pass", "worker_status": "ok"}}
+    cells.update({f"wf_{i}": {"verdict": "infra_error", "worker_status": status}
+                  for i, status in enumerate(statuses)})
+    return {"schema_version": 2, "commit": SHA, "overall": "pass", "has_infra_error": True,
+            "attempt": attempt, "workflows": cells}
+
+
+def test_a_workflow_that_another_run_would_not_test_either_is_no_reason_for_a_retry():
+    """Models that are not on the volume yet, a model host that refuses a
+    file, a workflow the run's deadline did not reach: a second run of the
+    commit right away would end the same way, and cost a full run."""
+    assert regression_skip.NO_RETRY == {"missing_model", "model_access_error", "not_reached"}
+    for status in sorted(regression_skip.NO_RETRY):
+        run, why = regression_skip.decide(SHA, _untested(status))
+        assert not run and "already published" in why and "commit=" in why, status
+        assert f"another run would not test either: {status})" in why
+        assert not regression_skip.has_infra_error(_untested(status))
+    assert not decide(summary=_untested("missing_model", "not_reached", "missing_model"))
+    # One workflow that another run can test is reason enough, once.
+    for status in ("worker_error", "infra_error", "model_fetch_error", "harness_error",
+                   "no_outputs", None, ["missing_model"]):
+        assert decide(summary=_untested("missing_model", status)), status
+        assert not decide(summary=_untested("missing_model", status, attempt=2)), status
+    # A dispatch that names the commit tests it whatever stands there.
+    assert decide(summary=_untested("missing_model"), explicit=True)
+    # A summary that says it has infra errors and shows no such cell is taken at its word.
+    bare = {"commit": SHA, "overall": "pass", "has_infra_error": True, "workflows": {}}
+    assert decide(summary=bare) and regression_skip.has_infra_error({"has_infra_error": True})
+    assert regression_skip.untested(_untested("missing_model", None)) == ["missing_model", None]
+    # A result with nothing untested says nothing about it.
+    assert "another run" not in regression_skip.decide(SHA, _summary("pass"))[1]
+
+
 def test_cli_prints_the_step_output(tmp_path, capsys):
     summary, latest, empty = tmp_path / "s.json", tmp_path / "l.json", tmp_path / "e.json"
     summary.write_text(json.dumps(_summary("fail", z="execution_error")), encoding="utf-8")

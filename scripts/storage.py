@@ -87,9 +87,10 @@ class Storage:
         self._run_derived()
 
     def checkpoint(self, message: str):
-        """Publish what has been written so far, before the long part of a run,
-        so it survives the run dying later. Derived writers wait for
-        finalize(). A no-op where every write is already published."""
+        """Publish what has been written so far, so it survives the run dying
+        later: before the long part of a run, and during a long run every few
+        results. Derived writers wait for finalize(). A no-op where every
+        write is already published."""
 
     # -- layout helpers shared by all backends ------------------------------
     @property
@@ -174,7 +175,12 @@ class GitHubStorage(Storage):
         self._written: list[str] = []
         self._derived_paths: set[str] = set()
         self._sparse: set[str] = set()
-        self._lock = threading.Lock()
+        # One lock for everything that changes the checkout while a run's
+        # worker threads are at work: a git call that adds a directory, the
+        # copy of a workflow's folder, and a checkpoint. A checkpoint so never
+        # commits a folder that is half copied, and no two git calls meet.
+        # Re-entrant: copying a folder adds its directory first.
+        self._lock = threading.RLock()
         self._clone()
 
     # -- git plumbing --------------------------------------------------------
@@ -252,18 +258,21 @@ class GitHubStorage(Storage):
         self._written.append(path)
 
     def upload_dir(self, blob_prefix: str, local_dir: Path, exclude=()):
-        self._ensure_dir(blob_prefix)
         local_dir = Path(local_dir)
         held = set(exclude)
-        for p in sorted(local_dir.rglob("*")):
-            if p.is_file():
-                rel = p.relative_to(local_dir).as_posix()
-                if rel in held:
-                    continue
-                dest = self._p(f"{blob_prefix}/{rel}")
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(p, dest)
-                self._written.append(f"{blob_prefix}/{rel}")
+        # Under the lock from the first file to the last: a checkpoint in
+        # another thread commits the whole folder or none of it.
+        with self._lock:
+            self._ensure_dir(blob_prefix)
+            for p in sorted(local_dir.rglob("*")):
+                if p.is_file():
+                    rel = p.relative_to(local_dir).as_posix()
+                    if rel in held:
+                        continue
+                    dest = self._p(f"{blob_prefix}/{rel}")
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(p, dest)
+                    self._written.append(f"{blob_prefix}/{rel}")
 
     def download_dir(self, blob_prefix: str, local_dir: Path) -> int:
         self._ensure_dir(blob_prefix)
@@ -369,8 +378,11 @@ class GitHubStorage(Storage):
         self._push(message, "results", derived=True)
 
     def checkpoint(self, message: str):
-        if self._commit(message):
-            self._push(message, "checkpoint", derived=False)
+        # A run calls this while its worker threads still copy their folders:
+        # they wait here until the commit is made and pushed.
+        with self._lock:
+            if self._commit(message):
+                self._push(message, "checkpoint", derived=False)
 
     def _push(self, message: str, what: str, derived: bool):
         url = self._url(True)

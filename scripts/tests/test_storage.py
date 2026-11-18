@@ -221,6 +221,56 @@ def test_a_backend_that_predates_exclude_still_publishes_a_run_that_holds_nothin
     assert calls[-1] == ("regression/runs/master/abc/wf", tmp_path, ["outputs/a.glb"])
 
 
+def test_a_checkpoint_never_pushes_a_folder_that_is_half_copied(tmp_path, remote, monkeypatch):
+    """A nightly or weekly run pushes what it has while its worker threads
+    still copy their workflows' folders into the checkout. The copy and the
+    checkpoint take one lock: the push holds the whole folder or none of it."""
+    import threading
+
+    def pushed():
+        r = subprocess.run(["git", "-C", str(remote), "ls-tree", "-r", "--name-only", "results",
+                            "regression/runs/master/bbb/"], capture_output=True, text=True)
+        return r.stdout.split()
+
+    s = _store(tmp_path, remote, "a")
+    folder = tmp_path / "wf"
+    (folder / "outputs").mkdir(parents=True)
+    for name in ("comparison.json", "run.json", "outputs/wf_00001_.png"):
+        (folder / name).write_text(name, encoding="utf-8")
+    s.publish_summary("master", "bbb", {"commit": "bbb", "partial": {"done": 1, "of": 3}})
+
+    first_copied, go_on, copy = threading.Event(), threading.Event(), storage.shutil.copy2
+
+    def slow_copy(src, dest):
+        copy(src, dest)
+        first_copied.set()
+        assert go_on.wait(60)
+
+    monkeypatch.setattr(storage.shutil, "copy2", slow_copy)
+    worker = threading.Thread(target=s.publish_workflow_run, args=("master", "bbb", "wf", folder))
+    worker.start()
+    assert first_copied.wait(60)  # one file of three is in the checkout
+    pusher = threading.Thread(target=s.checkpoint, args=("regression master@bbb: 1 of 3",))
+    pusher.start()
+    pusher.join(1.5)
+    assert pusher.is_alive() and pushed() == [], "the checkpoint waits for the folder"
+    go_on.set()
+    worker.join(60)
+    pusher.join(120)
+    assert not worker.is_alive() and not pusher.is_alive()
+    base = "regression/runs/master/bbb"
+    assert pushed() == [f"{base}/summary.json", f"{base}/wf/comparison.json",
+                        f"{base}/wf/outputs/wf_00001_.png", f"{base}/wf/run.json"]
+    # The folder's own directory was added under the same lock: it is re-entrant.
+    assert s._git("status", "--porcelain").stdout.strip() == ""
+    # And a checkpoint with nothing new pushes nothing.
+    head = subprocess.run(["git", "-C", str(remote), "rev-parse", "results"],
+                          capture_output=True, text=True).stdout
+    s.checkpoint("nothing new")
+    assert subprocess.run(["git", "-C", str(remote), "rev-parse", "results"],
+                          capture_output=True, text=True).stdout == head
+
+
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")  # raised while the bucket client loads
 def test_the_bucket_backend_holds_the_same_files_back(tmp_path, monkeypatch):
     import gcs_publish

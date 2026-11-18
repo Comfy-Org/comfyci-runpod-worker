@@ -248,6 +248,29 @@ def test_backfill_then_incremental_upsert(tmp_path):
     assert on_remote["count"] == 4
 
 
+def test_a_backfill_leaves_out_what_a_run_that_did_not_finish_pushed(tmp_path):
+    """A nightly or weekly run pushes a summary with `partial` every few
+    workflows, and its final publish writes the index. A run that died is in
+    no history table, and a rebuild of the index must not put it there."""
+    files = _seed_files()
+    died = _summary("ddd", 1725321600, "pass", IDENT, DIFF, "ccc", sha="s3")
+    files["regression/runs/master/ddd/summary.json"] = {**died, "partial": {"done": 1, "of": 9}}
+    remote = make_remote(tmp_path, files)
+    store = storage.GitHubStorage("local/test", "results", tmp_path / "wt", remote_url=str(remote))
+    builder = index_builder.IndexBuilder(store, "master", LANE, 1, LANES)
+    assert builder.backfill(with_meta=False, log=lambda *_: None) == 3
+    head = store.download_json(builder.head_path())
+    assert [e["c"] for e in head["entries"]] == ["ccc", "bbb", "aaa"]
+    assert head["first_bad"]["flux"]["commit"] == "bbb"  # the partial pass closed nothing
+    # A later run tested a workflow again at that commit and published: its
+    # publish put the commit in the index, so a rebuild does too.
+    store.publish_summary("master", "ddd", {**died, "partial": {"done": 1, "of": 9},
+                                            "retests": [{"run_id": 7, "workflows": ["flux"]}]})
+    store.finalize("a re-test at ddd")
+    assert builder.backfill(with_meta=False, log=lambda *_: None) == 4
+    assert store.download_json(builder.head_path())["entries"][0]["c"] == "ddd"
+
+
 def test_accepted_drift_closes_the_chain_and_refresh_sees_a_new_bless(tmp_path):
     remote = make_remote(tmp_path, _seed_files())
     store = storage.GitHubStorage("local/test", "results", tmp_path / "wt", remote_url=str(remote))

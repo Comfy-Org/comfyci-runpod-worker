@@ -750,9 +750,16 @@ def test_retired_lane_offers_no_commands():
 
 
 # -- infra errors and missing references -------------------------------------------------
+ONCE_MORE = ("This was attempt 1 of 2: the cron tests the commit once more while it is still the "
+             "newest commit on master.")
+
+
 @pytest.mark.parametrize("attempt, retry", [
-    (1, "This was attempt 1 of 2: the cron tests the commit once more while it is still the "
-        "newest commit on master."),
+    # Models that are not on the volume: another run right away would not find
+    # them either, so the cron leaves the commit alone (regression_skip.NO_RETRY).
+    (1, "Its models are not on the volume yet. Another run right away would end the same way, "
+        "so the cron does not test the commit again. Dispatch **GPU regression** with this "
+        "commit to test it again."),
     (2, "This was attempt 2 of 2: the cron does not retry it. Dispatch **GPU regression** with "
         "this commit to test it again."),
     (3, "This was attempt 3: the cron does not retry it."),
@@ -763,7 +770,8 @@ def test_infra_error_is_not_a_verdict_and_says_whether_the_cron_retries(attempt,
     runs = {"sdxl_t2i": _run("sdxl_t2i", "missing_model", attempt=2, error={
         "message": "models absent from volume",
         "missing": ["checkpoints/sd_xl_base_1.0.safetensors"]})}
-    out = _report(_tree(_summary(cells, attempt=attempt), runs=runs))
+    summary = _summary(cells, attempt=attempt)
+    out = _report(_tree(summary, runs=runs))
     lines = out.split("\n")
     assert lines[0].startswith("## ⚠️ GPU regression · ")  # not red
     assert ("No failures; 1 workflow hit infrastructure errors (not a verdict on the commit)."
@@ -777,7 +785,33 @@ def test_infra_error_is_not_a_verdict_and_says_whether_the_cron_retries(attempt,
     assert "RunPod attempt 2" in out
     assert "| `sdxl_t2i` | ⚠️ infra error |" in out
     # Here the attempt tells something, so the Tested row names it.
-    assert f"· {retry[9:].split(':')[0]} · [Actions run]({RUN_URL}) |" in out
+    named = f"attempt {attempt} of 2" if attempt <= 2 else f"attempt {attempt}"
+    assert f"· {named} · [Actions run]({RUN_URL}) |" in out
+    # The report says what the cron does: neither tests the commit again.
+    assert not run_report.regression_skip.decide(SHA, summary)[0]
+    assert ONCE_MORE not in out
+
+
+def test_the_cron_retries_a_commit_for_a_workflow_that_another_run_can_test():
+    """The sentence a per-commit report always had, for a status that is not
+    in regression_skip.NO_RETRY. One such workflow is enough: the cron tests
+    the whole commit again, the workflow without its models included."""
+    for status in ("worker_error", "server_start_timeout", "checkout_error"):
+        cells = [_cell("flux_dev_t2i"), _cell("sdxl_t2i", "infra_error", worker_status=status)]
+        summary = _summary(cells)
+        out = _report(_tree(summary))
+        assert (f"Worker status: <code>{status.replace('_', chr(92) + '_')}</code>. This is not "
+                f"a verdict on the commit. {ONCE_MORE}") in out, status
+        assert run_report.regression_skip.decide(SHA, summary)[0]
+    mixed = [_cell("flux_dev_t2i", "infra_error", worker_status="worker_error"),
+             _cell("sdxl_t2i", "infra_error", worker_status="missing_model")]
+    summary = _summary(mixed)
+    out = _report(_tree(summary))
+    assert out.count(ONCE_MORE) == 2 and "not on the volume" not in out
+    assert run_report.regression_skip.decide(SHA, summary)[0]
+    # A cell from before the status was recorded is taken as one a run can test.
+    old = _cell("sdxl_t2i", "infra_error", worker_status=None)
+    assert ONCE_MORE in _report(_tree(_summary([old])))
 
 
 def test_no_reference_says_how_to_make_one():
@@ -4091,3 +4125,292 @@ def test_lanes_declared_before_their_endpoint_add_a_note_each_and_nothing_else()
     after = run_report.overview_report(run_report.DictReader(files, RESULTS), declared, SHA,
                                        "master").split("\n")
     assert after[:at] + after[at + 2:] == before.split("\n")
+
+
+# -- a nightly or weekly run: what it did not finish, reach or test ---------------------------
+NIGHT_RUN = f"{NP}/runs/master/{HEAD}"
+DISPATCH = ("gh workflow run nightly-weekly.yml --repo Comfy-Org/comfyci-runpod-worker "
+            "-f cadence=nightly")
+NEXT_RUN = "Nothing tests it again before the lane's next run."
+
+
+def _late(wf):
+    """The cell of a workflow that the run's deadline did not reach."""
+    return {"workflow_id": wf, "worker_status": "not_reached", "verdict": "infra_error",
+            "error": "not started: its job can take 45 min, and 12 min were left before the "
+                     "run's deadline", "level": "smoke", "prior_verdict": "pass",
+            "prior_commit": LAST}
+
+
+def _night_files(cells, runs=None, **kw):
+    """The results tree of a nightly run of HEAD. `runs` holds run records
+    that differ from what the cells say. A workflow that was not reached has
+    none: no job was submitted for it."""
+    files = _smoke_files(cells, lane=NIGHTLY, commit=HEAD, **kw)
+    files.update({f"{NIGHT_RUN}/{wf}/run.json": run for wf, run in (runs or {}).items()})
+    for cell in cells:
+        if cell["worker_status"] == "not_reached":
+            del files[f"{NIGHT_RUN}/{cell['workflow_id']}/run.json"]
+    return files
+
+
+def _night_report(cells, runs=None, **kw):
+    return _smoke_report(_night_files(cells, runs, **kw), lane=NIGHTLY, commit=HEAD)
+
+
+def test_a_summary_of_a_run_that_did_not_finish_says_so():
+    """A nightly or weekly run pushes what it has every 10 workflows. When it
+    dies, that summary is what the results branch holds, and a report of it
+    must not read like the lane's result."""
+    mesh = _smoke_cell(MESH, [_png(f"{MESH}_00001_.png")])
+    music = _smoke_cell(MUSIC, [_flac()], output_kind="audio")
+    files = _night_files([mesh, music], partial={"done": 2, "of": 55})
+    # The index is written by the final publish alone: this commit is not in it.
+    head = f"regression/index/master/{NIGHTLY}.json"
+    files[head] = _head([_entry(LAST, 1794616236, {MESH: "pass", MUSIC: "pass"})])
+    manifest = {"workflows": {wf: {"enabled": True, "level": "smoke", "cadence": "nightly"}
+                              for wf in (MESH, MUSIC, CLIP)}}
+    manifest["workflows"]["flux_dev_t2i"] = {"enabled": True}
+    out = _smoke_report(files, lane=NIGHTLY, commit=HEAD, manifest=manifest)
+    lines = out.split("\n")
+    # Green so far is not green.
+    assert lines[0] == ("## ⚠️ GPU regression · nightly · py3.13 / torch 2.14.1 / cu130 / "
+                        "RTX 4090 · `05e878f3`")
+    assert lines[1:5] == ["", "> [!WARNING]", (
+        "> This run did not finish: 2 of 55 workflows have a result. The report shows what the "
+        "run pushed before it stopped, and the other workflows are not in it. A run that is "
+        "still going reads the same until it publishes its last result."), ""]
+    assert "| Progress | 2 of 55 workflows have a result. The run did not finish |" in lines
+    assert "All 2 workflows passed their smoke checks." in lines
+    assert "### All workflows (2)" in lines
+    # The workflows of the lane without a result, and none of another cadence.
+    assert (f"- ➖ not run, on this lane, and the run had no result for them when it pushed this "
+            f"summary: `{CLIP}`") in lines
+    assert "The commit of this report is not among them." in out
+    # The page of a report-only run, or of a run that skipped the commit, is
+    # another run's than the one that did not finish, and says so.
+    out = _smoke_report(files, lane=NIGHTLY, commit=HEAD, skipped=True)
+    assert out.split("\n")[2:7] == ["> [!WARNING]", (
+        "> The run that tested this commit did not finish: 2 of 55 workflows have a result. "
+        "The report shows what the run pushed before it stopped, and the other workflows are "
+        "not in it. A run that is still going reads the same until it publishes its last "
+        "result."), "", "> [!NOTE]", (
+        "> This run did not test this commit again: the lane already has part of a result for "
+        f"it, tested 2026-11-15 00:30 UTC in [an earlier run]({RUN_URL}). The report below "
+        "shows that result.")]
+    # A failure it already had keeps the title red.
+    red = _night_files([mesh, _silent(prior_commit=LAST)], partial={"done": 2, "of": 55})
+    assert _smoke_report(red, lane=NIGHTLY, commit=HEAD).startswith("## ❌ GPU regression · ")
+    # Numbers that cannot be read are not shown as numbers.
+    for odd in ({}, {"done": "2", "of": 55}, {"done": 9, "of": 3}, {"done": True, "of": 5}):
+        out = _night_report([mesh], partial=odd)
+        assert "> This run did not finish: not every workflow has a result. The report" in out
+    # The run's final summary has no such key, and its report no such words.
+    out = _night_report([mesh, music])
+    assert out.startswith("## ✅ ") and "This run did not finish" not in out
+    assert "Progress" not in out and "had no result for them" not in out
+    text = run_report.progress_text
+    assert text({"partial": {"done": 40, "of": 55}}) == "40 of 55 workflows have a result"
+    assert text({"partial": {"done": 0, "of": 1}}) == "0 of 1 workflow has a result"
+    assert text({}) == text(None) == text({"partial": None}) == text({"partial": [1]}) == ""
+
+
+def test_a_run_that_died_says_what_its_checkpoints_left_on_the_results_branch(tmp_path):
+    """The job that was stopped reports from its own files, which hold more
+    than its last checkpoint. That checkpoint is no "earlier result"."""
+    published = _summary([_cell("flux_dev_t2i")], partial={"done": 1, "of": 3})
+    workdir = tmp_path / "regression-work"
+    for wf in ("flux_dev_t2i", "sdxl_t2i"):
+        (workdir / wf).mkdir(parents=True)
+        (workdir / wf / "run.json").write_text(json.dumps(_run(wf)), encoding="utf-8")
+        (workdir / wf / "comparison.json").write_text(json.dumps(
+            {"verdict": "pass", "vs_golden": IDENT, "golden_tag": "v0.42.0"}), encoding="utf-8")
+    out = _report(_tree(published), workdir=str(workdir), summary_file=str(tmp_path / "no.json"))
+    assert ("> This run stopped before it published its results. The report is rebuilt from the "
+            "files on the runner, so images and links to published files are missing. The "
+            "attached files hold the outputs. The results branch holds part of a result for "
+            "this commit: 1 of 3 workflows have a result, pushed by a run before it had them "
+            "all.") in out.split("\n")
+    assert "an earlier result for this commit" not in out and "### All workflows (2)" in out
+    # The rebuilt summary is not partial itself: it has every file of the runner.
+    assert "This run did not finish" not in out and "Progress" not in out
+
+
+def test_a_workflow_that_a_later_run_tested_again_is_marked():
+    """A dispatch that names workflows at a commit the lane has a result for
+    replaces their cells and records itself under `retests`. The facts of the
+    summary are still those of the lane's own run, so the rows say which
+    results are another run's."""
+    later, last = RUN_URL.replace("4242", "5555"), RUN_URL.replace("4242", "6666")
+    retests = [{"run_ts": 1794706236, "run_url": later, "run_id": 5555, "env": ENV,
+                "workflows": ["sdxl_t2i"]}]
+    cells = [_cell("flux_dev_t2i"), _cell("sdxl_t2i")]
+    out = _report(_tree(_summary(cells, retests=retests)))
+    lines = out.split("\n")
+    assert ("| Tested | 2026-11-15 00:30 UTC · 10 min after the commit · "
+            f"[Actions run]({RUN_URL}) |") in lines
+    assert (f"| Tested again | `sdxl_t2i` · 2026-11-15 01:30 UTC · [Actions run]({later}) |"
+            in lines)
+    assert [line[:90] for line in lines if line.startswith("| `sdxl_t2i` | ✅ pass")] == [
+        f"| `sdxl_t2i` | ✅ pass · tested again in [a later run]({later}) | <a href="[:90]]
+    assert any(line.startswith("| `flux_dev_t2i` | ✅ pass | <a href=") for line in lines)
+    # Tested again twice: the table lists both runs, and the row links the last.
+    retests.append({"run_ts": 1794709836, "run_url": last, "run_id": 6666, "env": ENV,
+                    "workflows": ["flux_dev_t2i", "sdxl_t2i"]})
+    out = _report(_tree(_summary(cells, retests=retests)))
+    assert (f"| Tested again | `sdxl_t2i` · 2026-11-15 01:30 UTC · [Actions run]({later}); "
+            f"`flux_dev_t2i`, `sdxl_t2i` · 2026-11-15 02:30 UTC · [Actions run]({last}) |") in out
+    assert out.count(f"tested again in [a later run]({last})") == 2 and later + ") | <a" not in out
+    # A re-test that names no run, and records that are not what they should be.
+    for odd, said in (([{"workflows": ["sdxl_t2i"]}], "| Tested again | `sdxl_t2i` |"),
+                      ([{"run_ts": "x", "run_url": "https://evil.example/", "run_id": "1",
+                         "workflows": ["sdxl_t2i", 7, EVIL]}], "| Tested again | `sdxl_t2i`, "),
+                      ("sdxl_t2i", None), ([None, 3, {"workflows": "sdxl_t2i"}, {}], None)):
+        out = _report(_tree(_summary(cells, retests=odd)))
+        assert out and "evil.example/)" not in out
+        assert ("Tested again" in out) == bool(said) and (not said or said in out), odd
+    assert "tested again in a later run |" in _report(_tree(_summary(
+        cells, retests=[{"workflows": ["sdxl_t2i"]}])))
+    # A summary without re-tests reads as it did.
+    assert "ested again" not in _report(_tree(_summary(cells)))
+    assert run_report.retests_of(None) == {} == run_report.retests_of({"retests": {}})
+
+
+def test_the_workflows_a_deadline_did_not_reach_are_one_list():
+    """A weekly run that runs out of time can leave dozens of workflows
+    without a job. They share one story, so they share one block."""
+    mesh = _smoke_cell(MESH, [_png(f"{MESH}_00001_.png")])
+    out = _night_report([mesh, _late("wan_a"), _late("wan_b"), _late("wan_c")])
+    lines = out.split("\n")
+    assert out.startswith("## ⚠️ ")
+    assert "No failures: 1 passed its smoke checks. 3 were not tested." in lines
+    at = lines.index("### What needs attention")
+    assert lines[at:at + 13] == [
+        "### What needs attention", "",
+        "#### ⚠️ Not reached before the run's deadline (3)", "",
+        "The run stops submitting jobs when one could still be running at its deadline. No job "
+        "was submitted for these workflows, so they have no result. This is not a verdict on "
+        "the commit.", "",
+        "`wan_a`, `wan_b`, `wan_c`", "",
+        "Nothing tests them again before the lane's next run. To test them now (needs write "
+        "access to the worker repository):", "",
+        "```", f"{DISPATCH} -f commit={HEAD} -f workflows=wan_a,wan_b,wan_c", "```"]
+    assert not [line for line in lines if line.startswith("#### ") and "`wan_" in line]
+    assert "An infrastructure problem stopped this workflow" not in out
+    assert "| `wan_a` | ⚠️ infra error |" in out
+    # Next to a failure and to a workflow that was not tested for another reason:
+    # each of those has its block, and the list comes last.
+    flaky = _smoke_cell(MUSIC, verdict="infra_error", worker_status="worker_error",
+                        prior_commit=LAST)
+    out = _night_report([_silent(prior_commit=LAST, workflow_id="bad_wf"), flaky, _late("wan_a")])
+    heads = [line for line in out.split("\n") if line.startswith("#### ")]
+    assert [head.split(":")[0] for head in heads] == [
+        "#### ❌ `bad_wf`", f"#### ⚠️ `{MUSIC}`",
+        "#### ⚠️ Not reached before the run's deadline (1)"]
+    # A name that is no workflow id is listed, and no command is built from it.
+    out = _night_report([mesh, _late("wan_a"), _late("x; rm -rf ~")])
+    assert "Nothing tests them again before the lane's next run." in out.split("\n")
+    assert "-f workflows=wan_a" not in out and "rm -rf" in out
+    # A per-commit lane that was given a deadline: the list, and nothing about a next run.
+    out = _smoke_report(_smoke_files([mesh, _late("wan_a")]))
+    assert "#### ⚠️ Not reached before the run's deadline (1)" in out
+    assert "lane's next run" not in out and "nightly-weekly.yml" not in out
+
+
+def test_an_untested_workflow_on_a_nightly_lane_says_what_the_run_did_and_what_is_left():
+    """No cron tests the commit again the next minute on such a lane. The run
+    itself tries once more, and after it the reader has the command."""
+    first = ("An infrastructure problem stopped this workflow. Worker status: <code>{}</code>. "
+             "This is not a verdict on the commit. ")
+    command = ["", "```", f"{DISPATCH} -f commit={HEAD} -f workflows={MUSIC}", "```"]
+
+    def block(status, run=None):
+        cell = _smoke_cell(MUSIC, verdict="infra_error", worker_status=status, prior_commit=LAST)
+        runs = {MUSIC: _run(MUSIC, status, outputs=[], **(run or {}))}
+        lines = _night_report([cell, _smoke_cell(MESH, [_png(f"{MESH}_00001_.png")])],
+                              runs).split("\n")
+        at = lines.index(f"#### ⚠️ `{MUSIC}`: infra error")
+        return lines[at + 2:at + 7]
+
+    assert block("worker_error") == [
+        first.format("worker\\_error") + "A nightly or weekly run tries such a workflow once more "
+        f"at its end, when its deadline still allows the job. {NEXT_RUN} To test it now (needs "
+        "write access to the worker repository):", *command]
+    # Its job used up its whole time: RunPod ended it, or the runner gave up on it.
+    assert block("infra_error", {"reason": "timed_out"})[0] == (
+        first.format("infra\\_error") + "Its job used up its whole time, so the run did not try "
+        f"it again: a second job can cost as much. {NEXT_RUN} To test it now (needs write access "
+        "to the worker repository):")
+    for status, why in (("missing_model", "Its models are not on the volume yet"),
+                        ("model_access_error", "The model host refuses a file it needs")):
+        assert block(status)[0] == (
+            first.format(status.replace("_", "\\_")) + f"{why}. Another attempt would have ended "
+            f"the same way, so the run did not try it again. {NEXT_RUN} To test it now (needs "
+            "write access to the worker repository):"), status
+    # Nothing here speaks of a cron that tests the commit once more.
+    out = _night_report([_smoke_cell(MUSIC, verdict="infra_error", worker_status="worker_error")])
+    assert "the cron" not in out and "1 was not tested." in out
+    assert out.startswith(f"## {run_report.WARN} ")
+    # A name that is no workflow id gets the words, and no command built from it.
+    odd = "x; rm -rf ~"
+    out = _night_report([_smoke_cell(odd, verdict="infra_error", worker_status="worker_error"),
+                         _smoke_cell("y && z", verdict="execution_error", prior_commit=FIRST)],
+                        ranges={"y && z": {"prev": FIRST, "commits_between": 12}})
+    assert [line for line in out.split("\n")
+            if line.endswith(f"when its deadline still allows the job. {NEXT_RUN}")]
+    assert "12 commits since then: " in out and "new since `aaaaaaa`, 12 commits" in out
+    assert "gh workflow run" not in out and "```" not in out
+    # The per-commit lane keeps its words for the same cell.
+    out = _smoke_report(_smoke_files([_smoke_cell(MUSIC, verdict="infra_error",
+                                                  worker_status="worker_error")]))
+    assert ONCE_MORE in out and "next run" not in out
+
+
+def test_an_execution_error_on_a_nightly_lane_is_placed_by_the_workflows_own_last_result():
+    """The run covers 7 commits, and this workflow last ran to the end 12
+    commits ago: the run before did not test it."""
+    broken = _smoke_cell(CLIP, verdict="execution_error", prior_commit=FIRST)
+    ranges = {CLIP: {"prev": FIRST, "commits_between": 12, "compare_url": "u"}}
+    out = _nightly([broken, _smoke_cell(MESH, [_png(f"{MESH}_00001_.png")])], ranges=ranges)
+    block = _block(out, CLIP)
+    assert block[0] == f"#### ❌ `{CLIP}`: execution error (new since `aaaaaaa`, 12 commits)"
+    assert block[1:5] == [
+        "The workflow did not finish on this commit. Worker status: <code>timeout</code>. "
+        f"Before this commit it last ran to the end at [`aaaaaaa`]({COMFY}/commit/{FIRST}) "
+        "(smoke pass): the error started after that commit. 12 commits since then: [compare]("
+        f"{COMFY}/compare/{FIRST}...{HEAD}). To test one commit of that range (needs write "
+        "access to the worker repository):",
+        "```", f"{DISPATCH} -f commit=<sha> -f workflows={CLIP}", "```"]
+    assert "This run covers 7 commits, so the error started in one of them" not in out
+    assert "1 of 2 workflows failed: 1 new in this run. 1 passed its smoke checks." in (
+        out.split("\n"))
+    # The facts table still says what the run covers, and that it places no failure.
+    assert (f"| Covers | 7 commits since [`e9afbcc`]({COMFY}/commit/{LAST}) ([compare]({COMFY}"
+            f"/compare/{LAST}...{HEAD})), the commit of the lane's previous full run. Each "
+            "failure says where it started: a workflow's own last result can be older |"
+            ) in out.split("\n")
+    # One that was already failing is inherited, in its heading too.
+    out = _nightly([_smoke_cell(CLIP, verdict="execution_error", prior_verdict="execution_error",
+                                prior_commit=LAST)])
+    assert _block(out, CLIP)[:2] == [
+        f"#### ❌ `{CLIP}`: execution error (inherited)",
+        "The workflow did not finish on this commit. Worker status: <code>timeout</code>. It "
+        f"already ended in an execution error at [`e9afbcc`]({COMFY}/commit/{LAST}), so the "
+        "error is inherited from an earlier commit."]
+    # A reference-level workflow on such a lane reads the same way.
+    out = _nightly([_cell("flux_dev_t2i", "execution_error", prior_commit=FIRST)], ranges={
+        "flux_dev_t2i": {"prev": FIRST, "commits_between": 12}})
+    assert "#### ❌ `flux_dev_t2i`: execution error (new since `aaaaaaa`, 12 commits)" in out
+    assert "1 of 1 workflow failed: 1 new in this run." in out.split("\n")
+    # Its last result is called what it was: a match with a reference, not a smoke pass.
+    assert ") (pass): the error started after that commit. 12 commits since then: " in out
+    # The per-commit lane words an execution error as it always did, from the run.
+    rng = {"prev": PREV, "commits_between": 3}
+    out = _report(_tree(_summary([_cell("flux_dev_t2i", "execution_error")], tested_range=rng,
+                                 ranges={"flux_dev_t2i": {"prev": FIRST, "commits_between": 9}})))
+    lines = out.split("\n")
+    assert "#### ❌ `flux_dev_t2i`: execution error" in lines
+    assert ("1 of 1 workflow failed, new in this run, which covers 3 commits." in lines)
+    assert "so the error is new in this run. This run covers 3 commits, so the error started in " \
+        "one of them" in out
+    assert "| Covers | 3 commits since " in out and "previous full run" not in out
