@@ -669,6 +669,36 @@ def test_a_run_that_named_its_workflows_is_not_the_lanes_latest_run(tmp_path):
         "latest": None, "count": 1, "shards": ["2024-09"]}
 
 
+def test_a_run_of_another_workflow_does_not_open_an_accepted_chain_again(tmp_path):
+    """Accepted drift was read from the newest entry. A run that named one
+    workflow at a newer commit holds no cell of the others, so a chain that
+    a bless had accepted was listed as open until the lane's next full run:
+    a day on a nightly lane."""
+    remote = make_remote(tmp_path, _seed_files())
+    store = storage.GitHubStorage("local/test", "results", tmp_path / "wt", remote_url=str(remote))
+    builder = index_builder.IndexBuilder(store, "master", LANE, 1, LANES)
+    builder.backfill(with_meta=False, log=lambda *_: None)
+    store.upload_json("regression/golden/flux/current.json",
+                      {"tag": "v0.38.0", "output_sha256": "s2"})
+    builder.refresh()
+    assert store.download_json(builder.head_path())["first_bad"] == {}
+
+    # Another workflow alone, at a newer commit.
+    named = _summary("ddd", 1725321600, "pass", IDENT, None, None, sha="o1")
+    named["workflows"] = {"other": {**named["workflows"]["flux"], "workflow_id": "other"}}
+    builder.upsert([index_builder.entry_from_summary({**named, "scope": ["other"]}, LANE, 1)])
+    head = store.download_json(builder.head_path())
+    assert head["entries"][0]["named"] is True and set(head["entries"][0]["w"]) == {"other"}
+    assert head["first_bad"] == {}
+    # The golden of the workflow it did not test stays in the lane's list.
+    assert store.download_json(builder.lanes_path())["lanes"][LANE]["goldens"]["flux"] == {
+        "tag": "v0.38.0", "sha": "s2"}
+    # A run of the workflow itself still decides: an output that is not the golden opens it.
+    again = _summary("eee", 1725408000, "fail", DIFF, DIFF, "ccc", sha="s9")
+    builder.upsert([index_builder.entry_from_summary({**again, "scope": ["flux"]}, LANE, 1)])
+    assert set(store.download_json(builder.head_path())["first_bad"]) == {"flux"}
+
+
 def _reference_then_smoke(tmp_path):
     """A workflow that passed at reference level (reference sha m1), then moved
     to smoke level. Its reference files are still on the results branch."""

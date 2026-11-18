@@ -557,8 +557,8 @@ table with one column per lane. An open failure is listed only for a workflow
 the lane still runs: one that was renamed, moved or switched off while it was
 red is left out. A nightly or weekly lane that has an endpoint gets no column:
 it tests one commit in many. It has a row in the table "Nightly and weekly
-lanes" instead, built from its last full run (the newest that has a result for
-every workflow the lane runs today): when it ran, with a link to the run, the
+lanes" instead, built from its last full run (the newest that did not name
+its workflows): when it ran, with a link to the run, the
 commits it covered, its result, what did not pass and how many workflows were
 not tested. A last run older than 36 hours on a nightly lane, or 8 days on a
 weekly one, is marked "no run for ...". GitHub can drop a scheduled run

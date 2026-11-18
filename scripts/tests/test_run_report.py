@@ -3938,7 +3938,7 @@ def test_the_nightly_and_weekly_table_shows_each_lanes_last_full_run():
             "prev": FIRST}
     # Newer than the full run: one workflow, tested again by a dispatch.
     retest = {**_entry(HEAD, night + 7200, {MUSIC: {"v": "pass", "l": "smoke"}}, run=4200),
-              "prev": LAST}
+              "prev": LAST, "named": True}
     label = NIGHT_LANES["lanes"][NIGHTLY]["label"]
     block = run_report.long_lanes_block([_night_column([retest, full])], runs, now=night + 3600)
     assert block[:4] == ["### Nightly and weekly lanes", "",
@@ -3960,14 +3960,19 @@ def test_the_nightly_and_weekly_table_shows_each_lanes_last_full_run():
     assert "no run for" not in run_report.long_lanes_block([week], runs, now=night + 7 * 86400)[4]
     assert f"{run_report.WARN} no run for 10 days |" in run_report.long_lanes_block(
         [week], runs, now=night + 10 * 86400)[4]
-    # No entry holds every workflow (one was just added): the newest stands in and says so.
+    # A workflow was just added, so no entry holds them all: the last full run is still
+    # the lane's, and its row does not read as a run of some workflows. The same row when
+    # the lane's workflows are not known.
     more = {NIGHTLY: {MUSIC, MESH, CLIP, "new_wf"}}
-    block = run_report.long_lanes_block([_night_column([retest, full])], more, now=night + 7300)
+    for wanted in (more, None):
+        assert run_report.long_lanes_block([_night_column([retest, full])], wanted,
+                                           now=night + 3600) == block
+    # A lane that has no full run yet shows its newest run, and says what that run is.
+    block = run_report.long_lanes_block([_night_column([retest])], more, now=night + 7300)
     assert (f"| [`05e878f`]({COMFY}/commit/{HEAD}), 1 commit | ✅ smoke pass · 1 of 4 workflows |  "
             "| 0 |") in block[4]
-    # The lane's workflows are not known: the newest entry is taken as it is.
-    block = run_report.long_lanes_block([_night_column([retest, full])], None, now=night + 7300)
-    assert "| ✅ smoke pass |  | 0 |" in block[4]
+    block = run_report.long_lanes_block([_night_column([retest])], None, now=night + 7300)
+    assert "| ✅ smoke pass · named workflows only |  | 0 |" in block[4]
     # A lane that has not run yet, and no lane at all.
     assert run_report.long_lanes_block([_night_column([])], runs)[4] == (
         f"| {label} | no run yet |  | ➖ no result |  |  |")
@@ -4141,9 +4146,10 @@ def test_the_overview_shows_where_the_nightly_and_weekly_lanes_stand():
 def test_the_overview_reads_a_nightly_lane_from_its_last_full_run():
     """A dispatch that tested one workflow again is newer than the lane's run
     of the night. The row, and with it the smoke words of the page, come from
-    the run that has a result for every workflow the lane runs today."""
+    the newest run that did not name its workflows."""
     files = _overview_files()
-    again = {**_entry(SHA, NIGHT_TS + 7200, {"wan_ref": "pass"}, run=4200), "prev": HEAD}
+    again = {**_entry(SHA, NIGHT_TS + 7200, {"wan_ref": "pass"}, run=4200), "prev": HEAD,
+             "named": True}
     night = {**_entry(HEAD, NIGHT_TS, {MUSIC: {"v": "pass", "l": "smoke"},
                                        MESH: {"v": "pass", "l": "smoke"}, "wan_ref": "pass"},
                       run=4100, n=7), "prev": LAST}
@@ -4158,12 +4164,11 @@ def test_the_overview_reads_a_nightly_lane_from_its_last_full_run():
     # Nothing else on the page is at smoke level: the row alone brings the words.
     assert out.split("\n")[2] == run_report.SMOKE_NOTE and run_report.SMOKE_LEGEND in out
     assert "smoke check failed" not in out.replace(run_report.SMOKE_LEGEND, "")
-    # Without the manifest the lane's workflows are not known: the newest entry stands.
+    # Without the manifest the lane's workflows are not known. The mark of the dispatch
+    # is in the index, so the row is the same one.
     bare = run_report.overview_report(run_report.DictReader(files, RESULTS), LONG_LANES, SHA,
                                       "master", now=NIGHT_TS + 9000)
-    row = _section(bare, "Nightly and weekly lanes")[4]
-    assert f"| [2026-11-15 02:30 UTC]({RUN_URL.replace('4242', '4200')}) | " in row
-    assert row.endswith("| ✅ pass |  | 0 |") and "smoke" not in bare
+    assert _section(bare, "Nightly and weekly lanes")[4] == row
 
 
 def test_a_nightly_lane_with_a_reference_level_failure_brings_no_smoke_words():

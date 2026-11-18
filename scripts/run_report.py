@@ -3281,20 +3281,16 @@ def disagreements(per_lane: dict[str, dict[str, str]], labels: dict[str, str]) -
 STALE_AFTER_S = {"nightly": 36 * 3600, "weekly": 8 * 24 * 3600}
 
 
-def full_run(entries: list[dict], runs: set | None) -> tuple[dict, bool]:
+def full_run(entries: list[dict]) -> tuple[dict, bool]:
     """(the index entry of a lane's newest full run, whether it is a full
-    one). A full run holds a result for every workflow the lane runs today
-    (`runs`), so a dispatch of one workflow is never shown as the lane's
-    result. When no entry holds them all (a workflow was just added) the
-    newest entry stands in, and it does too when `runs` is not known."""
-    if not entries:
-        return {}, False
-    if not runs:
-        return entries[0], True
+    one). A run that named its workflows (`named` in its entry) is not the
+    lane's result, so a dispatch of one workflow is never shown as it. A full
+    run from before a workflow joined the lane is still the lane's last full
+    run. A lane that has only runs of named workflows shows its newest."""
     for e in entries:
-        if runs <= set(as_dict(e.get("w"))):
+        if e.get("named") is not True:
             return e, True
-    return entries[0], False
+    return (entries[0], False) if entries else ({}, False)
 
 
 def age_text(seconds: float) -> str:
@@ -3316,7 +3312,7 @@ def long_lanes_block(columns: list[LaneColumn], runs: dict | None = None,
         name = lane_label(c.lane_id, c.lane)
         wanted = as_dict(runs).get(c.lane_id)
         wanted = wanted if isinstance(wanted, set) else None
-        entry, full = full_run(c.entries, wanted)
+        entry, full = full_run(c.entries)
         if not entry:
             rows.append([name, "no run yet", "", f"{DASH} no result", "", ""])
             continue
@@ -3337,7 +3333,9 @@ def long_lanes_block(columns: list[LaneColumn], runs: dict | None = None,
         states = entry_states(entry, c.references)
         result = rollup(states)
         if not full:
-            result += f" · {len(wanted & set(states))} of {plural(len(wanted), 'workflow')}"
+            # No full run yet: the row is that of a run of named workflows.
+            result += (f" · {len(wanted & set(states))} of {plural(len(wanted), 'workflow')}"
+                       if wanted else " · named workflows only")
         untested = sum(as_dict(cell).get("v") == "infra_error"
                        for cell in as_dict(entry.get("w")).values())
         rows.append([name, last, covers, result, not_passing(states, 6, is_batch(n)),
@@ -3399,7 +3397,7 @@ def render_overview(o: OverviewData, limits: Limits) -> str:
     today = {c.lane_id: lane_workflows(o.manifest, c.lane_id, c.lane) for c in active + long}
     blocks.append(long_lanes_block(long, today, o.now))
     for c in long:
-        shown, _ = full_run(c.entries, today[c.lane_id])
+        shown, _ = full_run(c.entries)
         seen.update(entry_states(shown, c.references).values())
 
     failures = []

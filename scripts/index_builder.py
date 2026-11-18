@@ -404,12 +404,21 @@ class IndexBuilder:
     def _write_aggregates(self, shards: dict[str, list[dict]], workflows=()):
         union = sorted((e for es in shards.values() for e in es), key=sort_key, reverse=True)
         months = sorted(m for m, es in shards.items() if es)
-        newest = union[0] if union else None
         # The lane's latest run, as the head and lanes.json name it. A run
         # that named its workflows (`named`) is not the lane's run of its
         # commit: the newest entry without the mark stays the latest.
         latest = next((e for e in union if not e.get("named")), None)
-        wf_ids = set((newest or {}).get("w", {})) | set(workflows)
+        # Where each workflow stands now: its cell in the lane's latest run,
+        # or in a run of named workflows after it. Such a run holds the
+        # workflows it named and no other, so the newest entry alone would
+        # lose the rest: an accepted chain of one of them read as open again.
+        current: dict[str, dict] = {}
+        for e in union:
+            for wf_id, cell in e.get("w", {}).items():
+                current.setdefault(wf_id, cell)
+            if not e.get("named"):
+                break
+        wf_ids = set(current) | set(workflows)
         # A smoke-level workflow has no reference. One that had a reference
         # before keeps those files on the results branch, so they are not
         # looked up: a smoke failure with the old reference's sha is no
@@ -419,7 +428,7 @@ class IndexBuilder:
         chains = first_bad(union)
         for wf_id in list(chains):
             # Accepted drift: the latest output is the blessed golden itself.
-            cell = (newest or {}).get("w", {}).get(wf_id) or {}
+            cell = current.get(wf_id) or {}
             golden = goldens.get(wf_id) or {}
             if cell.get("sha") and golden.get("sha") == cell["sha"]:
                 del chains[wf_id]
