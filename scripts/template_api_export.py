@@ -14,8 +14,9 @@ What it reproduces, rule by rule:
   instance's promoted widget values overriding the inner nodes' own values
 * ``widgets_values`` arrays map onto named inputs in ``input_order``, skipping
   the UI-only widget that follows a ``control_after_generate`` seed (and the
-  control word some frontend versions store after any other seed) and
-  expanding dynamic combos into their ``<name>.<sub>`` inputs
+  control word some frontend versions store after any other seed), skipping
+  the four numbers stored after a bounding box, and expanding dynamic combos
+  into their ``<name>.<sub>`` inputs
 * reroutes, legacy primitives, muted and bypassed nodes collapse away
 * nodes that do not feed an output node are dropped
 
@@ -60,7 +61,12 @@ OUTPUT_PREFIXES = (
     "SaveAnimated",
 )
 
-WIDGET_TYPES = {"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"}
+BOUNDING_BOX = "BOUNDING_BOX"
+# COLOR holds one string ("#000000") and BOUNDING_BOX one object (x, y, width,
+# height). Left out of this set, their values were dropped: the worker then
+# filled the definition's default, a 512 px crop where the template has its own.
+WIDGET_TYPES = {"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO", "COLOR", BOUNDING_BOX}
+BOX_FIELDS = ("x", "y", "width", "height")
 # What the frontend's control widget after a seed holds, and the input names
 # it attaches that widget to even when the definition does not ask for one.
 CONTROL_WORDS = ("fixed", "increment", "decrement", "randomize")
@@ -70,8 +76,6 @@ AUTOGROW = "COMFY_AUTOGROW_V3"
 MATCHTYPE = "COMFY_MATCHTYPE_V3"
 # Socket-only V3 input kinds: the slots exist on the node, never as widgets.
 SOCKET_DYNAMIC = {AUTOGROW, MATCHTYPE}
-# Subgraph input types that a parent instance serialises as a widget value.
-PROMOTED_WIDGET_TYPES = {"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"}
 
 
 class ConversionError(RuntimeError):
@@ -156,6 +160,18 @@ def _is_stray_control(entry: Any, value: Any, consumed: dict[str, Any]) -> bool:
     return type_ in ("BOOLEAN", "INT", "FLOAT")
 
 
+def _after_box_fields(values: list[Any], cursor: int) -> int:
+    """The position after the four numbers a bounding box is followed by.
+
+    The frontend draws a box with four number widgets under it (x, y, width,
+    height) and stores their values right after the box. They repeat the box
+    and never reach the server, so they are not inputs.
+    """
+    fields = values[cursor : cursor + len(BOX_FIELDS)]
+    numbers = [v for v in fields if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    return cursor + len(BOX_FIELDS) if len(numbers) == len(BOX_FIELDS) else cursor
+
+
 def default_of(entry: Any) -> Any:
     opts = _entry_opts(entry)
     if "default" in opts:
@@ -179,6 +195,18 @@ def default_of(entry: Any) -> Any:
 # --------------------------------------------------------------------------- #
 # graph flattening
 # --------------------------------------------------------------------------- #
+
+
+_ANY_TYPE = ("*", "", 0, None)
+
+
+def _takes(slot_type: Any, value_type: Any) -> bool:
+    """Whether a slot of one type takes a value of another, as the frontend
+    decides it: either is the any-type, or their comma lists share a type."""
+    if slot_type in _ANY_TYPE or value_type in _ANY_TYPE:
+        return True
+    held = {t.strip().lower() for t in str(slot_type).split(",")}
+    return bool(held & {t.strip().lower() for t in str(value_type).split(",")}) or "*" in held
 
 
 def _normalise_links(graph: dict[str, Any]) -> list[tuple[Any, Any, int, Any, int]]:
@@ -212,6 +240,7 @@ class FlatGraph:
         # them are not emitted as if the template had them enabled.
         self.inactive_instances: set[str] = set()
         self.in_edge: dict[tuple[str, int], tuple[str, int]] = {}
+        self._widget_inputs: dict[str, list[int]] = {}
         self._walk(workflow, prefix="")
 
     def _flat(self, prefix: str, node_id: Any) -> str:
@@ -261,35 +290,58 @@ class FlatGraph:
                 return True
         return False
 
-    def _promoted_widget_index(self, instance_id: str, index: int) -> int | None:
-        """Position of subgraph input ``index`` in the instance's widget array.
+    def _shown_as_widget(self, instance_id: str) -> list[int]:
+        """The subgraph inputs an instance shows as widgets, by index.
 
-        Only widget-typed subgraph inputs are serialised as instance widget
-        values; socket inputs (IMAGE, AUDIO, MODEL, ...) are skipped.
+        An input is a widget on the instance when an inner node takes it into
+        a widget slot. Its type does not say it: a STRING input wired to a
+        socket that only a link can fill (``forceInput``) is no widget, and an
+        input of type ``*`` wired to a primitive's value is one.
         """
-        position = 0
-        for i, slot in enumerate(self._subgraph_inputs(instance_id)):
-            if slot.get("type") not in PROMOTED_WIDGET_TYPES:
-                continue
-            if i == index:
-                return position
-            position += 1
-        return None
+        if instance_id not in self._widget_inputs:
+            shown = set()
+            boundary = f"{instance_id}:-10"
+            for (target, slot), (origin, index) in self.in_edge.items():
+                slots = (self.nodes.get(target) or {}).get("inputs") or []
+                if origin != boundary or not isinstance(slot, int) or slot >= len(slots):
+                    continue
+                if slots[slot].get("widget"):
+                    shown.add(index)
+            self._widget_inputs[instance_id] = sorted(shown)
+        return self._widget_inputs[instance_id]
 
     def _promoted_value(self, instance_id: str, index: int) -> tuple[bool, Any]:
         """The value an instance node holds for its subgraph input ``index``.
 
-        A subgraph instance serialises one widget value per widget-typed
-        subgraph input, in definition order, whether or not that input is
-        exposed as a slot on the instance. An instance saved against an older
-        definition may carry fewer values, in which case the inner node's own
-        widget value stands.
+        A subgraph instance stores one value for each input it shows as a
+        widget, in definition order, whether or not that input is a slot on
+        the instance. An instance saved against an older definition may carry
+        fewer values, and a value may be null: the inner node's own widget
+        value stands then.
+
+        An instance with ``proxyWidgets`` (frontends of mid 2026) stores its
+        values in the order of that list, and none for the entries at its end
+        that have nothing to store. An entry ``["-1", name]`` is the subgraph
+        input of that name. Any other entry is an inner node's widget, which
+        holds its value itself.
         """
-        position = self._promoted_widget_index(instance_id, index)
-        if position is None:
+        instance = self.nodes[instance_id]
+        values = instance.get("widgets_values") or []
+        proxied = (instance.get("properties") or {}).get("proxyWidgets")
+        if isinstance(proxied, list) and values:
+            if len(values) > len(proxied):
+                raise ConversionError(
+                    f"subgraph instance {instance_id} stores {len(values)} values for "
+                    f"{len(proxied)} promoted widgets: which value is whose cannot be told"
+                )
+            name = self._subgraph_inputs(instance_id)[index].get("name")
+            for entry, value in zip(proxied, values):
+                if isinstance(entry, list) and [str(e) for e in entry[:2]] == ["-1", name]:
+                    return value is not None, value
             return False, None
-        values = self.nodes[instance_id].get("widgets_values") or []
-        if position < len(values):
+        shown = self._shown_as_widget(instance_id)
+        position = shown.index(index) if index in shown else len(values)
+        if position < len(values) and values[position] is not None:
             return True, values[position]
         return False, None
 
@@ -363,15 +415,28 @@ class FlatGraph:
         return None
 
     def _bypass_input(self, node_id: str, output_slot: int) -> tuple[str, int] | None:
-        """A bypassed node forwards each output to its first input of that type."""
+        """The input a bypassed node forwards one of its outputs from.
+
+        The frontend's rule: the input at the output's own position when it
+        takes that type, else the first input of exactly that type, else the
+        first input that takes it. An input takes a type it lists
+        (``IMAGE,MASK``), and ``*`` takes any.
+        """
         node = self.nodes[node_id]
         outputs = node.get("outputs") or []
-        if output_slot >= len(outputs):
+        inputs = node.get("inputs") or []
+        if output_slot >= len(outputs) or not inputs:
             return None
         wanted = outputs[output_slot].get("type")
-        for index, slot in enumerate(node.get("inputs") or []):
-            if slot.get("type") == wanted:
-                return (node_id, index)
+        if wanted in _ANY_TYPE:
+            return (node_id, output_slot if output_slot < len(inputs) else 0)
+        if output_slot < len(inputs) and _takes(inputs[output_slot].get("type"), wanted):
+            return (node_id, output_slot)
+        for exact in (True, False):
+            for index, slot in enumerate(inputs):
+                held = slot.get("type")
+                if held == wanted if exact else _takes(held, wanted):
+                    return (node_id, index)
         return None
 
 
@@ -408,10 +473,11 @@ class Converter:
                 continue
             if node_type not in self.object_info:
                 raise ConversionError(f"node {flat_id} has unknown type {node_type!r}")
-            prompt[flat_id] = {
-                "class_type": node_type,
-                "inputs": self._inputs(graph, flat_id, node),
-            }
+            try:
+                inputs = self._inputs(graph, flat_id, node)
+            except ConversionError as error:
+                raise ConversionError(f"node {flat_id} ({node_type}): {error}") from None
+            prompt[flat_id] = {"class_type": node_type, "inputs": inputs}
 
         if resolve_switches:
             self._resolve_switches(prompt)
@@ -488,6 +554,12 @@ class Converter:
                 value = default_of(entry)
         out[name] = value
 
+        if isinstance(entry, (list, tuple)) and entry[0] == BOUNDING_BOX:
+            if not isinstance(value, dict) or not set(BOX_FIELDS) <= set(value):
+                raise ConversionError(
+                    f"{name} holds {value!r}, not a box with {', '.join(BOX_FIELDS)}"
+                )
+            cursor = _after_box_fields(values, cursor)
         if isinstance(entry, (list, tuple)) and entry[0] == DYNAMIC_COMBO:
             for sub_name, sub_entry in dynamic_combo_subinputs(entry, value):
                 cursor = self._consume(
@@ -527,6 +599,8 @@ class Converter:
             name = (slot.get("widget") or {}).get("name") or slot.get("name")
             slot_names.append(name)
             resolved = graph.resolve(flat_id, index)
+            if resolved is None and name not in widget_values:
+                resolved = self._shared_widget_value(graph, flat_id, index)
             if resolved is None:
                 continue
             kind, payload = resolved
@@ -568,6 +642,50 @@ class Converter:
             if found:
                 inputs[name] = value
         return inputs
+
+    def _shared_widget_value(
+        self, graph: FlatGraph, flat_id: str, index: int
+    ) -> tuple[str, Any] | None:
+        """The value a socket inside a subgraph gets from a subgraph input that
+        nothing outside sets.
+
+        Such an input shows on the instance as the widget of one inner node,
+        and that node holds the value. A second inner node wired to the same
+        input gets the same value: a preview of the width, a term of an
+        expression. Without this its input was left out.
+        """
+        edge = graph.in_edge.get((flat_id, index))
+        if edge is None or edge[0].rsplit(":", 1)[-1] != "-10":
+            return None
+        instance_id = edge[0][: -len(":-10")] if ":" in edge[0] else ""
+        if instance_id not in graph.instances:
+            return None
+        outer = graph._instance_slot_for_input(instance_id, edge[1])
+        slots = graph.nodes[instance_id].get("inputs") or []
+        if outer is not None and slots[outer].get("link") is not None:
+            return None  # wired from outside, and that wire ends in nothing
+        held: list[Any] = []
+        for (target, slot), origin in graph.in_edge.items():
+            owner = graph.nodes.get(target)
+            if origin != edge or owner is None or target in graph.instances:
+                continue
+            if owner.get("mode") in (MODE_NEVER, MODE_BYPASS):
+                continue
+            spec = self.object_info.get(owner.get("type"))
+            inputs = owner.get("inputs") or []
+            if spec is None or not isinstance(slot, int) or slot >= len(inputs):
+                continue
+            name = (inputs[slot].get("widget") or {}).get("name") or inputs[slot].get("name")
+            if _is_widget(dict(_ordered_inputs(spec)).get(name)):
+                value = self._widget_values(owner, owner["type"]).get(name)
+                if value not in held:
+                    held.append(value)
+        if len(held) > 1:
+            raise ConversionError(
+                f"input {index} is fed by a subgraph input that several inner widgets "
+                f"hold with different values: {held}"
+            )
+        return ("value", held[0]) if held else None
 
     def prune(self, prompt: dict[str, Any]) -> None:
         """Drop every node that does not feed an output node."""
