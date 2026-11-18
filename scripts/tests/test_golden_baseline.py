@@ -389,6 +389,23 @@ def test_empty_text_and_text_that_could_not_be_compared_are_not_blessed(
                         "transferred, over the worker's inline size limit: "
                         "llm_thinking_00001.txt)") in capsys.readouterr().out
 
+    def empty_answer(client, wf_id, workflow, workdir=None, **kw):
+        """Both runs write an empty answer next to a second text that is not empty."""
+        (workdir / "outputs").mkdir(parents=True)
+        (workdir / "outputs" / "llm_00001.txt").write_bytes(b"")
+        (workdir / "outputs" / "llm_thinking_00001.txt").write_bytes(b"thoughts")
+        return {"status": "ok", "outputs_dir": str(workdir / "outputs"), "outputs": [
+            {"filename": "llm_00001.txt", "bytes": 0, "sha256": _sha("")},
+            {"filename": "llm_thinking_00001.txt", "bytes": 8, "sha256": _sha("thoughts")}]}
+
+    monkeypatch.setattr(golden_baseline, "run_workflow_job", empty_answer)
+    rc = _run_main(tmp_path / "half", remote, root, "--ref", "9" * 40, "--workflows", "llm",
+                   "--bless")
+    out = capsys.readouterr().out
+    assert rc == 1 and "[llm] noise floor: identical" in out
+    assert f"::error::[llm] golden {'9' * 12} is not blessed: it has an empty text file" in out
+    assert not (_clone(tmp_path, remote) / "regression/golden/llm/current.json").exists()
+
 
 def test_a_golden_that_is_not_blessed_never_replaces_the_current_reference(
         tmp_path, monkeypatch, capsys):
@@ -539,6 +556,92 @@ def test_a_promoted_text_that_is_not_blessed_never_replaces_the_current_referenc
     base = _clone(other, remote) / "regression/golden/llm"
     assert (base / tag / "outputs" / "llm_00001.txt").read_bytes() == OTHER.encode()
     assert json.loads((base / "current.json").read_text())["output_sha256"] == _sha(OTHER)
+
+
+def test_from_run_does_not_promote_a_run_that_did_not_send_every_text(tmp_path, capsys):
+    """Generating refuses outputs with a text that the worker listed and did
+    not send. A promoted run is held to the same: its reference would lack
+    that file, and no later run could pass against it."""
+    files = _published_text_run(TEXT_FLOOR)
+    files[f"regression/runs/master/{COMMIT}/llm/run.json"]["outputs"].append(
+        {"filename": "llm_thinking_00001.txt", "bytes": 9, "sha256": "t" * 64, "truncated": True})
+    remote = make_remote(tmp_path, files)
+    root = _text_manifest(tmp_path)
+    rc = _run_main(tmp_path, remote, root, "--from-run", f"master/{COMMIT}", "--workflows", "llm",
+                   "--bless")
+    assert rc == 1
+    assert (f"::error::[llm] master/{COMMIT} cannot be a reference: output not transferred, over "
+            "the worker's inline size limit: llm_thinking_00001.txt") in capsys.readouterr().out
+    base = _clone(tmp_path, remote) / "regression/golden/llm"
+    assert not (base / COMMIT[:12]).exists()
+    assert json.loads((base / "current.json").read_text()) == {"tag": "v1"}
+
+
+def test_a_text_golden_is_not_written_over_one_that_holds_another_text_file(
+        tmp_path, monkeypatch, capsys):
+    """--force adds files to golden/<id>/<tag>/outputs and removes none. A text
+    file that only the earlier golden has would stay in the reference: the gate
+    reads the new outputs and passes, and every later run fails on the file count."""
+    tag = COMMIT[:12]
+    remote = make_remote(tmp_path, {
+        **_published_text_run(TEXT_FLOOR),
+        "regression/golden/llm/current.json": {"tag": tag, "output_sha256": _sha(SAID)},
+        f"regression/golden/llm/{tag}/blessed.json": {"tag": tag},
+        f"regression/golden/llm/{tag}/noise_floor.json": TEXT_FLOOR,
+        f"regression/golden/llm/{tag}/outputs/llm_00001.txt": SAID.encode(),
+        f"regression/golden/llm/{tag}/outputs/llm_thinking_00001.txt": b"thoughts"})
+    root = _text_manifest(tmp_path)
+    calls = _text_jobs(monkeypatch, OTHER, OTHER)
+    refused = (f"::error::[llm] golden {tag} holds llm_thinking_00001.txt, which the new outputs "
+               "do not have, and writing over a golden removes no file. Remove it from "
+               f"golden/llm/{tag}/outputs on the results branch, or use another ref")
+    for name, flags in (("promote", ("--from-run", f"master/{COMMIT}")), ("generate", ())):
+        rc = _run_main(tmp_path / name, remote, root, *flags, "--ref", COMMIT, "--workflows",
+                       "llm", "--force", "--bless")
+        assert rc == 1 and refused in capsys.readouterr().out, name
+    assert calls == ["llm", "llm"]
+    base = _clone(tmp_path, remote) / "regression/golden/llm"
+    assert (base / tag / "outputs" / "llm_00001.txt").read_bytes() == SAID.encode()
+    assert json.loads((base / tag / "blessed.json").read_text()) == {"tag": tag}
+    assert json.loads((base / "current.json").read_text())["output_sha256"] == _sha(SAID)
+    # The same text file, next to a file of another kind: written as it always was.
+    _text_jobs(monkeypatch, OTHER, OTHER)
+    other = tmp_path / "same"
+    other.mkdir()
+    remote = make_remote(other, {
+        **_published_text_run(TEXT_FLOOR),
+        f"regression/golden/llm/{tag}/blessed.json": {"tag": tag},
+        f"regression/golden/llm/{tag}/outputs/llm_00001.txt": SAID.encode(),
+        f"regression/golden/llm/{tag}/outputs/llm_00001_.png": b"\x89PNG of an earlier kind"})
+    assert _run_main(other, remote, root, "--ref", COMMIT, "--workflows", "llm", "--force") == 0
+    base = _clone(other, remote) / "regression/golden/llm"
+    assert (base / tag / "outputs" / "llm_00001.txt").read_bytes() == OTHER.encode()
+    # An image golden too: the outputs of the earlier one are not even read.
+    image = tmp_path / "image"
+    image.mkdir()
+    store = storage.GitHubStorage("local/test", "results", image / "wt",
+                                  remote_url=str(_remote(image)))
+    monkeypatch.setattr(store, "fetch_golden_outputs",
+                        lambda *a: pytest.fail("not read for an image golden"))
+    assert golden_baseline.promote_run(store, "master", COMMIT, "flux", "v0.33.2", "lane", "dev",
+                                       None, image / "work")
+
+
+def test_bless_only_refuses_a_golden_of_another_output_kind(tmp_path, capsys):
+    """The id was an image workflow before, or the wrong tag was named: the
+    golden holds a PNG and an image noise floor. An identical image floor is
+    no text floor, and no run of a text workflow could pass against a PNG."""
+    remote = make_remote(tmp_path, {
+        "regression/latest/master.json": {"commit": "a" * 40},
+        "regression/golden/llm/v1/blessed.json": {"tag": "v1", "output_sha256": "p"},
+        "regression/golden/llm/v1/noise_floor.json": {"identical": True, "mean_mse": 0.0,
+                                                      "measured": True},
+        "regression/golden/llm/v1/outputs/llm_00001_.png": b"\x89PNG"})
+    root = _text_manifest(tmp_path)
+    rc = _run_main(tmp_path, remote, root, "--ref", "v1", "--workflows", "llm", "--bless-only")
+    assert rc == 1 and ("::error::[llm] golden v1 is not blessed: its noise floor is not a text "
+                        "comparison, so it is a golden of another kind") in capsys.readouterr().out
+    assert not (_clone(tmp_path, remote) / "regression/golden/llm/current.json").exists()
 
 
 def test_an_image_golden_names_no_kind():

@@ -155,8 +155,8 @@ this repo per template.
 5. Generate + bless a golden for it: run the **Golden baselines** workflow with
    the current release tag and `workflows: <id>`, inspect, bless. For a text
    workflow, read `golden/<id>/<tag>/outputs/<id>_00001.txt` before you bless
-   it: an empty or useless answer would pass from then on. A text golden whose
-   two runs differ is not blessed (see [Verdicts](#verdicts)).
+   it: a useless answer would pass from then on. An empty one is refused, and
+   so is a text golden whose two runs differ (see [Verdicts](#verdicts)).
 6. Flip `"enabled": true` in a follow-up PR.
 
 ## Verdicts
@@ -190,9 +190,13 @@ That is the rule for an image workflow. A text workflow (`"output_kind":
   taken when a match would take too long, which happens when two long texts
   share little more than one frequent word: the work is counted in steps, not
   seconds, so the result is the same on every machine, and
-  `similarity_basis` names the basis that was used. The noise floor never
-  loosens the rule by itself: one changed word moves the rest of a generated
-  text, so "3× the noise" means nothing for text.
+  `similarity_basis` names the basis that was used. A similarity by lines or
+  by the shared start is never above the share of words the two texts have in
+  common in any order, so a step down cannot pass a limit that the words
+  fail. Wherever such a number is shown, "by lines" or "by the shared start"
+  follows it. The noise floor never loosens the rule by itself: one changed
+  word moves the rest of a generated text, so "3× the noise" means nothing
+  for text.
 - **What cannot be compared fails.** No `.txt` file, a file over 1 MiB, a file
   the worker listed and did not send, another number of text files than the
   golden has, or a text file under another name: each is a `fail`, never a
@@ -209,14 +213,16 @@ That is the rule for an image workflow. A text workflow (`"output_kind":
   run would fail at random, and with PULSE on it would comment on pull
   requests. Make the workflow deterministic, or set `min_text_similarity` in
   its entry: the gate then opens only when the second run passes against the
-  first under that limit. A golden whose text is empty, or whose two runs
-  could not be compared, is refused too. A golden promoted from a run
-  (`from_run`) is held to the same: an empty text is not blessed, and a run
-  without a text file is not promoted.
+  first under that limit. A golden with an empty text file, one whose two
+  runs could not be compared, and one whose noise floor is an image
+  workflow's are refused too. A golden promoted from a run (`from_run`) is
+  held to the same: an empty text is not blessed, and a run without a text
+  file, or with one that the worker listed and did not send, is not promoted.
 
 A text change that is new at a commit adds one line under the table of a
 PULSE comment: the similarity and the line and column of the first
-difference. The text itself never enters a comment.
+difference, or that the text file has another name than the golden's. The
+text itself never enters a comment.
 
 Each commit is tested once per lane. The cron runs every 5 minutes, the shortest
 interval GitHub schedules (GitHub can start a run late, or drop one, when it is
@@ -270,7 +276,8 @@ then the run. Each lane job is named after its lane and the commit it tested
 `All lanes · <sha>`. Every one of them writes a job summary, shown on the run
 page below the job graph. `scripts/run_report.py` renders the summaries from
 the results branch, read at one pinned commit, and from the files the run left
-on the runner.
+on the runner. A report step gets ten minutes: one that hangs is stopped, so
+it cannot hold up the commits that wait for the run to end.
 
 **A lane's summary** covers one commit on one lane:
 
@@ -307,15 +314,19 @@ on the runner.
   the noise floor. Below that come the difference (removed text as `[-…-]`,
   added text as `{+…+}`), then the generated text and the reference text,
   folded, each with a link to its file, and the two commands that approve the
-  new text. When the two texts differ only in characters that cannot be shown,
-  or the reference has its text under another file name, a sentence says so
-  where the difference would be. A text that matches its reference is shown,
-  folded, under "Generated text", also when it differs from the run before.
-  A text is cut to its first 4,000 characters and the difference to 8,000,
-  and lines over 100 columns are folded; the heading says both, because the
-  line and column in the table count in the file. A file over 256 KB is
-  linked, not shown. Generated text is model output: it appears only inside
-  `<pre>` blocks, escaped, and is never printed to the job log;
+  new text. Texts too long to mark word by word get a line diff, with `-`
+  before a removed line and `+` before an added one, and the heading says
+  which of the two it is. When the two texts differ only in characters that
+  cannot be shown, or the reference has its text under another file name, a
+  sentence says so where the difference would be. Under another file name
+  nothing was compared, so no similarity is shown. A text that matches its
+  reference is shown, folded, under "Generated text", also when it differs
+  from the run before. A text is cut to its first 4,000 characters and the
+  difference to 8,000, and lines over 100 columns are folded; the heading
+  says both, because the line and column in the table count in the file. A
+  file over 256 KB is linked, not shown. Generated text is model output: it
+  appears only inside `<pre>` blocks, escaped, and is never printed to the
+  job log;
 - every output file, a link to each `run.json`, schema notes, the status of
   custom-node packs, and the workflows that did not run on the lane;
 - the lane's newest 20 commits with their results, each linked to the run that
@@ -386,6 +397,10 @@ Re-bless with a reason so the history explains itself:
   `measured: false`.
 
 An existing `golden/<id>/<tag>/` is never overwritten unless `force` is set.
+`force` adds and replaces files and removes none. A text golden is therefore
+not written over one that holds a text file the new outputs do not have: that
+file would stay in the reference and every run would fail on the file count.
+The job names the file; remove it from the results branch, or use another ref.
 `golden/<id>/current.json` records `reason`, `supersedes` and the golden's
 `output_sha256`; `golden/<id>/history.json` keeps every bless; the run index
 is refreshed in the same publish so accepted drift stops being reported as an
@@ -943,7 +958,8 @@ workflow's in these keys, and an image workflow's files do not change at all:
   files never name a kind.
 - `vs_golden`, `vs_previous` and `noise_floor.json` carry `"kind": "text"`,
   `identical`, `similarity` (0 to 1) with its `similarity_basis`, the
-  character, line and file counts of both sides, and `first_diff` when the
+  character, line and file counts of both sides (`files_empty_ref` too, only
+  when a text file of the reference is empty), and `first_diff` when the
   texts differ: `file`, `line` and `col` (from 1), `offset` (how many
   characters the two share from the start), and `ref` and `cand`, the two
   lines there (model output: escape them). The noise floor of a golden

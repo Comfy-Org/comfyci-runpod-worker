@@ -191,8 +191,11 @@ def text_notes(wfs: dict, kinds: dict, cap: int = 3) -> list[str]:
             continue
         sim, diff = vg.get("similarity"), vg.get("first_diff")
         bits = []
-        if isinstance(sim, (int, float)) and not isinstance(sim, bool) and 0 <= sim <= 1:
-            bits.append(f"{output_kinds.percent(sim)}% similar to the golden")
+        if vg.get("files_compared") == 0:  # no pair of files, so no similarity to give
+            bits.append("its text file has another name than the golden's")
+        elif isinstance(sim, (int, float)) and not isinstance(sim, bool) and 0 <= sim <= 1:
+            bits.append(f"{output_kinds.percent(sim)}% similar to the golden"
+                        f"{output_kinds.basis_note(vg)}")
         line, col = (diff.get(k) if isinstance(diff, dict) else None for k in ("line", "col"))
         if all(isinstance(x, int) and not isinstance(x, bool) and 0 < x < 10 ** 9
                for x in (line, col)):

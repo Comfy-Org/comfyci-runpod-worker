@@ -14,6 +14,7 @@ import run_regression
 
 TEXT = "The first line.\nThe second line has seven words here.\nThe third."
 CMP = output_kinds.TextComparator()
+TEXT_FLOOR = {"kind": "text", "identical": True, "similarity": 1.0, "chars_ref": 40}
 
 
 def _dir(tmp_path, name, **files):
@@ -199,6 +200,25 @@ def test_which_references_may_be_approved(tmp_path):
         "chars_cand": len(TEXT), "lines_ref": 3, "lines_cand": 3}
     assert "empty" in CMP.blessable(CMP.describe(_dir(tmp_path, "empty", wf_00001="")), {})
     assert "no text files" in CMP.describe(tmp_path / "missing")["error"]
+    # An empty file next to one with text: the totals hide it, the gate does not.
+    two = _dir(tmp_path, "two", wf_00001="", wf_thinking_00001="why")
+    floor = CMP.compare(two, two)
+    assert (floor["identical"], floor["chars_ref"], floor["files_empty_ref"]) == (True, 3, 1)
+    assert CMP.blessable({**floor, "measured": True}, {}) == "it has an empty text file"
+    assert CMP.blessable({**TEXT_FLOOR, **CMP.describe(two), "measured": False}, {}) == (
+        "it has an empty text file")
+    # The floor of an image golden says nothing about a text: the entry changed its kind.
+    image = {"identical": True, "mean_mse": 0.0, "measured": True}
+    assert CMP.blessable(image, {}) == (
+        "its noise floor is not a text comparison, so it is a golden of another kind")
+    # A similarity that is not a share of words is named as what it is.
+    assert "(similarity 0.8 by lines)" in CMP.blessable({**noisy, "similarity_basis": "lines"}, {})
+    assert "(similarity 0.8 by the shared start)," in CMP.blessable(
+        {**noisy, "similarity_basis": "prefix"}, {"thresholds": {"min_text_similarity": 0.9}})
+    # Writing a reference over an earlier one removes no file: what would stay behind.
+    one = _dir(tmp_path, "one", wf_00001=TEXT)
+    assert CMP.left_behind(two, one) == ["wf_thinking_00001.txt"]
+    assert CMP.left_behind(one, two) == [] == CMP.left_behind(tmp_path / "missing", one)
 
 
 def test_word_diff_marks_what_was_removed_and_added():
@@ -260,6 +280,74 @@ def test_a_match_that_would_take_too_long_is_stopped_by_its_steps(monkeypatch):
                            "file_count_cand": 1}, {"min_text_similarity": 0.5})
 
 
+def test_a_similarity_by_lines_is_never_above_what_the_words_allow(monkeypatch):
+    """Twenty equal lines and one long line with every item changed: 95 % of the
+    lines, and two thirds of the words at most. When the word match is stopped,
+    the step down to lines must not pass a limit that the words fail."""
+    monkeypatch.setattr(output_kinds, "MATCH_STEPS_MAX", 5000)
+    head = "\n".join(f"step {i} done" for i in range(20))
+    ref = head + "\n" + " ".join(f"r{i} ," for i in range(60))
+    cand = head + "\n" + " ".join(f"c{i} ," for i in range(60))
+    with pytest.raises(output_kinds._TooSlow):
+        output_kinds._Matcher(ref.split(), cand.split()).ratio()
+    by_lines = difflib.SequenceMatcher(None, ref.split("\n"), cand.split("\n")).ratio()
+    by_words = difflib.SequenceMatcher(None, ref.split(), cand.split(), autojunk=False)
+    assert round(by_lines, 6) == 0.952381 and round(by_words.quick_ratio(), 6) == 0.666667
+    assert output_kinds.similarity(ref, cand) == (0.666667, "lines")
+    one = output_kinds.compare_texts(ref, cand)
+    assert not CMP.passes({**one, "file_count_ref": 1, "file_count_cand": 1},
+                          {"min_text_similarity": 0.9})
+    # Where the lines say less than the words could, the number is the lines' own.
+    assert output_kinds.similarity(ref, cand.replace("step", "STEP")) == (0.0, "lines")
+
+
+def test_a_line_diff_is_difflibs_own_and_is_held_to_the_step_bound(monkeypatch):
+    """difflib.unified_diff matches lines with no bound: its time grows with
+    the cube of the line count when many lines recur, each too rare for
+    difflib to set aside. The line diff of a long text goes through the
+    bounded matcher instead, and reads the same as long as the match ends."""
+    def plain(a, b):
+        return "\n".join(difflib.unified_diff(a.split("\n"), b.split("\n"), "reference",
+                                              "candidate", lineterm="", n=1))
+
+    text = "\n".join(f"line {i}" for i in range(30))
+    loop = "again\n" * 300  # over 1 % of 200 lines or more: difflib sets such a line aside
+    for a, b in ((text, text.replace("line 0", "LINE 0")), (text, text + "\nmore"),
+                 (text, "new\n" + text), ("", text), (text, ""), ("one", "two"), ("a", "a\nb"),
+                 (text, text.replace("line 12\n", "").replace("line 20", "x\ny")),
+                 ("first\n" + loop + "end", "FIRST\n" + loop + "end"),
+                 (loop + "old\n" + loop, loop + loop), ("a\nb\n" * 150, "b\na\n" * 150)):
+        assert output_kinds.line_diff(a, b) == plain(a, b) != ""
+        assert output_kinds.line_diff(a, b).startswith(output_kinds.LINE_DIFF_HEAD)
+    assert output_kinds.line_diff(text, text) == plain(text, text) == ""
+
+    # Past the bound no line is matched. What lies between the start and the end
+    # that the two texts share is one change.
+    monkeypatch.setattr(output_kinds, "MATCH_STEPS_MAX", 50)
+    ref = "\n".join(["top", *(f"same\nr{i}" for i in range(5)), "end"])
+    cand = "\n".join(["top", *(f"same\nc{i}" for i in range(5)), "end"])
+    with pytest.raises(output_kinds._TooSlow):
+        output_kinds._Matcher(ref.split("\n"), cand.split("\n"), autojunk=True).get_opcodes()
+    gone = ["r0", "same", "r1", "same", "r2", "same", "r3", "same", "r4"]
+    assert output_kinds.line_diff(ref, cand).split("\n") == [
+        "--- reference", "+++ candidate", "@@ -3,9 +3,9 @@", *("-" + line for line in gone),
+        *("+" + line.replace("r", "c") for line in gone)]
+    assert output_kinds.word_diff(ref, cand) == output_kinds.line_diff(ref, cand)
+    # One changed line in a text that repeats itself is still one changed line.
+    loop = "again\n" * 30
+    assert output_kinds.line_diff(loop + "old\n" + loop, loop + "new\n" + loop).split("\n") == [
+        "--- reference", "+++ candidate", "@@ -31 +31 @@", "-old", "+new"]
+    assert output_kinds.line_diff(loop + "old\n" + loop, loop + loop).split("\n") == [
+        "--- reference", "+++ candidate", "@@ -31 +30,0 @@", "-old"]
+    assert output_kinds.line_diff(loop, loop) == ""
+    # A long change is shown from its start, and its header says that this is not all.
+    monkeypatch.setattr(output_kinds, "UNMATCHED_LINES", 3)
+    assert output_kinds.line_diff(ref, cand).split("\n") == [
+        "--- reference", "+++ candidate",
+        "@@ -3,3 +3,3 @@ too long to match line by line, only these lines are shown",
+        "-r0", "-same", "-r1", "+c0", "+same", "+c1"]
+
+
 def test_what_a_log_line_may_carry_and_how_a_similarity_is_shown():
     metrics = {"kind": "text", "identical": False, "similarity": 0.5,
                "first_diff": {"file": "wf_00001.txt", "line": 2, "col": 3, "offset": 9,
@@ -273,6 +361,13 @@ def test_what_a_log_line_may_carry_and_how_a_similarity_is_shown():
     # Texts that differ never read as fully alike.
     assert output_kinds.percent(0.864865) == "86.5" and output_kinds.percent(0.0) == "0.0"
     assert output_kinds.percent(0.999999) == "over 99.9" and output_kinds.percent(1.0) == "100.0"
+    # A share of lines or of the shared start is said next to the number. The basis
+    # is read from results: one that is not known adds nothing.
+    assert output_kinds.basis_note({"similarity_basis": "lines"}) == " by lines"
+    assert output_kinds.basis_note({"similarity_basis": "prefix"}) == " by the shared start"
+    for other in ("words", "<b>lines</b>", ["lines"], 3, None):
+        assert output_kinds.basis_note({"similarity_basis": other}) == ""
+    assert output_kinds.basis_note({}) == output_kinds.basis_note(None) == ""
 
 
 def test_the_image_comparator_is_the_old_functions(tmp_path, monkeypatch):
@@ -298,6 +393,7 @@ def test_the_image_comparator_is_the_old_functions(tmp_path, monkeypatch):
                        {"filename": "a.txt", "sha256": "t"}]}
     assert image.primary_sha(rec) == "p" and image.transfer_error(rec) is None
     assert image.blessable({"error": "x"}, {}) is None and not image.bless_gate
+    assert image.left_behind(tmp_path / "old", tmp_path / "new") == []
     assert image.zero_floor() == {"identical": True, "mean_mse": 0.0, "mean_psnr_db": None,
                                   "min_psnr_db": None, "max_abs_diff": 0,
                                   "mean_pct_pixels_changed": 0.0}

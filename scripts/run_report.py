@@ -43,6 +43,7 @@ import html
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -430,8 +431,19 @@ class GitReader(Reader):
             with subprocess.Popen(
                     ["git", "-C", self.workdir, "cat-file", "blob",  # a file, never a tree
                      f"{self.sha}:{path}"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                    env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}) as git:
-                watchdog = threading.Timer(GIT_TIMEOUT_S, git.kill)
+                    env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                    start_new_session=True) as git:
+                def stop():
+                    # A blob that is not local is fetched by a child of git, and that
+                    # child holds the pipe too: the read ends only when the whole
+                    # group is gone. Windows has no process group to signal.
+                    try:
+                        if git.returncode is None:  # once git was waited for, its id is free
+                            os.killpg(git.pid, signal.SIGKILL)
+                    except (AttributeError, OSError):
+                        git.kill()
+
+                watchdog = threading.Timer(GIT_TIMEOUT_S, stop)
                 watchdog.start()
                 try:
                     data = git.stdout.read(limit)
@@ -1466,8 +1478,8 @@ def text_metric_cells(metrics, th=None, other: str = "the reference",
         return ["identical" + files, "", "", pair("chars"), pair("lines")]
     floor, sim = th.get("min_text_similarity"), m.get("similarity")
     shown = ""
-    if is_num(sim):
-        shown = f"{output_kinds.percent(sim)} %"
+    if is_num(sim) and paired != 0:  # with no pair of files there is nothing to be similar
+        shown = f"{output_kinds.percent(sim)} %{output_kinds.basis_note(m)}"
         if is_num(floor):
             shown = (f"**{shown}**" if sim < floor else shown) + f" (limit ≥ {floor * 100:g} %)"
     diff = as_dict(m.get("first_diff"))
@@ -1513,9 +1525,11 @@ def text_lines(d: LaneData, v: View, limits: Limits, diff: bool = True) -> list[
     if diff and isinstance(marked, str) and marked:
         shown, cut, folded = text_shown(marked, limits.text_chars * 2)
         note = f", cut to its first {limits.text_chars * 2} characters" if cut else ""
-        out += ["**Difference from the reference**, with removed text as "
-                f"<code>[-…-]</code> and added text as <code>{{+…+}}</code>{folded}{note}:", "",
-                pre(shown), ""]
+        # Texts too long to mark word by word come as a line diff, which has other signs.
+        form = ("line by line, with <code>-</code> before a removed line and <code>+</code> "
+                "before an added one" if marked.startswith(output_kinds.LINE_DIFF_HEAD) else
+                "with removed text as <code>[-…-]</code> and added text as <code>{+…+}</code>")
+        out += [f"**Difference from the reference**, {form}{folded}{note}:", "", pre(shown), ""]
     elif diff and isinstance(marked, str) and as_dict(vg.get("first_diff")):
         # The comparison found a difference that the cleaned texts no longer have.
         out += ["The two texts differ only in characters that are not shown here (control or "
@@ -1998,9 +2012,12 @@ def reference_cell(v: View) -> str:
     if output_kinds.metrics_kind(vg) == "text":
         if vg.get("identical"):
             return "identical text"
+        if vg.get("files_compared") == 0:  # no pair of files, so no similarity to show
+            return "text file under another name"
         line = as_dict(vg.get("first_diff")).get("line")
         bits = [is_num(vg.get("similarity"))
-                and f"{output_kinds.percent(vg['similarity'])} % similar",
+                and f"{output_kinds.percent(vg['similarity'])} % similar"
+                    f"{output_kinds.basis_note(vg)}",
                 is_num(line) and f"differs from line {line:.0f}"]
         return " · ".join(b for b in bits if b) or "differs"
     if vg.get("identical"):

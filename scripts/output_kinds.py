@@ -25,7 +25,6 @@ and `loggable` gives the metrics a log line may carry.
 """
 from __future__ import annotations
 
-import collections
 import difflib
 import hashlib
 import itertools
@@ -42,6 +41,9 @@ WORDS_MAX = 5000               # longer texts are scored by lines, not by words
 LINES_MAX = 5000               # and texts with more lines by their shared start
 DIFF_TOKENS_MAX = 6000         # longer texts get a line diff, not a word diff
 MATCH_STEPS_MAX = 50_000_000   # the work one difflib match may take: about five seconds
+UNMATCHED_LINES = 40           # lines of each text a line diff shows when no match was made
+LINE_DIFF_HEAD = "--- reference\n+++ candidate\n"  # how `line_diff` starts: a report tells by it
+BASIS_NOTES = {"lines": "by lines", "prefix": "by the shared start"}
 EXCERPT_CHARS = 120
 WRAP_COLUMNS = 100
 _TOKEN = re.compile(r"\S+|\s+")
@@ -148,19 +150,20 @@ class _Matcher(difflib.SequenceMatcher):
     lists share little more than one frequent token (a blank, a table's "|",
     an empty line), difflib's time grows with the cube of the length. The
     steps a search can take are known before it runs, so the same two texts
-    stop at the same place on every machine. The blocks are difflib's own."""
+    stop at the same place on every machine. The blocks are difflib's own.
+    `autojunk` is difflib's switch: on, a token that makes up over 1 % of a
+    list of 200 or more starts no match, as in difflib.unified_diff."""
 
-    def __init__(self, a: list[str], b: list[str]):
-        super().__init__(None, a, b, autojunk=False)
+    def __init__(self, a: list[str], b: list[str], autojunk: bool = False):
+        super().__init__(None, a, b, autojunk=autojunk)
         self._blocks: list[tuple[int, int, int]] | None = None
 
     def get_matching_blocks(self):  # ratio() and get_opcodes() are built on this
         if self._blocks is not None:
             return self._blocks
         a, b = self.a, self.b
-        times = collections.Counter(b)
-        # A search of a[lo:hi] visits every place in b that holds one of its tokens.
-        upto = [0, *itertools.accumulate(times[token] + 1 for token in a)]
+        # A search of a[lo:hi] visits every place in b that difflib keeps for one of its tokens.
+        upto = [0, *itertools.accumulate(len(self.b2j.get(token, ())) + 1 for token in a)]
         steps, todo, found = 0, [(0, len(a), 0, len(b))], []
         while todo:
             alo, ahi, blo, bhi = todo.pop()
@@ -183,19 +186,36 @@ def similarity(ref: str, cand: str) -> tuple[float, str]:
     over lines for texts too long for that. Texts too long for either get the
     share of the longer text that the two have in common from the start
     ("prefix"). Too long is a count of words or lines, or a match that
-    difflib cannot finish in MATCH_STEPS_MAX steps. 1.0 only for equal texts."""
+    difflib cannot finish in MATCH_STEPS_MAX steps. A ratio by lines or by the
+    shared start is never above what the words allow. 1.0 only for equal texts."""
     if ref == cand:
         return 1.0, "words"
-    for basis, a, b, most in (("words", ref.split(), cand.split(), WORDS_MAX),
-                              ("lines", ref.split("\n"), cand.split("\n"), LINES_MAX)):
+    words = ref.split(), cand.split()
+    ratio, basis = None, "prefix"
+    for name, a, b, most in (("words", *words, WORDS_MAX),
+                             ("lines", ref.split("\n"), cand.split("\n"), LINES_MAX)):
         if max(len(a), len(b)) > most:
             continue
         try:
-            return min(round(_Matcher(a, b).ratio(), 6), 0.999999), basis
+            ratio, basis = _Matcher(a, b).ratio(), name
+            break
         except _TooSlow:
             pass
-    shared = (first_difference(ref, cand) or {}).get("offset", 0)
-    return min(round(shared / max(len(ref), len(cand)), 6), 0.999999), "prefix"
+    if ratio is None:
+        ratio = (first_difference(ref, cand) or {}).get("offset", 0) / max(len(ref), len(cand))
+    if basis != "words":
+        # Equal lines around one long changed line would pass a limit that the
+        # words fail. difflib's upper bound of the word ratio is one pass over them.
+        ratio = min(ratio, difflib.SequenceMatcher(None, *words, autojunk=False).quick_ratio())
+    return min(round(ratio, 6), 0.999999), basis
+
+
+def basis_note(metrics: dict | None) -> str:
+    """What follows a similarity that is not a share of words, where it is
+    shown: " by lines" or " by the shared start". "" for a share of words, and
+    for a basis this does not know: the value is read from results."""
+    basis = metrics.get("similarity_basis") if isinstance(metrics, dict) else None
+    return f" {BASIS_NOTES[basis]}" if isinstance(basis, str) and basis in BASIS_NOTES else ""
 
 
 def compare_texts(ref: str, cand: str) -> dict:
@@ -245,6 +265,9 @@ def compare_text_dirs(ref_dir: Path, cand_dir: Path) -> dict:
                  "chars_cand": sum(map(len, texts_cand.values())),
                  "lines_ref": sum(t.count("\n") + 1 for t in texts_ref.values() if t),
                  "lines_cand": sum(t.count("\n") + 1 for t in texts_cand.values() if t)}
+    empty = sum(1 for t in texts_ref.values() if not t)
+    if empty:  # the counts above are totals: they hide an empty file next to a full one
+        res["files_empty_ref"] = empty
     for name in common:
         one = compare_texts(texts_ref[name], texts_cand[name])
         if one["similarity"] < res["similarity"]:
@@ -277,11 +300,53 @@ def _marks(removed: str, added: str) -> str:
     return ("[-" + removed + "-]" if removed else "") + ("{+" + added + "+}" if added else "")
 
 
+def _span(start: int, stop: int) -> str:
+    """Lines `start` to `stop` (from 0, `stop` not included) as a unified diff names them."""
+    count = stop - start
+    return str(start + 1) if count == 1 else f"{start + 1 if count else start},{count}"
+
+
+def line_diff(ref: str, cand: str) -> str:
+    """A unified diff of the lines of two texts with one line of context, as
+    difflib.unified_diff writes it, held to the step bound of `_Matcher`:
+    difflib's own line match has none. Past the bound no line is matched.
+    What lies between the start and the end that the two texts share is then
+    one change, shown up to UNMATCHED_LINES lines of each text, and its
+    header says when that is not all of it. For display only."""
+    if ref == cand:
+        return ""
+    a, b = ref.split("\n"), cand.split("\n")
+    note = ""
+    try:
+        groups = list(_Matcher(a, b, autojunk=True).get_grouped_opcodes(1))
+    except _TooSlow:
+        most = min(len(a), len(b))
+        head = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), most)
+        tail = min(most - head, next((i for i, (x, y) in enumerate(zip(reversed(a), reversed(b)))
+                                      if x != y), most))
+        gone, new = len(a) - tail - head, len(b) - tail - head
+        if max(gone, new) > UNMATCHED_LINES:
+            note = " too long to match line by line, only these lines are shown"
+        groups = [[("replace", head, head + min(gone, UNMATCHED_LINES),
+                    head, head + min(new, UNMATCHED_LINES))]]
+    out = [LINE_DIFF_HEAD.rstrip("\n")]
+    for group in groups:
+        out.append(f"@@ -{_span(group[0][1], group[-1][2])} "
+                   f"+{_span(group[0][3], group[-1][4])} @@{note}")
+        for op, i1, i2, j1, j2 in group:
+            if op == "equal":
+                out += [" " + line for line in a[i1:i2]]
+            else:
+                out += ["-" + line for line in a[i1:i2]] + ["+" + line for line in b[j1:j2]]
+    return "\n".join(out)
+
+
 def word_diff(ref: str, cand: str) -> str:
     """The candidate text with its changes marked the way `git diff
     --word-diff` marks them: [-removed-] and {+added+}. Texts too long for a
-    word diff (in tokens, or in the steps the match would take) get a unified
-    line diff. For display only."""
+    word diff (in tokens, or in the steps the match would take) get the
+    unified line diff of `line_diff`, which starts with LINE_DIFF_HEAD. For
+    display only."""
     a, b = _TOKEN.findall(ref), _TOKEN.findall(cand)
     ops = None
     if max(len(a), len(b)) <= DIFF_TOKENS_MAX:
@@ -290,8 +355,7 @@ def word_diff(ref: str, cand: str) -> str:
         except _TooSlow:
             pass
     if ops is None:
-        return "\n".join(difflib.unified_diff(ref.split("\n"), cand.split("\n"), "reference",
-                                              "candidate", lineterm="", n=1))
+        return line_diff(ref, cand)
     out: list[str] = []
     gone = new = ""
     for k, (op, i1, i2, j1, j2) in enumerate(ops):
@@ -353,6 +417,12 @@ class Comparator:
         twice. Carries `error` when these outputs cannot be a reference."""
         return {}
 
+    def left_behind(self, old_dir: Path, new_dir: Path) -> list[str]:
+        """Compared files under `old_dir` that `new_dir` has no file for. A
+        reference written over an earlier one adds files and removes none, so
+        these would stay in it."""
+        return []
+
     def blessable(self, noise_floor: dict | None, entry: dict) -> str | None:
         """Why a reference must not be approved; None when it may."""
         return None
@@ -407,6 +477,9 @@ class TextComparator(Comparator):
             return own
         return {k: v for k, v in own.items() if k.startswith(("file", "chars_", "lines_"))}
 
+    def left_behind(self, old_dir: Path, new_dir: Path) -> list[str]:
+        return sorted(set(list_texts(old_dir)) - set(list_texts(new_dir)))
+
     def blessable(self, noise_floor: dict | None, entry: dict) -> str | None:
         """The second run must pass against the first by the rule every later
         run is held to: a limit in the entry opens the gate only that far."""
@@ -415,13 +488,18 @@ class TextComparator(Comparator):
             return f"its two runs could not be compared ({floor['error']})"
         if floor.get("chars_ref") == 0:
             return "the generated text is empty"
+        if floor.get("files_empty_ref"):
+            return "it has an empty text file"
+        if floor and metrics_kind(floor) != self.kind:
+            return "its noise floor is not a text comparison, so it is a golden of another kind"
         limit = self.thresholds(entry, {}, floor)
         if not floor.get("measured") or self.passes(floor, limit):
             return None
         if not self._same_files(floor):
             return ("its two runs did not write the same text files, so the reference would "
                     "fail at random: make the workflow deterministic")
-        said = f"its two runs produced different text (similarity {floor.get('similarity')})"
+        said = ("its two runs produced different text (similarity "
+                f"{floor.get('similarity')}{basis_note(floor)})")
         if limit is None:
             return (f"{said}, so an exact-match reference would fail at random: make the "
                     "workflow deterministic, or set thresholds.min_text_similarity in its "

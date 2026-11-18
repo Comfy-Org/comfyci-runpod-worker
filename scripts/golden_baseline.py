@@ -29,6 +29,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -132,6 +133,24 @@ def bless(store: storage.Storage, wf_id: str, tag: str, blessed_by: str,
     return current
 
 
+def left_in_golden(store: storage.Storage, wf_id: str, tag: str, outputs: Path,
+                   comparator: output_kinds.Comparator) -> str | None:
+    """Why `outputs` must not be written over golden `tag`; None when they may.
+    The store adds files to a directory and removes none (--force). A compared
+    file that only the earlier golden has would stay in the reference, and
+    every run would then fail on the file count."""
+    if not comparator.bless_gate:
+        return None  # an image golden is written as it always was
+    with tempfile.TemporaryDirectory() as old:
+        store.fetch_golden_outputs(wf_id, tag, Path(old))
+        stale = comparator.left_behind(Path(old), outputs)
+    if not stale:
+        return None
+    return (f"golden {tag} holds {', '.join(stale[:5])}, which the new outputs do not have, and "
+            f"writing over a golden removes no file. Remove it from golden/{wf_id}/{tag}/outputs "
+            "on the results branch, or use another ref")
+
+
 def promote_run(store: storage.Storage, branch: str, commit: str, wf_id: str, tag: str,
                 lane: str, generated_by: str, reason: str | None, workdir: Path,
                 comparator: output_kinds.Comparator | None = None) -> bool:
@@ -150,8 +169,11 @@ def promote_run(store: storage.Storage, branch: str, commit: str, wf_id: str, ta
     # An inherited floor describes the earlier reference. What the bless gate
     # asks about the output itself is read from the outputs that are promoted.
     own = cmp_.describe(outputs) if cmp_.bless_gate else {}
-    if own.get("error"):
-        print(f"::error::[{wf_id}] {branch}/{commit} cannot be a reference: {own['error']}")
+    # A compared file that the run listed and did not send is not among them:
+    # the reference would lack it, and no later run could pass.
+    lost = cmp_.transfer_error(run) or own.get("error")
+    if lost:
+        print(f"::error::[{wf_id}] {branch}/{commit} cannot be a reference: {lost}")
         return False
     previous = store.download_json(f"{prefix}/golden/{wf_id}/current.json") or {}
     floor = None
@@ -169,6 +191,10 @@ def promote_run(store: storage.Storage, branch: str, commit: str, wf_id: str, ta
         # what may not be blessed must not replace the reference in it.
         print(f"::error::[{wf_id}] golden {tag} is not blessed: {why}. It is the current "
               "reference, so its files are left as they are")
+        return False
+    why = left_in_golden(store, wf_id, tag, outputs, cmp_)
+    if why:
+        print(f"::error::[{wf_id}] {why}")
         return False
 
     base = f"{prefix}/golden/{wf_id}/{tag}"
@@ -359,6 +385,11 @@ def main():
             # blessed must not replace the reference every run is compared with.
             print(f"::error::[{wf_id}] golden {tag} is not blessed: {why}. It is the current "
                   "reference, so its files are left as they are")
+            failed.append(wf_id)
+            continue
+        why = left_in_golden(store, wf_id, tag, Path(runs[1]["outputs_dir"]), cmp_)
+        if why:
+            print(f"::error::[{wf_id}] {why}")
             failed.append(wf_id)
             continue
         store.upload_dir(f"{base}/outputs", Path(runs[1]["outputs_dir"]))

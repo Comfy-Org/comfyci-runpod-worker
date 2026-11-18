@@ -488,6 +488,21 @@ def test_which_text_changes_get_a_line():
     del near["vs_golden"]["first_diff"]
     assert notify_pr.text_notes({"a": near}, {"a": "new_drift"}) == [
         "- Text `a`: over 99.9% similar to the golden"]
+    # A similarity that is not a share of words says what it is. The basis is read
+    # from results: one that is not known adds nothing.
+    assert notify_pr.text_notes({"a": _text(similarity_basis="lines")}, {"a": "new_drift"}) == [
+        "- Text `a`: 86.5% similar to the golden by lines, first difference at line 2, column 22"]
+    assert notify_pr.text_notes({"a": _text(similarity=0.0, similarity_basis="prefix")},
+                                {"a": "new_drift"})[0].startswith(
+        "- Text `a`: 0.0% similar to the golden by the shared start, first")
+    for odd in (HOSTILE, ["lines"], None):
+        assert notify_pr.text_notes({"a": _text(similarity_basis=odd)}, {"a": "new_drift"}) == [
+            "- Text `a`: 86.5% similar to the golden, first difference at line 2, column 22"]
+    # No file with the golden's name: nothing was compared, so no percentage is given.
+    moved = _text(similarity=0.0, files_compared=0)
+    del moved["vs_golden"]["first_diff"]
+    assert notify_pr.text_notes({"a": moved}, {"a": "new_drift"}) == [
+        "- Text `a`: its text file has another name than the golden's"]
     # An inherited text failure next to a new image change: the table says so, no line.
     body = notify_pr.render_changed(_summary({**DRIFT, "llm": _text(detail="inherited")}), None)
     assert f"| `llm` | changed | inherited | {NONE} | {NONE} | {NONE} | 41.2 | 21.0 GB |" in body

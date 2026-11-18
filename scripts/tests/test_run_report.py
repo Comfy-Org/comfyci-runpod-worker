@@ -3,8 +3,11 @@ in-memory results tree (no network), and the git-backed reader against a local
 bare repo."""
 import hashlib
 import json
+import os
 import re
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -2201,6 +2204,9 @@ def test_the_regression_workflow_reports_every_lane_job_and_all_lanes():
     lane, overview = (text for name, text in steps if name == "Report")
     # After a test, a failed test and a skipped one, and never as a failure of its own.
     assert "\n        if: always()\n        continue-on-error: true\n" in lane
+    # A report that hangs must not hold the group every later commit waits in.
+    assert "\n        timeout-minutes: 10\n" in lane
+    assert "\n        timeout-minutes: 10\n" in overview
     for line in ("COMMIT: ${{ needs.lanes.outputs.commit }}", "LANE: ${{ matrix.lane }}",
                  "SKIPPED: ${{ steps.target.outputs.skip }}",
                  "ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}",
@@ -2261,6 +2267,8 @@ T_PREV = f"[`{PREV[:7]}`]({COMFY}/commit/{PREV})"
 DIFF_TITLE = ("**Difference from the reference**, with removed text as <code>[-…-]</code> and "
               "added text as <code>{+…+}</code>")
 DIFF_FOLDED = DIFF_TITLE + ", long lines folded"
+LINE_TITLE = ("**Difference from the reference**, line by line, with <code>-</code> before a "
+              "removed line and <code>+</code> before an added one")
 # What a model could write to break out of the report or to run a workflow command.
 T_EVIL = ("@octocat see #9911 <script>alert(1)</script> [x](https://evil.example/) **bold**\n"
           "::error::not a command\n</pre>\n</details>\n| a | b |\n# heading \x1b[31mred\x1b[0m\x07 "
@@ -2507,8 +2515,13 @@ def test_a_long_text_is_cut_where_it_is_shown_and_nothing_else_is_dropped():
             "</summary>") in lines
     assert (f"<details><summary>Reference text ({len(long)} characters, the first 4000 shown)"
             "</summary>") in lines
-    assert DIFF_TITLE + ", cut to its first 8000 characters:" in lines
+    # 400 such lines are too many words to mark one by one: the difference is a
+    # line diff, and its title explains the signs of a line diff.
+    assert LINE_TITLE + ", cut to its first 8000 characters:" in lines
+    assert "[-…-]" not in out
     diff, generated, reference = _pre_blocks(out)
+    assert diff.split("\n")[:3] == ["--- reference", "+++ candidate", "@@ -1,400 +1,400 @@"]
+    assert diff.split("\n")[3] == "-LINE 0000 OF A TEXT THAT GOES ON AND ON"
     assert generated.endswith("\n…") and len(generated) <= 4002 and len(diff) <= 8002
     assert generated.startswith("line 0000 of a text") and "line 0399" not in generated
     assert f"[The whole file]({RAW}/{T_RUN})" in lines
@@ -2550,7 +2563,7 @@ def test_generated_texts_are_the_last_thing_the_size_limit_takes():
     # Cut: each text to 1000 characters, the difference to twice that.
     cut = run_report.render_lane(d, run_report.Limits(text_chars=1000))
     assert f"Generated text ({len(long)} characters, the first 1000 shown)" in cut
-    assert DIFF_TITLE + ", cut to its first 2000 characters:" in cut
+    assert LINE_TITLE + ", cut to its first 2000 characters:" in cut
     assert [len(block) <= 2002 for block in _pre_blocks(cut)] == [True] * 3
     # Left out: one sentence with the link, and the numbers stay.
     none = run_report.render_lane(d, run_report.Limits(text_chars=0))
@@ -2653,8 +2666,12 @@ def test_a_difference_that_cannot_be_shown_and_a_file_under_another_name_are_sai
     out = _report(_text_files(cell, ref=None, extra={
         f"{P}/golden/{WF}/{T_TAG}/outputs/{WF}_00001_.txt": T_REF}))
     lines = out.split("\n")
+    # No pair of files was compared, so no similarity is shown: not as "0.0 %" either.
     assert (f"| Reference `{T_TAG}` | **differs** (**no text file with the same name as in the "
-            "reference**) | 0.0 % |  | 208 | 3 |") in lines
+            "reference**) |  |  | 208 | 3 |") in lines
+    assert (f"| `{WF}` | ❌ output changed (new at this commit) | [text]({RAW}/{T_RUN}) | text "
+            f"file under another name | identical to {T_PREV} |") in out
+    assert "0.0 %" not in out and "% similar" not in out
     assert ("The reference has no text file named <code>llm\\_qwen\\_t2t\\_00001.txt</code>, so "
             "the difference is not shown.") in lines
     assert "could not be read" not in out and _pre_blocks(out) == [T_REF]
@@ -2805,7 +2822,16 @@ def test_text_metric_cells_by_shape():
     assert cells(renamed, {"min_text_similarity": 0.5})[0] == (
         "**differs** (**only 1 of 2 text files with the same name as in the reference**)")
     assert cells({**renamed, "files_compared": 0, "similarity": 0.0})[:2] == [
-        "**differs** (**no text file with the same name as in the reference**)", "0.0 %"]
+        "**differs** (**no text file with the same name as in the reference**)", ""]
+    # A similarity that is not a share of words says what it is a share of. The basis
+    # is read from results: one that is not known adds nothing.
+    by_lines = {**_text_vs(T_REF, T_NEW), "similarity_basis": "lines"}
+    assert cells(by_lines)[1] == "86.5 % by lines"
+    assert cells(by_lines, {"min_text_similarity": 0.98})[1] == (
+        "**86.5 % by lines** (limit ≥ 98 %)")
+    assert cells({**by_lines, "similarity_basis": "prefix"})[1] == "86.5 % by the shared start"
+    for odd in ("words", "<b>lines</b>", ["lines"], None):
+        assert cells({**by_lines, "similarity_basis": odd})[1] == "86.5 %"
     # Bold marks what fails. The previous run and the noise floor are not what a run is judged by.
     assert cells(_text_vs(T_REF, T_NEW), None, "the previous run", judged=False)[0] == "differs"
     assert cells(fewer, None, "the previous run", judged=False)[0] == (
@@ -2858,3 +2884,40 @@ def test_readers_return_the_start_of_a_text_file(tmp_path):
     assert reader.read_text(f"{P}/golden/{WF}/{T_TAG}/outputs") is None           # a directory
     assert reader.read_text(f"{P}/golden/{WF}") is None
     assert not (tmp_path / "checkout" / "regression").exists()  # nothing is checked out
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="needs process groups: not on Windows")
+def test_a_text_read_ends_when_the_fetch_that_git_started_stalls(tmp_path, monkeypatch):
+    """A blob that is not local is fetched by a child of `git cat-file`, and
+    that child holds the pipe the text is read from. Stopping git alone leaves
+    the read waiting for as long as the fetch stalls, so the whole group is
+    stopped. The stand-in for git starts such a child and waits for it."""
+    started = tmp_path / "started"
+    fetch = "import pathlib, sys, time; pathlib.Path(sys.argv[1]).write_text('x'); time.sleep(60)"
+    stand_in = [sys.executable, "-c", "import subprocess, sys; subprocess.Popen("
+                "[sys.executable, '-c', sys.argv[1], sys.argv[2]]).wait()", fetch, str(started)]
+    real = subprocess.Popen
+    monkeypatch.setattr(run_report.subprocess, "Popen", lambda args, **kw: real(stand_in, **kw))
+    monkeypatch.setattr(run_report, "GIT_TIMEOUT_S", 2)
+    reader = run_report.GitReader.__new__(run_report.GitReader)  # no checkout: git is replaced
+    reader.workdir, reader.sha = str(tmp_path), "0" * 40
+    begun = time.monotonic()
+    assert reader.read_text(T_GOLDEN) is None
+    assert time.monotonic() - begun < 30 and started.exists()
+
+
+def test_a_similarity_that_is_not_a_share_of_words_says_what_it_is():
+    """Above 5,000 words the similarity is a share of lines: the report names
+    that next to the number, where it would read as a share of words."""
+    words = " ".join(f"w{i}" for i in range(output_kinds.WORDS_MAX + 1))
+    ref, new = words + "\nlast", words + "\nother"
+    cell = _text_cell("fail", new, ref=ref, detail="new_drift",
+                      thresholds_used={"min_text_similarity": 0.98})
+    assert (cell["vs_golden"]["similarity"], cell["vs_golden"]["similarity_basis"]) == (
+        0.5, "lines")
+    out = _report(_text_files(cell, new, ref=ref))
+    assert (f"| Reference `{T_TAG}` | **differs** | **50.0 % by lines** (limit ≥ 98 %) | line 2, "
+            "column 1 |") in out
+    assert "| 50.0 % similar by lines · differs from line 2 |" in out
+    # Too many words to mark one by one as well: the title is the one of a line diff.
+    assert LINE_TITLE + ", long lines folded, cut to its first 8000 characters:" in out
