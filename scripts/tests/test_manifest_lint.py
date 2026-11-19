@@ -218,9 +218,16 @@ def _compared_text_problems(entry: dict, wf: dict) -> list[str]:
     reference-level output is compared: a text passes on an exact match, and
     a picture made from a generated prompt is held against its reference. So
     at reference level every text generation is greedy. At smoke level
-    nothing is compared, and a workflow may sample as its template does."""
+    nothing is compared, and a workflow may sample as its template does. One
+    that samples has its seed, `sampling_mode.seed`: ComfyUI requires it and
+    the entry pins it, and a node switched to sampling by hand with nothing
+    next to it has none. The other inputs sampling requires are for a
+    ComfyUI to name: this lint has no node definitions."""
     if lanes_mod.level_of(entry) == "smoke":
-        return []
+        return [f"{nid}: sampling_mode is not 'off', so the node needs its sampling_mode.seed"
+                for nid, n in wf.items() if n["class_type"].startswith("TextGenerate")
+                and n["inputs"].get("sampling_mode") != "off"
+                and "sampling_mode.seed" not in n["inputs"]]
     return _text_generation_problems(wf)
 
 
@@ -870,6 +877,27 @@ def test_the_importer_refuses_what_these_rules_refuse():
     greedy = json.loads(json.dumps(sampled))
     import_template.greedy_text(greedy, {})
     assert _compared_text_problems({"level": "reference"}, greedy) == []
+    # A --set can bring sampling back, so at reference level the importer
+    # looks at the finished prompt too, and says what this lint would say.
+    bare = {"2": {"class_type": "TextGenerate", "inputs": {
+        "prompt": "x", "sampling_mode": "on", "mtp": "off"}}}
+    for wf in (sampled, greedy, bare, *(_load_workflow(entry) for entry in WORKFLOWS.values())):
+        assert import_template.not_greedy(wf) == _text_generation_problems(wf)
+    # A text generation that samples with none of the values sampling needs.
+    # This lint asks for the seed. The importer has the node definitions and
+    # names every input the chosen option requires, the seed among them.
+    options = [{"key": "on", "inputs": {"required": {"temperature": ["FLOAT", {}],
+                                                     "seed": ["INT", {}]}}},
+               {"key": "off", "inputs": {"required": {}}}]
+    info = {"TextGenerate": {"input": {"required": {
+        "prompt": ["STRING", {}],
+        "sampling_mode": ["COMFY_DYNAMICCOMBO_V3", {"options": options}]}}}}
+    assert _compared_text_problems({"level": "smoke"}, bare) != []
+    assert import_template.open_required(bare, info) == [
+        "2:TextGenerate.sampling_mode.seed (INT)",
+        "2:TextGenerate.sampling_mode.temperature (FLOAT)"]
+    assert import_template.open_required(sampled, info) == []
+    assert import_template.open_required(greedy, info) == []
     # The seed of a sampled text generation is a sub-input. It is a seed on
     # both sides, and its override names the input whole.
     assert import_template.SEED_NAMES == SEED_NAMES
@@ -1133,6 +1161,19 @@ def test_text_generation_is_greedy_where_the_output_is_compared():
         assert _compared_text_problems(kind, greedy) == []
     with pytest.raises(ValueError, match="unknown level"):
         _compared_text_problems({"level": "main"}, sampled)
+    # At smoke level a text generation that samples has its seed, literal or
+    # linked. Switched on by hand with nothing next to it, it has none, and
+    # ComfyUI refuses the prompt. A node without a sampling mode is not off.
+    smoke_level = {"level": "smoke"}
+    for inputs, said in (({"sampling_mode": "on"}, True), ({}, True),
+                         ({"sampling_mode": "on", "sampling_mode.temperature": 0.7}, True),
+                         ({"sampling_mode": "on", "sampling_mode.seed": ["2", 0]}, False),
+                         ({"sampling_mode": "off"}, False)):
+        wf = {"1": {"class_type": "TextGenerateV2", "inputs": inputs},
+              "2": {"class_type": "KSampler", "inputs": {"seed": 5}}}
+        assert _compared_text_problems(smoke_level, wf) == (
+            ["1: sampling_mode is not 'off', so the node needs its sampling_mode.seed"]
+            if said else []), inputs
     # The seed of a sampled text generation is a seed, so the entry pins it.
     # A sub-input that only ends like one is none.
     assert _has_seed(sampled) and not _has_seed(greedy)

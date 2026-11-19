@@ -1283,27 +1283,102 @@ def test_the_lint_is_run_whole_and_a_missing_pytest_is_said(monkeypatch, capsys)
     assert "pytest is not installed. Install pytest (pip install pytest)" in capsys.readouterr().err
 
 
+def test_a_sub_input_goes_by_the_option_its_combo_chooses():
+    """/object_info lists `sampling_mode` and, under each of its options, the
+    inputs that option brings. ComfyUI reads `sampling_mode.<name>` when the
+    chosen option has <name>, asks for the required ones ("Required input is
+    missing") and passes over any other without a word. The importer went by
+    `sampling_mode` alone, so it took a text generation switched to sampling
+    with none of its values, and one with a value no option has."""
+    sampling = ["COMFY_DYNAMICCOMBO_V3", {"options": [
+        {"key": "on", "inputs": {"required": {"temperature": ["FLOAT", {"default": 0.7}],
+                                              "seed": ["INT", {"default": 0}]},
+                                 "optional": {"presence_penalty": ["FLOAT", {"default": 0.0}]}}},
+        {"key": "off", "inputs": {"required": {}}}]}]
+    info = {"TextGenerate": spec({"prompt": ["STRING", {}], "sampling_mode": sampling},
+                                 {"mtp": ["COMBO", {"options": ["auto", "off"]}]}),
+            "SaveVideo": SERVER_INFO["SaveVideo"],
+            "EmptyImage": spec({"width": ["INT", {"default": 512}]}),
+            "Maths": spec({"expression": ["STRING", {}], "values": ["COMFY_AUTOGROW_V3", {}]})}
+
+    def checked(class_type, **inputs):
+        prompt = {"5": n(class_type, **inputs)}
+        return (import_template.unknown_literals(prompt, info),
+                import_template.open_required(prompt, info))
+
+    def text(**inputs):
+        return checked("TextGenerate", prompt="hi", **inputs)
+
+    on = {"sampling_mode": "on", "sampling_mode.temperature": 0.7, "sampling_mode.seed": 7}
+    assert text(**on) == ([], [])
+    assert text(**on, **{"sampling_mode.presence_penalty": 1.5}) == ([], [])
+    assert text(sampling_mode="off") == ([], [])
+    # Switched on, with none or some of what the option requires.
+    assert text(sampling_mode="on") == ([], ["5:TextGenerate.sampling_mode.seed (INT)",
+                                            "5:TextGenerate.sampling_mode.temperature (FLOAT)"])
+    assert text(sampling_mode="on", **{"sampling_mode.seed": ["4", 0]}) == (
+        [], ["5:TextGenerate.sampling_mode.temperature (FLOAT)"])
+    # A value no option has, values left over next to another option, and a
+    # dot on an input that is no combo: ComfyUI reads none of them.
+    assert text(**on, **{"sampling_mode.typical_p": 0.9}) == (
+        ["5:TextGenerate.sampling_mode.typical_p"], [])
+    assert text(**{**on, "sampling_mode": "off"}) == (
+        ["5:TextGenerate.sampling_mode.seed", "5:TextGenerate.sampling_mode.temperature"], [])
+    assert checked("EmptyImage", width=64, **{"width.px": 4096}) == (["5:EmptyImage.width.px"], [])
+    # Nothing is chosen by a link or by a value that is no option. The combo
+    # itself is asked for where the class has it.
+    for value in (["4", 0], "always"):
+        assert text(sampling_mode=value, **{"sampling_mode.seed": 7}) == (
+            ["5:TextGenerate.sampling_mode.seed"], [])
+    assert text() == ([], ["5:TextGenerate.sampling_mode (COMFY_DYNAMICCOMBO_V3)"])
+
+    def clip(**inputs):
+        return checked("SaveVideo", video=["3", 0], filename_prefix="x", format="mp4", **inputs)
+
+    # An option may hold a combo of its own. ComfyUI does not ask for that
+    # one (a SaveVideo without its codec picks one itself), and it asks for
+    # what the option chosen there requires.
+    assert clip() == clip(**{"format.codec": "h264"}) == ([], [])
+    assert clip(**{"format.codec": "h264", "format.codec.encoding": "auto"}) == ([], [])
+    assert clip(**{"format.codec": "h264", "format.codec.encoding": "re-encode"}) == (
+        [], ["5:SaveVideo.format.codec.encoding.crf (FLOAT)"])
+    assert clip(**{"format.codec": "h264", "format.codec.encoding": "re-encode",
+                   "format.codec.encoding.crf": 30.0}) == ([], [])
+    assert clip(**{"format.codec": "auto", "format.codec.encoding": "auto",
+                   "format.profile": "high"}) == (
+        ["5:SaveVideo.format.codec.encoding", "5:SaveVideo.format.profile"], [])
+    # An input that grows takes its values under names of its own.
+    assert checked("Maths", expression="a + b", **{"values.a": 32, "values.b": ["4", 0]}) == (
+        [], [])
+    required, optional, growing = import_template.chosen_inputs(
+        info, n("SaveVideo", format="mp4", **{"format.codec": "h264"}))
+    assert (list(required), list(optional), growing) == (
+        ["video", "filename_prefix", "format"], ["format.codec", "format.codec.encoding"], [])
+    assert import_template.chosen_inputs(info, n("Maths"))[2] == ["values"]
+    assert import_template.chosen_inputs(info, n("Unknown", a=1)) == ({}, {}, [])
+
+
 def test_the_importer_names_the_inputs_the_worker_drops(monkeypatch):
-    """The worker drops a literal input that the node of its ComfyUI does not
-    have, and keeps an input named `a.b` when `a` is one: the codec of a
-    video format, the seed of a sampling mode. The importer refuses a
-    workflow by that rule. It reads nothing under `src/` for it, so this
-    test asks the worker's own check about the same prompt."""
+    """The worker drops a literal input whose name, or whose part before the
+    first dot, is no input of the class, and keeps every other `a.b`: the
+    codec of a video format, the seed of a sampling mode. The importer names
+    what the worker drops, and the sub-inputs the worker keeps and ComfyUI
+    does not read. It reads nothing under `src/` for it, so this test asks
+    the worker's own check about the same prompt."""
     info = {"KSampler": spec({"seed": ["INT", {"default": 0}], "steps": ["INT", {"default": 20}]}),
-            "TextGenerate": INFO["TextGenerate"],
-            "SaveVideo": spec({"video": ["VIDEO"], **PREFIX,
-                               "format": ["COMFY_DYNAMICCOMBO_V3", {"options": []}]})}
+            "TextGenerate": SERVER_INFO["TextGenerate"], "SaveVideo": SERVER_INFO["SaveVideo"]}
     prompt = {"3": n("KSampler", seed=5, steps=4, bogus="x", model=["4", 0]),
               "5": n("TextGenerate", prompt="hi", sampling_mode="on",
-                     **{"sampling_mode.seed": 7, "sampling.seed": 1}),
+                     **{"sampling_mode.temperature": 0.7, "sampling_mode.seed": 7,
+                        "sampling_mode.typical_p": 0.9, "sampling.seed": 1}),
               "9": n("SaveVideo", format="mp4", video=["3", 0], filename_prefix="x",
                      **{"format.codec": "h264", "format.codec.encoding": "auto",
-                        "format.frames": ["3", 1], "old.sub": 1})}
+                        "format.frames": ["3", 1], "old.sub": 1, "filename_prefix.dir": "y"})}
     before = copy.deepcopy(prompt)
-    # An input the node of this ComfyUI does not have. A sub-input is known
-    # when its input is, however deep it sits.
     named = import_template.unknown_literals(prompt, info)
-    assert named == ["3:KSampler.bogus", "5:TextGenerate.sampling.seed", "9:SaveVideo.old.sub"]
+    assert named == ["3:KSampler.bogus", "5:TextGenerate.sampling.seed",
+                     "5:TextGenerate.sampling_mode.typical_p",
+                     "9:SaveVideo.filename_prefix.dir", "9:SaveVideo.old.sub"]
     assert prompt == before
     monkeypatch.syspath_prepend(str(ROOT / "src"))
     import comfy_runner
@@ -1311,10 +1386,15 @@ def test_the_importer_names_the_inputs_the_worker_drops(monkeypatch):
     report = comfy_runner.validate_workflow(8199, prompt)
     assert report["stripped_inputs"] == ["KSampler.bogus='x'", "TextGenerate.sampling.seed=1",
                                          "SaveVideo.old.sub=1"]
-    # What the importer does not name is what the worker queues.
-    assert prompt == {node_id: {**node, "inputs": {
-        name: value for name, value in node["inputs"].items()
-        if f"{node_id}:{node['class_type']}.{name}" not in named}}
+    # The worker queues the rest. What the importer names of it is a
+    # sub-input that the chosen option, or an input that is no combo, lacks.
+    dropped = {f"{node_id}:{node['class_type']}.{name}" for node_id, node in before.items()
+               for name in node["inputs"] if name not in prompt[node_id]["inputs"]}
+    assert len(dropped) == 3 and set(named) - dropped == {
+        "5:TextGenerate.sampling_mode.typical_p", "9:SaveVideo.filename_prefix.dir"}
+    assert {node_id: list(node["inputs"]) for node_id, node in prompt.items()} == {
+        node_id: [name for name in node["inputs"]
+                  if f"{node_id}:{node['class_type']}.{name}" not in dropped]
         for node_id, node in before.items()}
     # A class nobody knows is the converter's to refuse.
     assert import_template.unknown_literals({"8": n("Unknown", a=1)}, info) == []
@@ -1345,10 +1425,15 @@ SERVER_INFO = {
         {"mtp": ["COMBO", {"default": "auto", "options": ["auto", "off"]}]}, output=["STRING"]),
     "CreateVideo": INFO["CreateVideo"], "ImageFromBatch": INFO["ImageFromBatch"],
     "GetVideoComponents": INFO["GetVideoComponents"],
-    # Every format of the real node asks for a codec, a combo of its own.
+    # Every format of the real node asks for a codec, a combo of its own, and
+    # h264 may be encoded again at a quality the workflow names.
     "SaveVideo": spec({"video": ["VIDEO"], **PREFIX, "format": ["COMFY_DYNAMICCOMBO_V3", {
         "options": [{"key": key, "inputs": {"required": {"codec": ["COMFY_DYNAMICCOMBO_V3", {
-            "options": [{"key": codec, "inputs": {"required": {}}} for codec in ("auto", "h264")],
+            "options": [{"key": "auto", "inputs": {"required": {}}}, {"key": "h264", "inputs": {
+                "required": {}, "optional": {"encoding": ["COMFY_DYNAMICCOMBO_V3", {"options": [
+                    {"key": "auto", "inputs": {"required": {}}},
+                    {"key": "re-encode", "inputs": {"required": {
+                        "crf": ["FLOAT", {"default": 18.0}]}}}]}]}}}],
         }]}}} for key in ("auto", "mp4")]}]}, output_node=True),
     "SaveImage": INFO["SaveImage"], "PreviewImage": INFO["PreviewImage"],
     "PreviewAny": INFO["PreviewAny"], "SaveText": INFO["SaveText"],
@@ -1945,9 +2030,10 @@ def test_a_required_input_with_neither_a_link_nor_a_value_is_refused(repo, capsy
         assert printed.out == "" and printed.err.startswith(
             "error: ComfyUI refuses a prompt without these required inputs, and the converter "
             "found neither a link nor a value for them: 10:Boxes.editor_state "
-            "(BOUNDING_BOXES). The template leaves the input open, or holds its value in a "
-            "widget of a type the converter does not read. Give the value with --set, or "
-            "write the workflow by hand\nnodes (4):\n")
+            "(BOUNDING_BOXES). The template leaves the input open, holds its value in a "
+            "widget of a type the converter does not read, or does not choose the option "
+            "the input belongs to. Give the value with --set, or write the workflow by "
+            "hand\nnodes (4):\n")
     assert repo.files() == files and repo.lint == []
     # --set gives the value the template holds.
     given = '10.editor_state={"__value__": [{"x": 0, "y": 8}]}'
@@ -2229,6 +2315,61 @@ def test_keep_sampling_leaves_a_smoke_level_text_generation_as_the_template_has_
     assert json.loads(repo.manifest())["workflows"]["greedy"]["seed_overrides"] == {}
 
 
+def test_a_text_generation_switched_to_sampling_needs_what_sampling_requires(repo, capsys):
+    """`--set 5.sampling_mode="on"` on a text generation the command had made
+    greedy left it with none of the values sampling requires. With a saved
+    /object_info the command wrote that workflow and the lint passed it. A
+    server refuses the prompt: "Required input is missing: temperature"."""
+    write_template(repo, text_template("PreviewAny"))
+    files = repo.files()
+    on = ["--set", '5.sampling_mode="on"']
+    for more in ([], ["--dry-run"]):
+        assert import_template.main([*repo.base, *repo.offline, *on, *more]) == 1
+        printed = capsys.readouterr()
+        assert printed.out == "" and printed.err.startswith(
+            "error: ComfyUI refuses a prompt without these required inputs, and the converter "
+            "found neither a link nor a value for them: 5:TextGenerate.sampling_mode.seed "
+            "(INT), 5:TextGenerate.sampling_mode.temperature (FLOAT). The template leaves the "
+            "input open, holds its value in a widget of a type the converter does not read, "
+            "or does not choose the option the input belongs to. Give the value with --set, "
+            "or write the workflow by hand\nnodes (2):\n"
+            '  5  TextGenerate  prompt="hi" sampling_mode="on" mtp="off"\n')
+    # --set gives the values, after the one that chooses their option.
+    values = ["--set", "5.sampling_mode.temperature=0.7", "--set", "5.sampling_mode.seed=7"]
+    assert import_template.main([*repo.base, *repo.offline, *values, *on]) == 1
+    assert capsys.readouterr().err.startswith(
+        "error: --set 5.sampling_mode.temperature=0.7: node 5 (TextGenerate) has no input "
+        "sampling_mode.temperature\n")
+    # At reference level the text stays greedy, whatever asks for another:
+    # the lint would refuse the entry after it was written.
+    for more, said in (([*on, *values], "5: sampling_mode must be 'off' (greedy decoding)"),
+                       (["--set", '5.mtp="auto"'], "5: mtp must be set, and not to 'auto'")):
+        for dry in ([], ["--dry-run"]):
+            assert import_template.main([*repo.base, *repo.offline, "--level", "reference",
+                                         *more, *dry]) == 1
+            assert capsys.readouterr().err.startswith(
+                "error: a reference-level output is compared with its reference, so its text "
+                f"is generated the same on every run: {said}. The lint asks this of every "
+                "reference-level workflow: use --level smoke for one that samples\nnodes (2):\n")
+    # Sampling values next to a mode that reads none of them say nothing to
+    # ComfyUI, and the run would go on without them.
+    assert import_template.main([*repo.base, *repo.offline, "--keep-sampling", "--set",
+                                 '5.sampling_mode="off"']) == 1
+    assert capsys.readouterr().err.startswith(
+        "error: the node of this ComfyUI does not have these inputs, so a run would go on "
+        "without the values they hold: 5:TextGenerate.sampling_mode.seed, "
+        "5:TextGenerate.sampling_mode.temperature. The template was made for another version "
+        "of the node, or a --set chose an option that does not take them\nnodes (2):\n")
+    assert repo.files() == files and repo.lint == []
+    assert import_template.main([*repo.base, *repo.offline, *on, *values]) == 0
+    written = repo.root / "manifest" / "workflows" / "small_i2i_api.json"
+    assert json.loads(written.read_text(encoding="utf-8"))["5"] == n(
+        "TextGenerate", prompt="hi", sampling_mode="on", mtp="off",
+        **{"sampling_mode.temperature": 0.7, "sampling_mode.seed": 7})
+    entry = json.loads(repo.manifest())["workflows"]["small_i2i"]
+    assert (entry["level"], entry["seed_overrides"]) == ("smoke", {"5": {"sampling_mode.seed": 7}})
+
+
 def clip_template():
     """The small template with a clip made of its picture, and saved."""
     template = small_template()
@@ -2256,7 +2397,18 @@ def test_a_template_that_saves_a_clip_is_imported_with_its_codec(repo, capsys):
     assert written["15"] == n("SaveImage", filename_prefix="small_i2i", images=["14", 0])
     entry = json.loads(repo.manifest())["workflows"]["small_i2i"]
     assert "output_kind" not in entry and entry["seed_overrides"] == {"3": {"seed": 7}}
-    assert repo.lint == ["ran"] and "error" not in capsys.readouterr().err
+    said = capsys.readouterr().err
+    assert repo.lint == ["ran"] and "error" not in said
+    # The limit a smoke-level clip is held to was measured on made-up clips
+    # only, and the README asks for clips of the model first. While every
+    # template with a clip was refused, nobody had to be told.
+    note = ("note: node 9 saves a clip, and the limit the smoke check holds a clip to rests "
+            "on made-up clips: measure clips of this model against it before the workflow "
+            "is merged (README, Smoke level)\n")
+    assert note in said
+    assert import_template.main([*repo.base[:2], "compared", *repo.base[3:], *repo.offline,
+                                 "--level", "reference"]) == 0
+    assert "saves a clip" not in capsys.readouterr().err
 
 
 def test_audio_has_no_reference_level_yet(repo, capsys):
