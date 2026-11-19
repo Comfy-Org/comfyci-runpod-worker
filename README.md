@@ -312,9 +312,11 @@ workflows), is written by hand. The rules are the ones the command follows.
    approved reference, the golden. `"level": "smoke"` puts it at **smoke
    level**: it only has to finish and to write usable files (see
    [Smoke level](#smoke-level)). A smoke-level entry has no golden, so its
-   `thresholds` and `golden_tag` are null and step 5 falls away. Use it where
-   an output cannot be the same on every run, or where nothing can compare
-   it yet. It does not catch a wrong but plausible output.
+   `thresholds` and `golden_tag` are null and step 5 falls away. Nothing has
+   to be approved before it runs, so it says `"enabled": true` in the pull
+   request that adds it. Use it where an output cannot be the same on every
+   run, or where nothing can compare it yet. It does not catch a wrong but
+   plausible output.
 
    A smoke-level entry can say what its author knows about the output in
    `expect`. Every key is optional: `width` and `height` (the PNG files),
@@ -340,6 +342,11 @@ workflows), is written by hand. The rules are the ones the command follows.
    ComfyUI reads them from the volume. A model that lives in a subfolder of a
    models directory keeps the subfolder in its `name`, the way the loader's
    combo lists it (`"name": "bbox/face_yolov8m.pt", "directory": "ultralytics"`).
+   For a workflow made from a template, a model's `url` is the link the
+   template gives, also where the host has renamed the repository since: the
+   old name redirects, and the sync follows it. A file that another entry
+   already has keeps that entry's `url`: the lint wants one `url` for one
+   file, and the sync downloads a file again when its `url` changes.
 
    A workflow that uses custom nodes lists its packs under `custom_nodes`
    (names from `manifest/custom_nodes.json`) and restricts itself with `lanes`
@@ -383,6 +390,53 @@ workflows), is written by hand. The rules are the ones the command follows.
      most 1 (see [Verdicts](#verdicts)).
    - Input images are listed under `models` with `"directory": "input"`, as
      for any workflow.
+
+   **A 3D workflow** (a model that makes a mesh, like the
+   `hunyuan3d_2_1_t23d` entry) is an image workflow: a picture of the mesh
+   is its main output, and the mesh is a second file. The two Hunyuan3D
+   workflows here are graphs made by hand, after their templates. However
+   one is made, make sure of this:
+
+   - The entry names no `output_kind`: the main output is a picture.
+   - `RenderMesh` makes that picture from the mesh, and a `SaveImage` with
+     `filename_prefix` equal to the workflow id saves it. Without a camera
+     the node frames the mesh by itself. The picture is the run's thumbnail,
+     and what a reference would compare.
+   - `SaveGLB` saves the same mesh with `filename_prefix` `<id>_mesh`. A
+     template's own prefix has a folder (`3d/ComfyUI`), which the lint
+     refuses. A template that ends in `Save3DAdvanced` asks for the state of
+     the frontend's 3D viewer, which a run does not have: save the mesh with
+     `SaveGLB` there too.
+   - The picture then sorts before the mesh by name: `<id>_00001_.png`,
+     `<id>_mesh_00001_.glb`. It is the smaller file too. A run's files
+     travel in the job's answer, and the worker only lists what does not
+     fit. So a mesh that is too large is the file left out, never the
+     picture.
+   - Keep the files small. The two Hunyuan3D workflows decode at
+     `octree_resolution` 128 where their templates say 256, for a mesh file
+     of a quarter the size.
+   - Start at smoke level. Whether a mesh comes out the same on every run
+     is known only once it has run on the workers: `smoke.files` in each
+     run's cell has the sha256 of every file.
+
+   **A sound workflow** (like the `ace_step_15_t2a` entry) saves a FLAC
+   file as its main output. `ace_step_15_t2a` is what the command at the
+   top of [Adding a workflow](#adding-a-workflow) writes, file and entry.
+   However one is made, make sure of this:
+
+   - The entry says `"output_kind": "audio"` and `"level": "smoke"`.
+   - The graph ends in `SaveAudioAdvanced` with `format` `"flac"` and
+     `filename_prefix` equal to the workflow id. ComfyUI then writes
+     `<id>_00001.flac`, with no underscore before the dot.
+   - Keep it short. The file is sent in the job's answer, and one over the
+     worker's size limit is not sent: it is then checked by its size only.
+     `ace_step_15_t2a` makes 30 seconds where its template says 120. The
+     length is set in two nodes there, the text encoder's `duration` and the
+     latent's `seconds`, and the entry says it once more:
+     `"expect": {"seconds": 30}`.
+   - Every node with a seed is in `seed_overrides`. A sound model can have
+     one outside its sampler: the ACE-Step text encoder samples audio codes
+     from its own.
 
 3. Check it. `python -m pytest scripts/tests -q` lints the manifest against
    every workflow it references (loaded files and `models` match both ways,
@@ -1025,8 +1079,32 @@ once a week. **GPU regression (nightly and weekly)**
 `python scripts/lanes.py cadence nightly` prints the plan. With no such lane
 the plan is `[]`, it says why each lane of the cadence is left out, and the
 run ends after its plan job. So a lane can be declared before its endpoint
-exists, which is the state of both lanes today: no workflow has either
-cadence yet, and neither lane has an endpoint.
+exists, which is the state of both lanes today: neither has an endpoint. The
+nightly lane has its first workflows, and no workflow has the weekly cadence
+yet.
+
+The nightly lane's first three workflows, all at smoke level:
+
+| Workflow | What it runs | Files of a run | New on the volume |
+|---|---|---|---|
+| `hunyuan3d_2_1_t23d` | text to 3D: a picture from Z-Image Turbo (8 steps), then Hunyuan3D 2.1 (30 steps) and a mesh at octree resolution 128 | `hunyuan3d_2_1_t23d_00001_.png` (the mesh, rendered), `hunyuan3d_2_1_t23d_00002_.png` (the picture it was made from), `hunyuan3d_2_1_t23d_mesh_00001_.glb` | `hunyuan_3d_v2.1.safetensors`, 7.37 GB. The three Z-Image files are there for `z_image_turbo_t2i` |
+| `hunyuan3d_2_mv_turbo_mv23d` | multiview to 3D: four views of one object, Hunyuan3D 2 MV Turbo (20 steps), a mesh at octree resolution 128 | `hunyuan3d_2_mv_turbo_mv23d_00001_.png` (the mesh, rendered), `hunyuan3d_2_mv_turbo_mv23d_mesh_00001_.glb` | `hunyuan3d-dit-v2-mv-turbo_fp16.safetensors`, 4.93 GB, and the four views, 3.9 MB |
+| `ace_step_15_t2a` | text to audio: a song of 30 seconds from ACE-Step 1.5 turbo (8 steps) | `ace_step_15_t2a_00001.flac`, 30 seconds long (`expect`) | `ace_step_1.5_turbo_aio.safetensors`, 10.03 GB |
+
+None of them has run on a worker yet: the lane has no endpoint. The model
+sync does not wait for one. A nightly workflow's models are counted against
+the volume and downloaded to it on the merge, like those of a per-commit
+workflow (`lanes.volume_workflows`).
+
+Once the lane has an endpoint, merge a new nightly workflow clear of the
+lane's next run. The sync starts on the merge and takes minutes for files of
+this size. A run that starts before it has ended cannot test the workflow
+(`missing_model`), and a workflow that stays untested makes a nightly run
+red.
+
+`hunyuan3d_2_1_t23d` joins its two pictures with `ImageBatch`, a node that
+ComfyUI marks as deprecated. If a commit removes it, the workflow ends in
+`validation_error` from that night on: put `BatchImagesNode` in its place.
 
 - **One lane per cadence.** Everything the suite stores about a commit on a
   lane assumes that one run wrote it: the summary, the start marker, the

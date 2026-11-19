@@ -955,6 +955,42 @@ def test_the_per_commit_matrix_is_what_it_was_before_workflows_had_a_cadence():
          "workflows": "image,pack"}]
 
 
+def test_the_nightly_workflows_of_the_manifest_run_on_the_nightly_lane_alone():
+    """The committed files. A workflow with the nightly cadence is in no
+    per-commit plan, whatever endpoints the lanes have. The nightly run plans
+    it from the day its lane has an endpoint, and plans nothing before."""
+    workflows = MANIFEST["workflows"]
+    first = ("hunyuan3d_2_1_t23d", "hunyuan3d_2_mv_turbo_mv23d", "ace_step_15_t2a")
+    nightly = [wf_id for wf_id, entry in workflows.items()
+               if lanes_mod.cadence_of(entry) == "nightly"]
+    assert set(first) <= set(nightly)
+    pending, ready = copy.deepcopy(REGISTRY), copy.deepcopy(REGISTRY)
+    pending["lanes"][NIGHTLY]["endpoint_id"] = None
+    ready["lanes"][NEW]["endpoint_id"] = "abc123"
+    ready["lanes"][NIGHTLY]["endpoint_id"] = ready["lanes"][WEEKLY]["endpoint_id"] = "ep-nw"
+    for registry in (pending, ready):
+        rows = lanes_mod.per_commit_matrix(registry, manifest=MANIFEST)
+        planned = {wf_id for row in rows for wf_id in row["workflows"].split(",")}
+        assert planned and not planned & set(nightly)
+    assert lanes_mod.cadence_matrix(pending, "nightly", manifest=MANIFEST) == []
+    assert lanes_mod.cadence_left_out(pending, "nightly", None, MANIFEST) == [
+        f"{NIGHTLY}: no endpoint_id yet"]
+    # With the endpoint: the enabled ones, in the order of the manifest, in
+    # one job with the lane's time limit.
+    assert lanes_mod.cadence_matrix(ready, "nightly", manifest=MANIFEST) == [
+        {"lane": NIGHTLY, "prefix": f"regression/lanes/{NIGHTLY}", "endpoint_id": "ep-nw",
+         "timeout_minutes": REGISTRY["lanes"][NIGHTLY]["timeout_minutes"],
+         "workflows": ",".join(w for w in nightly if workflows[w]["enabled"])}]
+    weekly = lanes_mod.cadence_matrix(ready, "weekly", manifest=MANIFEST)
+    assert not {w for row in weekly for w in row["workflows"].split(",")} & set(nightly)
+    # The README's table has a row for each of the lane's first three. It is
+    # asked of no other workflow: one that moves to the nightly cadence later
+    # needs that one word in the manifest and nothing else.
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    for wf_id in first:
+        assert f"\n| `{wf_id}` | " in readme, wf_id
+
+
 def test_the_matrix_of_a_nightly_or_weekly_run():
     """The lanes of the cadence that have an endpoint and an enabled workflow.
     With none the matrix is empty and the run ends after its plan, so a lane

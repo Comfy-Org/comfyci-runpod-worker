@@ -908,3 +908,153 @@ def test_the_text_workflows_are_declared_as_text_and_write_their_own_text_file()
     assert WORKFLOWS["llm_qwen3vl_4b_it2t"]["timeout_s"] is None
     # An image entry never names its kind: absent means image.
     assert not [w for w, e in WORKFLOWS.items() if e.get("output_kind") == "image"]
+
+
+NIGHTLY_LANE = "py313-torch2.14.1-cu130-nightly"
+THREE_D = ("hunyuan3d_2_1_t23d", "hunyuan3d_2_mv_turbo_mv23d")
+
+
+def _missing_files(wf_id: str, names: list[str]) -> list[str]:
+    """What the smoke checks say about a run of a manifest workflow that
+    listed these files and sent none of them. A file that was not sent passes
+    on its size, so what is left is the save nodes that have no file."""
+    entry = WORKFLOWS[wf_id]
+    record = {"outputs": [{"filename": name, "bytes": 4096, "truncated": True}
+                          for name in names]}
+    found = smoke.check_outputs(None, record, _load_workflow(entry),
+                                lanes_mod.expect_of(entry), "ok")
+    return [problem["text"] for problem in found["problems"]]
+
+
+def _repository(wf_id: str, name: str) -> str:
+    """The Hugging Face repository in the url of one model file of a workflow."""
+    (model,) = [m for m in WORKFLOWS[wf_id]["models"] if m["name"] == name]
+    return model["url"].removeprefix("https://huggingface.co/").split("/resolve/")[0]
+
+
+def test_the_3d_workflows_run_nightly_at_smoke_level_and_save_a_picture_and_a_mesh():
+    """What the two Hunyuan3D workflows rely on, so an edit cannot drop it
+    quietly. A 3D workflow is an image workflow: the picture of its mesh is
+    the main output, and the GLB is a second file."""
+    for wf_id in THREE_D:
+        entry = WORKFLOWS[wf_id]
+        wf = _load_workflow(entry)
+        assert entry["enabled"] is True, "a smoke-level workflow needs no second pull request"
+        assert (lanes_mod.level_of(entry), lanes_mod.cadence_of(entry)) == ("smoke", "nightly")
+        assert output_kinds.kind_of(entry) == "image"
+        # The cadence finds the lane. A `lanes` list would tie the entry to one lane id.
+        assert entry.get("lanes") is None
+        assert lanes_mod.lanes_for_workflow(entry, LANES) == [NIGHTLY_LANE]
+        # The save nodes, as the smoke checks read them: the picture under the
+        # workflow id, the mesh under `<id>_mesh`.
+        assert [(s["node"], s["class"], s["prefix"]) for s in smoke.expected_outputs(wf)] == [
+            ("save_png", "SaveImage", wf_id), ("save_glb", "SaveGLB", f"{wf_id}_mesh")]
+        # The names ComfyUI gives the two files. Each must be there. The
+        # picture sorts first by name, and it is the smaller file. So when
+        # the two do not fit a job's answer together, the mesh is the file
+        # that is left out.
+        png, glb = f"{wf_id}_00001_.png", f"{wf_id}_mesh_00001_.glb"
+        assert png < glb
+        assert _missing_files(wf_id, [png, glb]) == []
+        assert _missing_files(wf_id, [png]) == [
+            f"SaveGLB wrote no 3D file with the prefix {wf_id}_mesh"]
+        assert _missing_files(wf_id, [glb]) == [
+            f"SaveImage wrote no .png file with the prefix {wf_id}"]
+        # The picture and the GLB are of the same mesh.
+        (render,) = [n for n in wf.values() if n["class_type"] == "RenderMesh"]
+        assert render["inputs"]["mesh"] == wf["save_glb"]["inputs"]["mesh"]
+        assert (render["inputs"]["width"], render["inputs"]["height"]) == (1024, 1024)
+        # Reduced for this suite: the templates decode at 256, a mesh file four times the size.
+        (decode,) = [n for n in wf.values() if n["class_type"] == "VAEDecodeHunyuan3D"]
+        assert decode["inputs"]["octree_resolution"] == 128
+    # The nightly lane reads its models from the volume. So the model sync
+    # fetches these on the merge, before the lane has an endpoint.
+    assert set(THREE_D) <= set(lanes_mod.volume_workflows(MANIFEST, LANES))
+
+    # Text to 3D starts with the stage of the per-commit Z-Image workflow: the
+    # same three files, which the volume holds already.
+    chain_id, views_id = THREE_D
+    chain, wf = WORKFLOWS[chain_id], _load_workflow(WORKFLOWS[chain_id])
+    shared = {(m["directory"], m["name"]) for m in WORKFLOWS["z_image_turbo_t2i"]["models"]}
+    own = {(m["directory"], m["name"]) for m in chain["models"]} - shared
+    assert len(shared) == 3 and own == {("checkpoints", "hunyuan_3d_v2.1.safetensors")}
+    # A model's url is the link its template gives. Hugging Face has renamed
+    # both repositories since and redirects the old names. The importer
+    # writes a template's link too, so another workflow with one of these
+    # files names the url this entry has, as `test_shared_model_keys_agree`
+    # asks.
+    assert _repository(chain_id, "hunyuan_3d_v2.1.safetensors") == (
+        "Comfy-Org/hunyuan3D_2.1_repackaged")
+    assert _repository(views_id, "hunyuan3d-dit-v2-mv-turbo_fp16.safetensors") == (
+        "Comfy-Org/hunyuan3D_2.0_repackaged")
+    # One node saves two pictures: the render first, then the picture the mesh
+    # was made from. The first by name is the thumbnail and the output sha.
+    assert wf["save_png"]["inputs"]["images"] == ["frames", 0]
+    assert list(wf["frames"]["inputs"].values()) == [["render", 0], ["t2i_decode", 0]]
+    assert _missing_files(chain_id, [f"{chain_id}_00001_.png", f"{chain_id}_00002_.png",
+                                     f"{chain_id}_mesh_00001_.glb"]) == []
+    assert set(chain["seed_overrides"]) == {"t2i_sampler", "hy_sampler"}
+    # Two models load, one after the other.
+    assert chain["timeout_s"] == 1200
+
+    # Multiview to 3D reads its four views from the volume's input folder.
+    views, wf = WORKFLOWS[views_id], _load_workflow(WORKFLOWS[views_id])
+    (cond,) = [n for n in wf.values() if n["class_type"] == "Hunyuan3Dv2ConditioningMultiView"]
+    assert sorted(cond["inputs"]) == ["back", "front", "left", "right"]
+    loaded = sorted(n["inputs"]["image"] for n in wf.values() if n["class_type"] == "LoadImage")
+    assert loaded == sorted(m["name"] for m in views["models"] if m["directory"] == "input")
+    assert len(loaded) == 4
+    assert wf["save_png"]["inputs"]["images"] == ["render", 0]
+    assert views["timeout_s"] == 900
+
+
+def test_the_audio_workflow_runs_nightly_at_smoke_level_and_saves_thirty_seconds_of_flac():
+    """What `ace_step_15_t2a` relies on, so an edit cannot drop it quietly.
+    Nothing compares sound yet: an audio workflow is at smoke level, and its
+    file is checked as a FLAC file."""
+    wf_id = "ace_step_15_t2a"
+    entry = WORKFLOWS[wf_id]
+    wf = _load_workflow(entry)
+    assert entry["enabled"] is True, "a smoke-level workflow needs no second pull request"
+    assert (output_kinds.kind_of(entry), lanes_mod.level_of(entry),
+            lanes_mod.cadence_of(entry)) == ("audio", "smoke", "nightly")
+    assert entry.get("lanes") is None
+    assert lanes_mod.lanes_for_workflow(entry, LANES) == [NIGHTLY_LANE]
+    assert wf_id in lanes_mod.volume_workflows(MANIFEST, LANES)
+    # One save node, the one the template has: FLAC under the workflow id.
+    # ComfyUI writes the counter with no underscore after it.
+    assert smoke.expected_outputs(wf) == [
+        {"node": "106", "class": "SaveAudioAdvanced", "prefix": wf_id, "extensions": [".flac"]}]
+    assert wf["106"]["inputs"]["format"] == "flac"
+    assert _missing_files(wf_id, [f"{wf_id}_00001.flac"]) == []
+    assert _missing_files(wf_id, []) == [
+        f"SaveAudioAdvanced wrote no .flac file with the prefix {wf_id}"]
+    # The length is said in three places, and they agree: the text encoder,
+    # the empty latent and the entry's `expect`. The template makes 120 s.
+    seconds = lanes_mod.expect_of(entry)["seconds"]
+    assert wf["94"]["inputs"]["duration"] == wf["98"]["inputs"]["seconds"] == seconds == 30
+    # The latent has 25 frames a second and the VAE makes 1,920 samples of
+    # each, at 48,000 Hz: a whole number of frames, so the file is 30.0 s long.
+    assert round(seconds * 48000 / 1920) * 1920 / 48000 == seconds
+    # The file is sent in the job's answer, as base64. It has to stay under
+    # 7 MiB, which is 9.8 MB as base64: RunPod's payload limit for `/run` is
+    # 10 MB. A FLAC file can be larger than the samples it holds. The encoder
+    # cuts 48,000 Hz sound into blocks of 4,608 samples, and its largest
+    # frame keeps a block's samples as they are, with one more bit for the
+    # side channel and 24 bytes of headers: 19,032 bytes for 16 bits and two
+    # channels. So 30 s are 5.96 MB of frames at most, where the samples are
+    # 5.76 MB and noise came to 5.85 MB. The bound passes 7 MiB at 37 s. The
+    # 64 KiB are for the file's metadata, which holds the prompt.
+    blocks = -(-seconds * 48000 // 4608)
+    assert blocks * (24 + (33 * 4608 + 7) // 8) + 64 * 1024 < 7 * 1024 * 1024
+    # Every seed is pinned: the sampler's, and the text encoder's, which
+    # samples the audio codes.
+    assert {nid for nid, n in wf.items() if "seed" in n["inputs"]} == {"3", "94"}
+    assert entry["seed_overrides"] == {"3": {"seed": 31}, "94": {"seed": 31}}
+    # One file holds the model, its text encoder and its VAE. Its url is the
+    # template's link, which Hugging Face redirects to the repository's new
+    # name.
+    assert [m["name"] for m in entry["models"]] == ["ace_step_1.5_turbo_aio.safetensors"]
+    assert _repository(wf_id, "ace_step_1.5_turbo_aio.safetensors") == (
+        "Comfy-Org/ace_step_1.5_ComfyUI_files")
+    assert entry["timeout_s"] == 900
