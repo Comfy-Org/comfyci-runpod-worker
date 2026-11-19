@@ -1048,6 +1048,42 @@ needs no line in `docker/extra_model_paths.yaml`. The steps, in order:
    first file that fails for good stops the others: the job is over then, and
    its time is billed.
 
+**A disk that is fuller than it says.** Step 3 goes by the free space the
+system reports. On a worker that can be the free space of the host's disk and
+not of the `disk_gb` the worker is held to: then step 3 removes nothing and
+the worker fills up. So when a write finds the disk full ("no space left on
+device"), the worker removes every fetched file the job does not need, and
+the Hugging Face cache under the rule of step 3, whatever is reported as
+free. The files whose write failed that way then get one more try. This
+happens once in a job, also when several downloads find the disk full at the
+same moment. When nothing could be removed, or the disk is full again, the
+file has failed: "disk full while writing". What was removed is counted in
+`model_fetch.evicted`, like the files of step 3. A file the job needs, a
+file it has just finished, the files git tracks and the volume are never
+removed.
+
+**A time limit for the download.** The runner tells the job how long its
+download may take: `fetch_timeout_s` in the job input, beside
+`fetch_missing`. It is the time the runner waits for the download (the
+models' bytes at 25 MB a second), and 600 seconds at the least: a small
+download is connections and waits more than it is bytes. It ends 60 seconds
+or more before the time is over that the runner gives the job for its
+download and its workflow together, so the worker's answer is there before
+the runner would stop waiting. When the time is up, the worker stops the
+downloads and answers at once. The files that were complete stay and are
+listed for the next job, the part files go, and the workflow does not run. A
+download looks for the stop between two pieces of 1 MiB, and on a connection
+that brings less than that in a second it takes what comes, so it ends with
+the next bytes. One whose piece does not come is left behind after 10
+seconds, so a connection that has gone silent cannot hold the answer back,
+and it changes no file after that. The answer is a `model_fetch_error` whose
+`failure` says `"reason": "timed_out"` and what the download reached: "the
+download was too slow: 12.4 of 56.6 GB in 600 s (20.7 MB/s), 2 of 5 files
+complete". Such a job is not tried again (see the table below). A worker
+image from before the limit ignores the key, and a job without the key has
+no limit. Both download for as long as it takes, and a download that is too
+slow then ends as the runner's own timeout, with no speed in its record.
+
 A model entry that cannot be fetched is a failed download of that file, not a
 job that breaks: a URL that is not http or https, a name that is not a plain
 path below the models folder, a file that cannot be put in its place.
@@ -1081,6 +1117,7 @@ with the run.
 | `worker_status` | Meaning | Tried again |
 |---|---|---|
 | `model_fetch_error` | a download failed: the network, HTTP 5xx or 429, a wrong sha256, a full disk, a refusal by a storage host that the download was redirected to | yes: right away on a per-commit lane, in the pass at the end of a nightly or weekly run |
+| `model_fetch_error` with `"reason": "timed_out"` | the worker stopped the download at the job's time limit | no: a second download can cost as much as the first. No second attempt, no pass at the end, and the cron does not test the commit again for it. `reason` is in the job's `failure`, in `run.json` and in the workflow's cell, and the cell's `error` is the sentence of what was reached |
 | `model_access_error` | the model's own host answered 401, 403 or 404: no token, a licence that is not accepted, a file that moved | no. A person has to act. The job's `failure` names the host, the repository and the answer (`host`, `repo`, `http_status`), and the report says what to do |
 
 **What the runner does** (`scripts/submit_and_poll.py`,
@@ -1089,8 +1126,10 @@ waits longer for it: the bytes of the workflow's models at 25 MB a second,
 which is slower than any download measured. A nightly or weekly run counts
 that time when it asks whether a job still fits before its deadline, and
 `validate` when it asks whether a job can ever start. **Golden baselines**
-tells its two runs the same. The job input and the run record of a lane with
-its models on the volume are what they always were.
+tells its two runs the same. Each such job is also told its time limit for
+the download, and a job the worker stopped at that limit is not submitted
+again. The job input and the run record of a lane with its models on the
+volume are what they always were.
 
 **What is recorded.** The `run.json` of a job that fetched has `model_fetch`:
 `files`, `reused` and `evicted` (how many), `bytes` and `seconds` of the
@@ -1098,7 +1137,9 @@ downloads with `mb_per_s`, `reused_bytes`, `streams`, and `token` (whether
 the worker had one). `timings.model_fetch_s` is the whole step, apart from
 `prompt_exec_s`. The lane's report then has the columns **Models GB** and
 **Fetch s (MB/s)** and a **Model downloads** row in its facts. That is the
-standing measurement of download speed.
+standing measurement of download speed. For a download that the time limit
+stopped, `bytes` and `mb_per_s` count what the unfinished files had received
+too, so the two columns show how slow it was.
 
 **What the lint asks** of a workflow that runs on such a lane, switched on or
 not (`scripts/tests/test_manifest_lint.py`):
