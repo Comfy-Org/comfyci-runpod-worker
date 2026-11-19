@@ -16,7 +16,8 @@ What it does to the template, step by step:
 
 * converts it the way the frontend's Export (API) does and picks the branch a
   constant switch selects (``template_api_export.py``)
-* sets every ``TextGenerate`` node to greedy decoding, unless ``--keep-sampling``
+* sets every ``TextGenerate`` node to greedy decoding. ``--keep-sampling``
+  leaves a smoke-level workflow as the template has it
 * names each output after the workflow id and adds the picture a video or a
   mesh is shown and compared by (``normalise_sinks``)
 * drops the preview nodes
@@ -41,11 +42,11 @@ node instance (``CustomCombo``), one that needs nodes the server does not
 have, or one that saves a file no check can read, is refused with the reason.
 
 What the manifest lint would refuse in the new entry is refused before
-anything is written, and a dry run says it too: a literal sub-input of a
-dynamic combo, a model folder the worker does not search, a file the manifest
-lists as another file, a seed nothing pins. A file the manifest already lists
-is written the way the manifest has it. A rule that adds up the whole
-manifest, like the room on the volume, is the lint's alone.
+anything is written, and a dry run says it too: a sampled text generation at
+reference level, a model folder the worker does not search, a file the
+manifest lists as another file, a seed nothing pins. A file the manifest
+already lists is written the way the manifest has it. A rule that adds up
+the whole manifest, like the room on the volume, is the lint's alone.
 """
 
 from __future__ import annotations
@@ -224,9 +225,10 @@ def fill_file_combos(object_info: dict[str, Any], template: dict[str, Any]) -> s
 def greedy_text(prompt: dict[str, dict[str, Any]], object_info: dict[str, Any]) -> None:
     """Make every text generation greedy: no sampling, no multi-token head.
 
-    A sampled text differs from run to run, and the worker strips the
-    ``sampling_mode.<name>`` values that sampling needs. An input the node of
-    this ComfyUI does not have is not added.
+    A sampled text can differ from run to run, and a reference-level output
+    is compared with its reference. The sub-inputs that only sampling reads
+    (``sampling_mode.<name>``) go with it. An input the node of this ComfyUI
+    does not have is not added.
     """
     for node in prompt.values():
         if not node["class_type"].startswith("TextGenerate"):
@@ -590,26 +592,15 @@ def _node_inputs(object_info: dict[str, Any], class_type: str) -> dict[str, Any]
     return {**(spec.get("required") or {}), **(spec.get("optional") or {})}
 
 
-def dotted_literals(prompt: dict[str, dict[str, Any]]) -> list[str]:
-    """The literal ``name.sub`` inputs: the sub-inputs of a dynamic combo.
-
-    The manifest lint refuses a workflow that has one
-    (``test_no_input_the_worker_would_strip``), because the worker's image
-    drops such an input before it queues the prompt. This is the lint's own
-    rule, and a test holds the two together: the rule goes there first, on
-    the day the image that runs keeps these inputs.
-    """
-    return sorted(f"{node_id}:{node['class_type']}.{name}" for node_id, node in prompt.items()
-                  for name, value in node["inputs"].items()
-                  if "." in name and not isinstance(value, list))
-
-
 def unknown_literals(prompt: dict[str, dict[str, Any]], object_info: dict[str, Any]) -> list[str]:
     """The literal inputs a node of this ComfyUI does not have.
 
     The worker drops such an input before it queues the prompt, and ComfyUI
     would not read it either: the run would go on without the value the
-    template has. A sub-input is known when its combo is.
+    template has. An input named ``a.b`` is a sub-input of the input ``a``
+    (the codec of a ``SaveVideo`` format, the seed of a sampling mode), and
+    ``/object_info`` lists only ``a``: such an input is known when ``a`` is,
+    which is the worker's rule too.
     """
     return sorted(
         f"{node_id}:{node['class_type']}.{name}" for node_id, node in prompt.items()
@@ -716,16 +707,6 @@ def finish_prompt(template: dict[str, Any], object_info: dict[str, Any], workflo
             if not _finite(value):
                 raise ConversionError(
                     f"{node_id}.{name} is {value!r}, a number JSON cannot hold")
-    dotted = dotted_literals(prompt)
-    if dotted:
-        raise ConversionError(
-            "the worker drops these inputs before it queues the prompt, so the workflow "
-            f"cannot run as the template has it yet: {', '.join(dotted)}. They are "
-            "sub-inputs of a dynamic combo, which the worker keeps once its image is "
-            "rebuilt with the fix. The manifest lint refuses them until then"
-            + (". Without --keep-sampling the text generation is made greedy and "
-               "needs none of them" if keep_sampling else "")
-        )
     unknown = unknown_literals(prompt, object_info)
     if unknown:
         raise ConversionError(
@@ -1102,16 +1083,24 @@ def _seed_source(prompt: dict[str, dict[str, Any]], node_id: str, name: str) -> 
     return source_id, held[0]
 
 
+def is_seed(name: str) -> bool:
+    """Whether an input is a seed, by its name. A sub-input goes by its last
+    part: ``sampling_mode.seed`` is the seed of a sampled text generation."""
+    return name.rsplit(".", 1)[-1] in SEED_NAMES
+
+
 def seed_overrides(prompt: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """The seed inputs a run must pin, with the values the template already has.
 
     A seed that a link feeds is pinned where its number is (``_seed_source``):
-    the lint asks every workflow that has a seed input for an override.
+    the lint asks every workflow that has a seed input for an override. A
+    sub-input is named whole, as the workflow file has it: the runner writes
+    an override over the input of that name, dot or no dot.
     """
     overrides: dict[str, dict[str, Any]] = {}
     for node_id, node in prompt.items():
         for name, value in node["inputs"].items():
-            if name not in SEED_NAMES:
+            if not is_seed(name):
                 continue
             if isinstance(value, int):
                 overrides.setdefault(node_id, {})[name] = value
@@ -1709,8 +1698,8 @@ def early_refusal(args: argparse.Namespace, workflow_id: str, seen: str,
     if args.timeout_s is not None and not 0 < args.timeout_s < 3600:
         return "--timeout-s is above 0 and under 3600, the endpoint's limit for a job"
     if args.keep_sampling and args.level != "smoke":
-        return ("--keep-sampling is for a smoke-level workflow: a reference-level text is "
-                "compared word for word, so it is generated without sampling")
+        return ("--keep-sampling is for a smoke-level workflow: a reference-level output is "
+                "compared with its reference, so its text is generated without sampling")
     if not args.print_entry:
         problem = _layout_problem(ROOT / "manifest" / "workflows.json", seen, manifest)
         if problem:

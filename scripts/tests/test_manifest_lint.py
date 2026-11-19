@@ -53,6 +53,7 @@ MAIN_SINKS = {"image": {"SaveImage"}, "text": {"SaveText"},
               "audio": {"SaveAudio", "SaveAudioAdvanced"}}
 # Save nodes that write a file no smoke check can read.
 UNCHECKED_SINKS = {"SaveAudioMP3", "SaveAudioOpus"}
+SEED_NAMES = ("seed", "noise_seed")
 INPUT_DIR = "/runpod-volume/models/input"
 ENDPOINT_EXEC_TIMEOUT_S = 3600
 # The network volume holds every model file of the manifest, and nothing ever
@@ -111,7 +112,11 @@ def _output_ancestors(wf: dict) -> set[str]:
 
 
 def _has_seed(wf: dict) -> bool:
-    return any("seed" in n["inputs"] or "noise_seed" in n["inputs"] for n in wf.values())
+    """Whether a node of the workflow has a seed input. A sub-input counts by
+    its last part: `sampling_mode.seed` is the seed of a sampled text
+    generation, and the runner's override names it whole."""
+    return any(name.rsplit(".", 1)[-1] in SEED_NAMES
+               for n in wf.values() for name in n["inputs"])
 
 
 def _level_problems(entry: dict) -> list[str]:
@@ -194,9 +199,9 @@ def _sink_problems(wf_id: str, entry: dict, wf: dict) -> list[str]:
 
 
 def _text_generation_problems(wf: dict) -> list[str]:
-    """Settings that make generated text differ from run to run. A text
-    workflow passes on an exact match, so it decodes greedily and without the
-    multi-token-prediction head, whose `auto` mode adapts to measured timings."""
+    """Settings that make generated text differ from run to run: sampling,
+    and the multi-token-prediction head, whose `auto` mode adapts to measured
+    timings."""
     problems = []
     for nid, n in wf.items():
         if not n["class_type"].startswith("TextGenerate"):
@@ -208,13 +213,15 @@ def _text_generation_problems(wf: dict) -> list[str]:
     return problems
 
 
-def _literal_dynamic_inputs(wf: dict) -> list[str]:
-    """Literal `name.sub` inputs (the sub-inputs of a dynamic combo). The
-    worker's validate_workflow knows only the top-level input names of
-    /object_info and strips these before the prompt is queued."""
-    return sorted(f"{nid}:{n['class_type']}.{name}" for nid, n in wf.items()
-                  for name, value in n["inputs"].items()
-                  if "." in name and not isinstance(value, list))
+def _compared_text_problems(entry: dict, wf: dict) -> list[str]:
+    """What is wrong with how a workflow generates text, for its level. A
+    reference-level output is compared: a text passes on an exact match, and
+    a picture made from a generated prompt is held against its reference. So
+    at reference level every text generation is greedy. At smoke level
+    nothing is compared, and a workflow may sample as its template does."""
+    if lanes_mod.level_of(entry) == "smoke":
+        return []
+    return _text_generation_problems(wf)
 
 
 def _volume_files(manifest: dict, lanes: dict) -> dict[str, int]:
@@ -416,16 +423,12 @@ def test_saves_its_compared_output_under_its_own_prefix(wf_id):
 
 
 @pytest.mark.parametrize("wf_id", sorted(WORKFLOWS))
-def test_no_input_the_worker_would_strip(wf_id):
-    assert _literal_dynamic_inputs(_load_workflow(WORKFLOWS[wf_id])) == []
-
-
-# The key itself, not kind_of(): an unknown kind is a failure of test_entry_shape
-# for that entry, not an error that stops every test of this file from running.
-@pytest.mark.parametrize("wf_id", sorted(w for w, e in WORKFLOWS.items()
-                                          if e.get("output_kind") == "text"))
 def test_text_workflows_generate_the_same_text_every_run(wf_id):
-    assert _text_generation_problems(_load_workflow(WORKFLOWS[wf_id])) == []
+    """Every workflow is asked, whatever its kind: a prompt that a text
+    generation writes decides the picture a reference is compared with. A
+    workflow without a text generation has nothing to get wrong here."""
+    entry = WORKFLOWS[wf_id]
+    assert _compared_text_problems(entry, _load_workflow(entry)) == []
 
 
 @pytest.mark.parametrize("wf_id", sorted(WORKFLOWS))
@@ -848,16 +851,31 @@ def test_the_importer_refuses_what_these_rules_refuse():
     together: a rule that changes or goes here takes the importer's with it."""
     import import_template
 
-    # Dotted literals. The rule goes once the image that runs keeps them:
-    # take `dotted_literals` out of the importer's `finish_prompt` then.
-    assert "test_no_input_the_worker_would_strip" in globals()
-    clip = {"1": {"class_type": "SaveVideo", "inputs": {
-        "format": "mp4", "format.codec": "h264", "video": ["2", 0], "format.audio": ["3", 0]}},
-        "2": {"class_type": "TextGenerate", "inputs": {"sampling_mode.seed": 1, "mtp": "off"}}}
-    assert _literal_dynamic_inputs(clip) == ["1:SaveVideo.format.codec",
-                                             "2:TextGenerate.sampling_mode.seed"]
-    for wf in (clip, *(_load_workflow(entry) for entry in WORKFLOWS.values())):
-        assert import_template.dotted_literals(wf) == _literal_dynamic_inputs(wf)
+    # A sampled text generation is for smoke level. The importer takes
+    # --keep-sampling there and nowhere else, and what it writes without the
+    # flag passes at reference level.
+    sampled = {"2": {"class_type": "TextGenerate", "inputs": {
+        "prompt": "x", "sampling_mode": "on", "sampling_mode.temperature": 0.7,
+        "sampling_mode.seed": 1, "mtp": "auto"}}}
+    assert _compared_text_problems({"level": "smoke"}, sampled) == []
+    assert _compared_text_problems({"level": "reference"}, sampled) != []
+
+    def keeping(level):
+        args = import_template.parse_args(["t", "--object-info", "x", "--cadence", "per-commit",
+                                           "--level", level, "--keep-sampling", "--print"])
+        return import_template.early_refusal(args, "lint_pair", "", {"workflows": {}})
+
+    assert keeping("smoke") is None
+    assert keeping("reference").startswith("--keep-sampling is for a smoke-level workflow")
+    greedy = json.loads(json.dumps(sampled))
+    import_template.greedy_text(greedy, {})
+    assert _compared_text_problems({"level": "reference"}, greedy) == []
+    # The seed of a sampled text generation is a sub-input. It is a seed on
+    # both sides, and its override names the input whole.
+    assert import_template.SEED_NAMES == SEED_NAMES
+    assert _has_seed(sampled) and not _has_seed(greedy)
+    assert import_template.seed_overrides(sampled) == {"2": {"sampling_mode.seed": 1}}
+    assert import_template.seed_overrides(greedy) == {}
     # The model folders the worker searches, read from the same file.
     assert import_template.model_folders() == _model_folders()
     # One folder and name is one file: the importer looks a file up by that key.
@@ -1096,18 +1114,32 @@ def test_moving_a_workflow_to_smoke_level_is_one_edit():
         assert _sink_problems(wf_id, moved, _load_workflow(moved)) == [], wf_id
 
 
-def test_text_generation_and_dynamic_input_rules():
+def test_text_generation_is_greedy_where_the_output_is_compared():
     greedy = {"1": {"class_type": "TextGenerateV2",
                     "inputs": {"sampling_mode": "off", "mtp": "off", "prompt": "x"}}}
     assert _text_generation_problems(greedy) == []
     sampled = {"1": {"class_type": "TextGenerateV2",
                      "inputs": {"sampling_mode": "on", "sampling_mode.seed": 1}}}
-    assert _text_generation_problems(sampled) == [
-        "1: sampling_mode must be 'off' (greedy decoding)", "1: mtp must be set, and not to 'auto'"]
-    assert _literal_dynamic_inputs(sampled) == ["1:TextGenerateV2.sampling_mode.seed"]
-    # A linked sub-input is not a literal: the worker keeps links.
-    linked = {"1": {"class_type": "TextEncodeQwenImage21", "inputs": {"images.image_1": ["2", 0]}}}
-    assert _literal_dynamic_inputs(linked) == []
+    said = ["1: sampling_mode must be 'off' (greedy decoding)",
+            "1: mtp must be set, and not to 'auto'"]
+    assert _text_generation_problems(sampled) == said
+    # The level decides, not the kind: the text may be the answer, or the
+    # prompt of a picture. An entry without a level is at reference level.
+    picture = {**sampled, "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}}}
+    for kind in ({}, {"output_kind": "text"}):
+        assert _compared_text_problems(kind, picture) == said
+        assert _compared_text_problems({**kind, "level": "reference"}, sampled) == said
+        assert _compared_text_problems({**kind, "level": "smoke"}, sampled) == []
+        assert _compared_text_problems(kind, greedy) == []
+    with pytest.raises(ValueError, match="unknown level"):
+        _compared_text_problems({"level": "main"}, sampled)
+    # The seed of a sampled text generation is a seed, so the entry pins it.
+    # A sub-input that only ends like one is none.
+    assert _has_seed(sampled) and not _has_seed(greedy)
+    for name, seeded in (("seed", True), ("noise_seed", True), ("sampling_mode.seed", True),
+                         ("model.noise_seed", True), ("seed.mode", False),
+                         ("sampling_mode.reseed", False), ("texture_seed", False)):
+        assert _has_seed({"1": {"class_type": "X", "inputs": {name: 1}}}) is seeded, name
     # `auto` follows measured timings; a fixed depth and the older node are held to the same.
     for mtp, said in (("auto", ["1: mtp must be set, and not to 'auto'"]), ("off", []), ("2", [])):
         node = {"class_type": "TextGenerate", "inputs": {"sampling_mode": "off", "mtp": mtp}}

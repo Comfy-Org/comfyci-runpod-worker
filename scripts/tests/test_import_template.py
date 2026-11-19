@@ -672,6 +672,36 @@ def test_a_seed_that_a_link_feeds_is_pinned_where_its_number_is():
             "every workflow with a seed for a seed override: write the entry by hand")
 
 
+def test_the_seed_of_a_sampled_text_generation_is_pinned_under_its_whole_name():
+    """`sampling_mode.seed` is a sub-input of the sampling mode. The runner
+    writes a seed override over the input the entry names, dot or no dot, so
+    the entry names it as the workflow file has it."""
+    import run_regression
+
+    prompt = {
+        "5": n("TextGenerate", prompt="hi", sampling_mode="on",
+               **{"sampling_mode.temperature": 0.7, "sampling_mode.seed": 7}),
+        "6": n("TextGenerateLTX2Prompt", sampling_mode="on",
+               **{"sampling_mode.seed": ["109", 0]}),
+        "109": n("PrimitiveInt", value=3),
+        # The last part of a name decides: `seed.mode` and `reseed` are no seeds.
+        "7": n("KSampler", seed=5, **{"seed.mode": 1, "sampling_mode.reseed": 2}),
+        "8": n("TextGenerate", prompt="hi", sampling_mode="off"),
+    }
+    pins = seed_overrides(prompt)
+    assert pins == {"5": {"sampling_mode.seed": 7}, "109": {"value": 3}, "7": {"seed": 5}}
+    # What a run queues when the entry says another number: the inputs the
+    # entry names have it, and the prompt has no input more than before.
+    entry = {node_id: {name: 99 for name in patch} for node_id, patch in pins.items()}
+    queued = run_regression.apply_seed_overrides(prompt, entry)
+    assert queued["5"]["inputs"] == {"prompt": "hi", "sampling_mode": "on",
+                                     "sampling_mode.temperature": 0.7, "sampling_mode.seed": 99}
+    assert (queued["109"]["inputs"], queued["7"]["inputs"]["seed"]) == ({"value": 99}, 99)
+    assert {node_id: list(node["inputs"]) for node_id, node in queued.items()} == {
+        node_id: list(node["inputs"]) for node_id, node in prompt.items()}
+    assert prompt["5"]["inputs"]["sampling_mode.seed"] == 7
+
+
 def loads_inputs():
     return {
         "1": n("UNETLoader", unet_name="u.safetensors"),
@@ -1253,29 +1283,44 @@ def test_the_lint_is_run_whole_and_a_missing_pytest_is_said(monkeypatch, capsys)
     assert "pytest is not installed. Install pytest (pip install pytest)" in capsys.readouterr().err
 
 
-def test_the_inputs_the_worker_would_drop_are_named_by_the_lints_rule():
-    """The importer asked `src/comfy_runner.py` what the worker drops. That
-    says what the next image does, not the one that runs: once `src/` keeps
-    dotted inputs, a clip passed the dry run and failed the lint after the
-    write. Now the rule is the lint's, and `src/` is not read."""
+def test_the_importer_names_the_inputs_the_worker_drops(monkeypatch):
+    """The worker drops a literal input that the node of its ComfyUI does not
+    have, and keeps an input named `a.b` when `a` is one: the codec of a
+    video format, the seed of a sampling mode. The importer refuses a
+    workflow by that rule. It reads nothing under `src/` for it, so this
+    test asks the worker's own check about the same prompt."""
     info = {"KSampler": spec({"seed": ["INT", {"default": 0}], "steps": ["INT", {"default": 20}]}),
+            "TextGenerate": INFO["TextGenerate"],
             "SaveVideo": spec({"video": ["VIDEO"], **PREFIX,
                                "format": ["COMFY_DYNAMICCOMBO_V3", {"options": []}]})}
-    prompt = {"3": n("KSampler", seed=5, bogus="x", model=["4", 0]),
-              "8": n("Unknown", a=1),
-              "9": n("SaveVideo", format="mp4", video=["3", 0],
-                     **{"format.codec": "h264", "format.frames": ["3", 1], "old.sub": 1})}
+    prompt = {"3": n("KSampler", seed=5, steps=4, bogus="x", model=["4", 0]),
+              "5": n("TextGenerate", prompt="hi", sampling_mode="on",
+                     **{"sampling_mode.seed": 7, "sampling.seed": 1}),
+              "9": n("SaveVideo", format="mp4", video=["3", 0], filename_prefix="x",
+                     **{"format.codec": "h264", "format.codec.encoding": "auto",
+                        "format.frames": ["3", 1], "old.sub": 1})}
     before = copy.deepcopy(prompt)
-    # A literal sub-input of a dynamic combo. A linked one is kept by the worker.
-    assert import_template.dotted_literals(prompt) == ["9:SaveVideo.format.codec",
-                                                       "9:SaveVideo.old.sub"]
     # An input the node of this ComfyUI does not have. A sub-input is known
-    # when its combo is, and a class nobody knows is the converter's to refuse.
-    assert import_template.unknown_literals(prompt, info) == ["3:KSampler.bogus",
-                                                              "9:SaveVideo.old.sub"]
-    assert import_template.unknown_literals({"3": n("KSampler", seed=5)}, info) == []
+    # when its input is, however deep it sits.
+    named = import_template.unknown_literals(prompt, info)
+    assert named == ["3:KSampler.bogus", "5:TextGenerate.sampling.seed", "9:SaveVideo.old.sub"]
     assert prompt == before
-    # Script tests does not run for a change under src/ alone.
+    monkeypatch.syspath_prepend(str(ROOT / "src"))
+    import comfy_runner
+    monkeypatch.setattr(comfy_runner, "http_get_json", lambda url, timeout=5.0: info)
+    report = comfy_runner.validate_workflow(8199, prompt)
+    assert report["stripped_inputs"] == ["KSampler.bogus='x'", "TextGenerate.sampling.seed=1",
+                                         "SaveVideo.old.sub=1"]
+    # What the importer does not name is what the worker queues.
+    assert prompt == {node_id: {**node, "inputs": {
+        name: value for name, value in node["inputs"].items()
+        if f"{node_id}:{node['class_type']}.{name}" not in named}}
+        for node_id, node in before.items()}
+    # A class nobody knows is the converter's to refuse.
+    assert import_template.unknown_literals({"8": n("Unknown", a=1)}, info) == []
+    assert import_template.unknown_literals({"3": n("KSampler", seed=5)}, info) == []
+    # The importer itself does not read `src/`: what is there is the rule of
+    # the next image, and an import is for the one that runs.
     source = Path(import_template.__file__).read_text(encoding="utf-8")
     assert "comfy_runner" not in source and '"src"' not in source
 
@@ -1294,9 +1339,17 @@ SERVER_INFO = {
                      "steps": ["INT", {"default": 20}]}, output=["IMAGE"]),
     "TextGenerate": spec({"prompt": ["STRING", {"default": ""}], "sampling_mode": [
         "COMFY_DYNAMICCOMBO_V3", {"options": [
-            {"key": "on", "inputs": {"required": {"temperature": ["FLOAT", {"default": 0.7}]}}},
+            {"key": "on", "inputs": {"required": {"temperature": ["FLOAT", {"default": 0.7}],
+                                                  "seed": ["INT", {"default": 0}]}}},
             {"key": "off", "inputs": {"required": {}}}]}]},
         {"mtp": ["COMBO", {"default": "auto", "options": ["auto", "off"]}]}, output=["STRING"]),
+    "CreateVideo": INFO["CreateVideo"], "ImageFromBatch": INFO["ImageFromBatch"],
+    "GetVideoComponents": INFO["GetVideoComponents"],
+    # Every format of the real node asks for a codec, a combo of its own.
+    "SaveVideo": spec({"video": ["VIDEO"], **PREFIX, "format": ["COMFY_DYNAMICCOMBO_V3", {
+        "options": [{"key": key, "inputs": {"required": {"codec": ["COMFY_DYNAMICCOMBO_V3", {
+            "options": [{"key": codec, "inputs": {"required": {}}} for codec in ("auto", "h264")],
+        }]}}} for key in ("auto", "mp4")]}]}, output_node=True),
     "SaveImage": INFO["SaveImage"], "PreviewImage": INFO["PreviewImage"],
     "PreviewAny": INFO["PreviewAny"], "SaveText": INFO["SaveText"],
     "SaveAudio": INFO["SaveAudio"], "PartnerImageNode": INFO["PartnerImageNode"],
@@ -1503,8 +1556,9 @@ def test_what_stops_an_import_before_a_template_is_read(repo, monkeypatch, capsy
         "error: old_wf is already in manifest/workflows.json: choose another --id\n")
     assert refused(base=["small", "--id", "3d/mesh one", *repo.base[3:]]).startswith(
         "error: the id '3d/mesh one' names the output files")
-    assert refused("--keep-sampling", "--level", "reference").startswith(
-        "error: --keep-sampling is for a smoke-level workflow")
+    assert refused("--keep-sampling", "--level", "reference") == (
+        "error: --keep-sampling is for a smoke-level workflow: a reference-level output is "
+        "compared with its reference, so its text is generated without sampling\n")
     for expect, said in ((["--expect", "size=3"], "error: --expect: unknown expect key 'size'"),
                          (["--expect", "width=0"], "error: --expect: expect.width must be a "),
                          (["--expect", "width"], "error: --expect width: write <key>=<number>"),
@@ -2119,7 +2173,7 @@ def test_a_partner_node_is_refused(repo, capsys):
 
 
 def text_template(save):
-    return {"nodes": [ui(5, "TextGenerate", ["hi", "on", 0.7, "auto"], [1]),
+    return {"nodes": [ui(5, "TextGenerate", ["hi", "on", 0.7, 7, "randomize", "auto"], [1]),
                       ui(7, save, [], inputs=[{"name": "source", "type": "*", "link": 1}])],
             "links": [[1, 5, 0, 7, 0, "STRING"]]}
 
@@ -2139,30 +2193,70 @@ def test_a_text_template_is_imported_greedy(repo, capsys):
     assert "comfy_flags" not in entry and "expect" not in entry
 
 
-def test_keep_sampling_is_refused_while_the_lint_refuses_what_sampling_needs(
-        repo, monkeypatch, capsys):
-    """True today: a sampled text generation has `sampling_mode.temperature`, a
-    literal sub-input, and the manifest lint refuses one while the image that
-    runs drops it. The importer holds the lint's rule, so the flag is refused
-    before anything is written, and works on the day the rule goes."""
+def test_keep_sampling_leaves_a_smoke_level_text_generation_as_the_template_has_it(
+        repo, capsys):
+    """A sampled text generation has `sampling_mode.temperature` and
+    `sampling_mode.seed`, sub-inputs of its sampling mode. While the worker
+    dropped such inputs the flag was refused. Now the workflow file has what
+    the template has, and the entry pins the seed under its whole name."""
     write_template(repo, text_template("PreviewAny"))
+    sampled = {"prompt": "hi", "sampling_mode": "on", "sampling_mode.temperature": 0.7,
+               "sampling_mode.seed": 7, "mtp": "auto"}
     files = repo.files()
-    for more in (["--dry-run"], []):
-        assert import_template.main([*repo.base, *repo.offline, "--keep-sampling", *more]) == 1
-        assert capsys.readouterr().err.startswith(
-            "error: the worker drops these inputs before it queues the prompt, so the "
-            "workflow cannot run as the template has it yet: "
-            "5:TextGenerate.sampling_mode.temperature. They are sub-inputs of a dynamic "
-            "combo, which the worker keeps once its image is rebuilt with the fix. The "
-            "manifest lint refuses them until then. Without --keep-sampling the text "
-            "generation is made greedy and needs none of them\nnodes (2):\n")
+    assert import_template.main([*repo.base, *repo.offline, "--keep-sampling", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith(
+        "nodes (2):\n"
+        '  5  TextGenerate  prompt="hi" sampling_mode="on" sampling_mode.temperature=0.7 '
+        'sampling_mode.seed=7 mtp="auto"\n'
+        '  7  SaveText  filename_prefix="small_i2i" format="txt"\n')
+    assert '"seed_overrides": {\n      "5": {\n        "sampling_mode.seed": 7\n' in out
     assert repo.files() == files and repo.lint == []
-    # Without the rule the workflow is written as the template has it.
-    monkeypatch.setattr(import_template, "dotted_literals", lambda prompt: [])
     assert import_template.main([*repo.base, *repo.offline, "--keep-sampling"]) == 0
     written = repo.root / "manifest" / "workflows" / "small_i2i_api.json"
-    assert json.loads(written.read_text(encoding="utf-8"))["5"]["inputs"] == {
-        "prompt": "hi", "sampling_mode": "on", "sampling_mode.temperature": 0.7, "mtp": "auto"}
+    assert json.loads(written.read_text(encoding="utf-8")) == {
+        "5": n("TextGenerate", **sampled),
+        "7": n("SaveText", text=["5", 0], filename_prefix="small_i2i", format="txt")}
+    entry = json.loads(repo.manifest())["workflows"]["small_i2i"]
+    assert (entry["level"], entry["output_kind"]) == ("smoke", "text")
+    assert entry["seed_overrides"] == {"5": {"sampling_mode.seed": 7}}
+    assert repo.lint == ["ran"]
+    # Without the flag a smoke-level text is greedy too, and has no seed to pin.
+    assert import_template.main([*repo.base[:2], "greedy", *repo.base[3:], *repo.offline]) == 0
+    written = repo.root / "manifest" / "workflows" / "greedy_api.json"
+    assert json.loads(written.read_text(encoding="utf-8"))["5"] == n(
+        "TextGenerate", prompt="hi", sampling_mode="off", mtp="off")
+    assert json.loads(repo.manifest())["workflows"]["greedy"]["seed_overrides"] == {}
+
+
+def clip_template():
+    """The small template with a clip made of its picture, and saved."""
+    template = small_template()
+    template["nodes"][3] = ui(9, "SaveVideo", ["video/ComfyUI", "auto", "auto"], inputs=[
+        {"name": "video", "type": "VIDEO", "link": 5}])
+    template["nodes"].append(ui(13, "CreateVideo", [24.0], [5], inputs=[
+        {"name": "images", "type": "IMAGE", "link": 3}]))
+    template["links"][2] = [3, 3, 0, 13, 0, "IMAGE"]
+    template["links"].append([5, 13, 0, 9, 0, "VIDEO"])
+    return template
+
+
+def test_a_template_that_saves_a_clip_is_imported_with_its_codec(repo, capsys):
+    """`SaveVideo` takes its codec as `format.codec`, a sub-input of its
+    format. While the worker dropped such inputs every template that saves a
+    clip was refused."""
+    write_template(repo, clip_template())
+    assert import_template.main([*repo.base, *repo.offline]) == 0
+    written = json.loads((repo.root / "manifest" / "workflows" / "small_i2i_api.json")
+                         .read_text(encoding="utf-8"))
+    assert written["9"] == n("SaveVideo", filename_prefix="small_i2i_video", format="mp4",
+                             **{"format.codec": "h264"}, video=["13", 0])
+    # The picture of the run is the clip's last frame.
+    assert written["14"] == n("ImageFromBatch", image=["3", 0], batch_index=-1, length=1)
+    assert written["15"] == n("SaveImage", filename_prefix="small_i2i", images=["14", 0])
+    entry = json.loads(repo.manifest())["workflows"]["small_i2i"]
+    assert "output_kind" not in entry and entry["seed_overrides"] == {"3": {"seed": 7}}
+    assert repo.lint == ["ran"] and "error" not in capsys.readouterr().err
 
 
 def test_audio_has_no_reference_level_yet(repo, capsys):
@@ -2302,3 +2396,42 @@ def test_an_imported_workflow_passes_the_real_manifest_lint(tmp_path, monkeypatc
     path.write_text(path.read_text(encoding="utf-8").replace(
         '"importer_selftest"', '"other"'), encoding="utf-8")
     assert import_template.run_lint() == 1
+
+
+def test_a_clip_and_a_sampled_text_pass_the_real_manifest_lint_at_smoke_level(
+        tmp_path, monkeypatch, capfd):
+    """The lint refused every literal sub-input while the worker dropped
+    them. Now the codec of a clip passes, and a sampled text generation
+    passes at smoke level, with its seed pinned. At reference level the lint
+    still asks for a greedy one, and says which node is not."""
+    for folder in ("scripts", "manifest", "docker"):
+        shutil.copytree(ROOT / folder, tmp_path / folder,
+                        ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache"))
+    (tmp_path / "templates").mkdir()
+    for name, template in (("clip", clip_template()), ("text", text_template("PreviewAny"))):
+        (tmp_path / "templates" / f"{name}.json").write_text(
+            json.dumps(template), encoding="utf-8")
+    (tmp_path / "object_info.json").write_text(json.dumps(SERVER_INFO), encoding="utf-8")
+    monkeypatch.setattr(import_template, "ROOT", tmp_path)
+    monkeypatch.setattr(import_template, "file_facts", lambda url: FACTS[url])
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    more = ["--templates-dir", str(tmp_path / "templates"), "--templates-ref", SHA,
+            "--object-info", str(tmp_path / "object_info.json"), "--cadence", "nightly"]
+    assert import_template.main(["clip", "--id", "selftest_clip", *more]) == 0
+    assert import_template.main(["text", "--id", "selftest_text", *more, "--keep-sampling"]) == 0
+    manifest_path = tmp_path / "manifest" / "workflows.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    clip = json.loads((tmp_path / "manifest" / "workflows" / "selftest_clip_api.json")
+                      .read_text(encoding="utf-8"))
+    assert clip["9"]["inputs"]["format.codec"] == "h264"
+    entry = manifest["workflows"]["selftest_text"]
+    assert (entry["level"], entry["seed_overrides"]) == ("smoke", {"5": {"sampling_mode.seed": 7}})
+    # The same entry without its level is at reference level.
+    del entry["level"]
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    capfd.readouterr()
+    assert import_template.run_lint() == 1
+    said = capfd.readouterr().out
+    assert "test_text_workflows_generate_the_same_text_every_run[selftest_text]" in said
+    assert "5: sampling_mode must be 'off' (greedy decoding)" in said
+    assert "1 failed" in said
