@@ -17,9 +17,10 @@ job, and the record carries the worker's `model_fetch` report. A job of any
 other lane is sent and recorded as it always was.
 
 Such a job is also told how long its download may take (`fetch_timeout_s` in
-the job input, from `fetch_timeout_s` below). The worker stops a download that
-takes longer and answers at once with what it reached, before the runner would
-stop waiting. Its answer is a `model_fetch_error` that says
+the job input, from `fetch_timeout_s` below): the time the runner waits for
+the download and the workflow's own time, less a minute. The worker stops a
+download that takes longer and answers at once with what it reached, before
+the runner would stop waiting. Its answer is a `model_fetch_error` that says
 `"reason": "timed_out"`: the job used up its time, so it is not submitted
 again, and its record says the same under `reason`.
 """
@@ -50,11 +51,6 @@ TIMED_OUT = "timed_out"
 # seconds after its first signal. The run itself waits for no call past its
 # own limit for the stop (run_regression.STOP_BUDGET_S).
 STOP_CANCEL_TIMEOUT_S = 3
-# What a job's download gets on the worker at the least, whatever its size.
-# The allowance is the models' bytes at the planning speed. A small download
-# is not bytes alone: it opens connections, and a rate limit can make it wait
-# 300 s (src/model_sync.py, RATE_LIMIT_MAX_WAIT_S).
-FETCH_TIMEOUT_MIN_S = 600
 # Seconds between the worker's time limit for a download and the end of what
 # the runner allows the job for its download and its workflow together. They
 # cover the 10 s the worker waits for its downloads to end
@@ -174,17 +170,26 @@ def poll_deadline_s(exec_timeout_s: float, queue_deadline_s: float = QUEUE_DEADL
 def fetch_timeout_s(exec_timeout_s: float, fetch_allowance_s: float) -> int | None:
     """Seconds the worker gives a job's download before it stops it and
     answers with what it reached: the allowance the runner waits for the
-    download, and FETCH_TIMEOUT_MIN_S at the least.
+    download and the workflow's own timeout, less FETCH_TIMEOUT_MARGIN_S.
 
     The runner stops waiting for a job `poll_deadline_s` after it submitted
     it: 900 s for the queue and the start, the allowance, and the workflow's
-    own timeout. A job that is stopped in its download does not use the
-    workflow's time, so the worker's answer has that long to arrive. To hold
-    that for a short timeout too, the limit ends FETCH_TIMEOUT_MARGIN_S before
-    the allowance and the timeout together do. None when nothing is left
-    then: such a job gets no limit, as before the key existed."""
-    limit = min(max(fetch_allowance_s, FETCH_TIMEOUT_MIN_S),
-                fetch_allowance_s + exec_timeout_s - FETCH_TIMEOUT_MARGIN_S)
+    timeout. A job that is stopped in its download runs no workflow, so the
+    limit can be the allowance and the timeout together, and the worker's
+    answer is still there before the runner stops waiting when the start
+    took no more than its 900 s. The margin is for the answer's way.
+
+    The allowance alone would be too tight a limit: it is the models' bytes
+    at the planning speed, and before there was a limit a slower download
+    passed whenever the job's start and its workflow left it the time, which
+    they mostly do. So the download may use the workflow's time as well. One
+    that does leaves its workflow what the start did not use, as it always
+    did. A small download gets the same: it is connections and a rate
+    limit's wait more than it is bytes.
+
+    None when nothing is left: such a job gets no limit, as before the key
+    existed."""
+    limit = fetch_allowance_s + exec_timeout_s - FETCH_TIMEOUT_MARGIN_S
     return math.floor(limit) if limit >= 1 else None
 
 

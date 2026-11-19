@@ -3532,8 +3532,9 @@ def test_a_download_the_worker_stopped_is_said_in_the_cell_and_not_tried_again(t
     # A weekly run with an untested workflow is red, and each got one job.
     assert code == 1 and sorted(sent["workflow_id"] for sent in endpoint.inputs) == [
         "ref", "smoke"]
-    # 56.6 GB at 25 MB a second: what the runner waits, and what the worker is told.
-    assert {sent["fetch_timeout_s"] for sent in endpoint.inputs} == {2264}
+    # 56.6 GB at 25 MB a second are the 2,264 s the runner waits for the
+    # download. The worker is told those and the workflow's 600 s, less 60.
+    assert {sent["fetch_timeout_s"] for sent in endpoint.inputs} == {2264 + 600 - 60}
     for wf_id, level_keys in (("ref", []), ("smoke", ["level", "smoke"])):
         cell = summary["workflows"][wf_id]
         assert (cell["worker_status"], cell["verdict"]) == ("model_fetch_error", "infra_error")

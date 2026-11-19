@@ -654,20 +654,24 @@ def test_a_failed_download_is_tried_again_and_a_refused_file_is_not(tmp_path):
 
 # -- a time limit for the download, on the worker -----------------------------------------
 def test_how_long_the_worker_gives_a_download():
-    """The allowance the runner waits for the download, and 600 s at the
-    least: a small download is connections and waits more than it is bytes."""
+    """The time the runner waits for the download and the workflow's own
+    timeout, less the 60 s for the worker's answer. With the allowance alone
+    as the limit, the planning speed of 25 MB a second was the slowest
+    download that passed. Before there was a limit, 15.8 GB passed at 6 MB a
+    second in a job that started and ran as jobs mostly do."""
     limit = submit_and_poll.fetch_timeout_s
-    assert (submit_and_poll.FETCH_TIMEOUT_MIN_S, submit_and_poll.FETCH_TIMEOUT_MARGIN_S) == (
-        600, 60)
-    # 60 GB at 25 MB a second, whatever the workflow's own timeout.
-    assert limit(600, 2401) == limit(2400, 2401) == 2401
-    # A small download gets the least there is, when the workflow's time allows.
-    assert limit(900, 100) == limit(900, 0) == 600
-    # It ends 60 s before the allowance and the timeout together do.
-    assert limit(600, 0) == 540 and limit(600, 30) == 570 and limit(600, 60) == 600
-    assert limit(10, 400) == 350 and limit(100, 2401) == 2401
+    assert submit_and_poll.FETCH_TIMEOUT_MARGIN_S == 60
+    # 15.8 GB at 25 MB a second are 632 s. With a workflow of 600 s the
+    # download may take 1,172 s, which is 13.5 MB a second.
+    assert limit(600, 632) == 1172 and 15.8e9 / 1e6 / limit(600, 632) < 13.5
+    # 56.6 GB, the largest family: 2,264 s and 900 s, so 18.3 MB a second.
+    assert limit(900, 2264) == 3104 and 56.6e9 / 1e6 / limit(900, 2264) < 18.3
+    # A small download is connections and a rate limit's wait of up to 300 s
+    # more than it is bytes. It has the workflow's time for them.
+    assert limit(600, 12) == 552 and limit(900, 40) == 880 and limit(900, 0) == 840
+    assert limit(10, 400) == 350
     # A whole number of seconds, as the job input carries it.
-    assert limit(600.0, 2400.7) == 2400 and isinstance(limit(600.0, 2400.7), int)
+    assert limit(600.0, 2400.7) == 2940 and isinstance(limit(600.0, 2400.7), int)
     # Nothing is left of such a job's time: no limit, as before the key.
     assert limit(10, 0) is None and limit(60, 0) is None and limit(30, 30.5) is None
 
@@ -675,9 +679,9 @@ def test_how_long_the_worker_gives_a_download():
 def test_the_worker_stops_a_download_before_the_runner_stops_waiting():
     """The runner gives a job 900 s to start, the allowance for its download
     and the workflow's timeout, and then cancels it. The worker's limit for
-    the download ends at least 60 s before that, when the start took no more
-    than its 900 s: the time the worker waits for its downloads to end, its
-    answer's way, and the pause until the runner looks again."""
+    the download ends 60 s before that, when the start took no more than its
+    900 s: the time the worker waits for its downloads to end, its answer's
+    way, and the pause until the runner looks again."""
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -687,7 +691,8 @@ def test_the_worker_stops_a_download_before_the_runner_stops_waiting():
     assert model_sync.TIMED_OUT == submit_and_poll.TIMED_OUT == regression_skip.TIMED_OUT
     start, margin = submit_and_poll.COLD_START_ALLOWANCE_S, submit_and_poll.FETCH_TIMEOUT_MARGIN_S
     assert margin >= model_sync.FETCH_STOP_WAIT_S + submit_and_poll.POLL_INTERVAL_S + 30
-    assert submit_and_poll.FETCH_TIMEOUT_MIN_S > model_sync.RATE_LIMIT_MAX_WAIT_S
+    # The time in which the worker shuts connections is inside its wait.
+    assert 0 < model_sync.FETCH_CUT_AFTER_S < model_sync.FETCH_STOP_WAIT_S
     for timeout_s in (60, 61, 300, 600, 900, 1200, 2400, 3300):
         for allowance in (0, 1, 12, 59, 60, 400, 600, 632, 2264, 2401):
             limit = submit_and_poll.fetch_timeout_s(timeout_s, allowance)
@@ -695,11 +700,15 @@ def test_the_worker_stops_a_download_before_the_runner_stops_waiting():
                 assert allowance + timeout_s - margin < 1
                 continue
             gives_up = submit_and_poll.poll_deadline_s(timeout_s, 600, allowance)
-            assert gives_up - (start + limit) >= margin, (timeout_s, allowance)
-            # With the manifest's timeouts (600 s and more) the answer of a
-            # download of 15 GB or more has the workflow's whole time.
-            if timeout_s >= 600 and allowance >= 600:
-                assert limit == allowance and gives_up - (start + limit) == timeout_s
+            # The answer has its 60 s, and the download every second but those.
+            assert gives_up - (start + limit) == margin, (timeout_s, allowance)
+            # RunPod ends a job 3,600 s after a worker took it. The lint asks
+            # of a job that fetches that its timeout, its allowance and 300 s
+            # fit in there (test_manifest_lint.py). The worker's answer to a
+            # download it stopped then comes before RunPod's end as well, and
+            # the checkout before it has those 300 s.
+            if timeout_s + allowance + 300 <= 3600:
+                assert 300 + limit + model_sync.FETCH_STOP_WAIT_S <= 3600
 
 
 SLOW = {"message": "the download was too slow: 12.4 of 56.6 GB in 600 s (20.7 MB/s), "
@@ -724,7 +733,7 @@ def test_a_download_the_worker_stopped_is_not_submitted_again(tmp_path):
         rec = submit_and_poll.run_workflow_job(
             client, "wf", {}, comfy_commit="c" * 40, models=[], timeout_s=600, comfy_flags=[],
             workdir=tmp_path, attempts=attempts, fetch_missing=True, fetch_allowance_s=600)
-        assert client.runs == 1 and client.inputs[0]["fetch_timeout_s"] == 600, attempts
+        assert client.runs == 1 and client.inputs[0]["fetch_timeout_s"] == 1140, attempts
         assert (rec["status"], rec["reason"], rec["attempt"]) == (
             "model_fetch_error", "timed_out", 1)
         assert rec["error"] == SLOW and rec["model_fetch"] == FETCHED
@@ -741,7 +750,7 @@ def test_a_download_the_worker_stopped_is_not_submitted_again(tmp_path):
         workdir=tmp_path, fetch_missing=True, fetch_allowance_s=600)
     assert (client.runs, rec["status"], rec["attempt"]) == (2, "ok", 2)
     assert list(rec) == RECORD_KEYS and [sent["fetch_timeout_s"] for sent in client.inputs] == [
-        600, 600]
+        1140, 1140]
     # The mark is the worker's failure saying `reason`, and nothing else.
     marked = submit_and_poll.stopped_at_its_limit
     assert marked({"status": "model_fetch_error", "error": SLOW})
