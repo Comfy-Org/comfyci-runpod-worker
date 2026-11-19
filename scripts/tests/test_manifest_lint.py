@@ -1024,6 +1024,10 @@ def test_an_expectation_typed_as_infinity_or_nan_is_refused():
         assert _level_problems(json.loads(typed % number)) == [
             f"expect.seconds must be a number above 0, not {said}: it has to be finite"]
     assert _level_problems(json.loads(typed % "30.5")) == []
+    # A whole number that no float holds is one no output can be compared with.
+    assert _level_problems(json.loads(typed % ("1" + "0" * 400))) == [
+        "expect.seconds must be a number above 0, not a whole number beyond 1e308: "
+        "no check can compare with it"]
 
 
 def test_moving_a_workflow_to_smoke_level_is_one_edit():

@@ -188,8 +188,16 @@ def test_a_number_a_smoke_entry_expects_is_finite():
         assert str(refused.value) == (f"expect.frames must be a number above 0, not {said}: "
                                       "it has to be finite"), typed
     # A large number that is one is a number like any other.
-    large = {"frames": 1e300, "min_chars": 10**400}
+    large = {"frames": 1e300, "min_chars": 10**300}
     assert lanes_mod.expect_of({"level": "smoke", "expect": large}) == large
+    # The size of 1e999 written out in digits is a whole number for Python.
+    # It was taken, and the smoke check that met it broke on the comparison
+    # and said of the output file that it "could not be read".
+    entry = json.loads('{"level": "smoke", "expect": {"min_chars": 1%s}}' % ("0" * 400))
+    with pytest.raises(ValueError) as refused:
+        lanes_mod.expect_of(entry)
+    assert str(refused.value) == ("expect.min_chars must be a number above 0, not a whole number "
+                                  "beyond 1e308: no check can compare with it")
 
 
 def test_a_nightly_or_weekly_lane_is_a_long_cadence_lane():

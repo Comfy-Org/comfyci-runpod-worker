@@ -262,6 +262,14 @@ def expect_of(entry: dict | None) -> dict:
                              "it has to be finite")
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
             raise ValueError(f"expect.{key} must be a number above 0, not {value!r}")
+        try:
+            float(value)
+        except OverflowError:
+            # The same size written out in digits is a whole number for
+            # Python, however long. The checks compare with floats: one that
+            # met this number would break, and blame the output file.
+            raise ValueError(f"expect.{key} must be a number above 0, not a whole number "
+                             "beyond 1e308: no check can compare with it") from None
     return expect
 
 
