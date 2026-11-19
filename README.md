@@ -258,9 +258,9 @@ It refuses and does not guess. What it refuses today:
   node needs an account key and credits, and the worker has neither.
 - **A workflow with a literal sub-input of a dynamic combo**, like
   `format.codec` of `SaveVideo` or `sampling_mode.temperature` of a sampled
-  text generation. The worker drops such an input before it queues the
-  prompt, and the lint refuses a workflow that has one until the image that
-  runs keeps it. The command holds the lint's rule, and a test holds the two
+  text generation. A worker of an image built before the worker kept such
+  inputs drops one before it queues the prompt, and the lint refuses a
+  workflow that has one until the image of every lane keeps it. The command holds the lint's rule, and a test holds the two
   together. Until the rule goes a template that saves a clip is refused, and
   so is `--keep-sampling`.
 - **An input the node of this ComfyUI does not have**: the template was made
@@ -363,10 +363,9 @@ workflows), is written by hand. The rules are the ones the command follows.
    workflows: those that run on a lane which reads its models from the volume
    (`lanes.volume_workflows`). A workflow that runs only on lanes with
    `"model_storage": "job"`, or on lanes without a volume, is in neither.
-   Nothing fetches models for a job yet, so the lint also fails for an
-   enabled workflow of that kind that loads a file which is not among the
-   volume's: "its models are on no volume". One whose files another workflow
-   puts on the volume passes. The rule goes when jobs can fetch models.
+   Each job of such a lane fetches them (see
+   [Models that a job fetches](#models-that-a-job-fetches)), and the lint
+   holds the workflow to the rules named there.
 
    **A text workflow** (a model that answers in text, like the
    `llm_qwen38_27b_t2t` entry) has rules of its own. The command writes one
@@ -382,8 +381,8 @@ workflows), is written by hand. The rules are the ones the command follows.
      `sampling_mode` `"off"` and an `mtp` that is written out and is not
      `"auto"` (use `"off"`). The text has to be the same on every run, because
      it passes only on an exact match. `mtp` `"auto"` follows measured
-     timings, and the worker removes the `sampling_mode.<name>` values that
-     sampling needs.
+     timings, and a worker of an image built before the worker kept dotted
+     inputs removes the `sampling_mode.<name>` values that sampling needs.
    - `seed_overrides` is `{}` (greedy decoding has no seed) and `thresholds`
      is `null`. Only when an exact match is known not to hold, set
      `"thresholds": {"min_text_similarity": 0.98}`, a number above 0 and at

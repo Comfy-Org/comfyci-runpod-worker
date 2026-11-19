@@ -20,10 +20,17 @@ permissions:
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    # 3.12 is what the runner scripts run on. 3.13 is the Python of the worker
+    # images (PYTHON_VERSION in the Dockerfile), where the code under src/ runs.
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13']
+    name: pytest (${{ matrix.python-version }})
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python-version }}
       - run: pip install -r scripts/requirements.txt pytest
       - run: python -m pytest scripts/tests -q
