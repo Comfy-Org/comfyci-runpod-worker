@@ -1,9 +1,9 @@
 """src/handler.py and src/comfy_runner.py: what a run job answers. A job that
 does not ask for a fetch answers what it always did, byte for byte. One that
-asks has the models the volume lacks fetched first. Output files are sent
-smallest first up to the size limit and listed by name, and a dotted
-sub-input stays in the prompt. The two image files the worker reads its
-environment from are held to what these rely on."""
+asks has the models the volume lacks fetched first, for no longer than the
+job says. Output files are sent smallest first up to the size limit and
+listed by name, and a dotted sub-input stays in the prompt. The two image
+files the worker reads its environment from are held to what these rely on."""
 import base64
 import hashlib
 import http.client
@@ -259,6 +259,65 @@ def test_a_fetch_that_fails_ends_the_job_before_the_workflow_runs(tmp_path, monk
     answer = handler.handler({"input": {**JOB, "fetch_missing": True}})
     assert answer["status"] == "worker_error" and answer["failure"]["message"] == "no disk"
     assert worker.calls == [("fetch", missing, 4)]
+
+
+class Timed(Worker):
+    """A Worker whose fetch records what else it was told."""
+
+    def fetch(self, models, hf_token=None, streams=4, **told):
+        self.calls.append(("told", told))
+        return super().fetch(models, hf_token, streams)
+
+
+def test_a_job_that_names_a_time_limit_hands_it_to_the_fetch(tmp_path, monkeypatch):
+    missing = ["vae/ae.safetensors", "text_encoders/t5.safetensors"]
+
+    def told(job_input):
+        worker = Timed(tmp_path, monkeypatch, missing=missing, report=fetched())
+        assert handler.handler({"input": job_input})["status"] == "ok"
+        assert worker.calls[1:] == [("fetch", missing, 4), ("execute", 600.0)]
+        return worker.calls[0][1]
+
+    asked = {**JOB, "fetch_missing": True}
+    assert told({**asked, "fetch_timeout_s": 2401}) == {"timeout_s": 2401}
+    assert told({**asked, "fetch_timeout_s": 540.5}) == {"timeout_s": 540.5}
+    # The job of a runner from before the key: the fetch is called as it was,
+    # with no limit. The stand-in of the tests above takes no such argument.
+    assert told(asked) == {} and handler.fetch_timeout_s(asked) is None
+    worker = Worker(tmp_path, monkeypatch, missing=missing, report=fetched())
+    assert handler.handler({"input": asked})["status"] == "ok"
+    # Anything but a number above 0 is no limit either.
+    for junk in (0, -5, "600", True, None, [600], float("inf"), float("nan")):
+        assert told({**asked, "fetch_timeout_s": junk}) == {}, junk
+    # The limit is for a job that fetches: without `fetch_missing` nothing reads it.
+    worker = Timed(tmp_path, monkeypatch, missing=missing, report=fetched())
+    answer = handler.handler({"input": {**JOB, "fetch_timeout_s": 600}})
+    assert answer["status"] == "missing_model" and worker.calls == []
+
+
+def test_a_download_that_was_stopped_at_its_limit_answers_what_it_reached(tmp_path,
+                                                                         monkeypatch):
+    missing = ["vae/ae.safetensors", "text_encoders/t5.safetensors"]
+    slow = model_sync.too_slow(12_400_000_000, 56_600_000_000, 600.2, 1, 2, 600)
+    worker = Timed(tmp_path, monkeypatch, missing=missing, report=fetched(
+        files=["vae/ae.safetensors"], bytes=12_400_000_000, seconds=600.2, mb_per_s=20.7,
+        failed=[slow]))
+    answer = handler.handler({"input": {**JOB, "fetch_missing": True, "fetch_timeout_s": 600}})
+    # The status is the one of any download that failed. `reason` is what
+    # keeps the runner from trying the job again.
+    assert answer["status"] == "model_fetch_error"
+    assert answer["failure"] == {
+        "message": ("the download was too slow: 12.4 of 56.6 GB in 600 s (20.7 MB/s), "
+                    "1 of 2 files complete"),
+        "reason": "timed_out", "timeout_s": 600, "received_bytes": 12_400_000_000,
+        "wanted_bytes": 56_600_000_000, "seconds": 600.2, "mb_per_s": 20.7, "files_done": 1,
+        "files_wanted": 2, "failed": [slow]}
+    assert worker.calls == [("told", {"timeout_s": 600}), ("fetch", missing, 4)]
+    # The record of the download says the speed, which is why the job answers.
+    assert answer["model_fetch"] == {"files": 1, "bytes": 12_400_000_000, "seconds": 600.2,
+                                     "mb_per_s": 20.7, "streams": 4, "token": True, "reused": 0,
+                                     "reused_bytes": 0, "evicted": 0}
+    assert "outputs" not in answer and "error" not in answer
 
 
 # -- the output files of an answer -----------------------------------------------------

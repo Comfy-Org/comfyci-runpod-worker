@@ -6,6 +6,8 @@ Modes (input.mode):
                outputs base64-encoded. With input.fetch_missing, the models the
                volume does not hold are first downloaded to the worker's own
                disk (model_sync.fetch_local), input.fetch_streams files at once.
+               With input.fetch_timeout_s that download is stopped when it has
+               taken so many seconds, and the job answers with what it reached.
   sync_models  — sync input.models onto the network volume (see model_sync.py).
 
 Every failure maps to a distinct output.status so the orchestrator can tell
@@ -34,6 +36,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import time
 import traceback
@@ -73,6 +76,17 @@ def fetch_streams(job_input: dict) -> int:
     if isinstance(asked, int) and not isinstance(asked, bool) and 1 <= asked <= 16:
         return asked
     return model_sync.FETCH_STREAMS
+
+
+def fetch_timeout_s(job_input: dict) -> float | None:
+    """How many seconds a job's download may take: input.fetch_timeout_s, a
+    number above 0. None for anything else, and for a job that names none:
+    its download takes as long as it takes, as before the key existed."""
+    asked = job_input.get("fetch_timeout_s")
+    if (isinstance(asked, (int, float)) and not isinstance(asked, bool)
+            and math.isfinite(asked) and asked > 0):
+        return asked
+    return None
 
 
 def sent_inline(files: list[dict]) -> set[int]:
@@ -132,8 +146,12 @@ def _run(job_input: dict) -> dict:
         missing = [key for key in missing if key.startswith("input/")]
         if fetch and not missing:
             t0 = time.monotonic()
+            # Only a job that names a time limit hands one on.
+            limit = fetch_timeout_s(job_input)
+            limited = {} if limit is None else {"timeout_s": limit}
             try:
-                report = model_sync.fetch_local(fetch, streams=fetch_streams(job_input))
+                report = model_sync.fetch_local(fetch, streams=fetch_streams(job_input),
+                                                **limited)
             except Exception as e:
                 return {**out, "status": "worker_error",
                         "failure": {"message": str(e)[:2000],
