@@ -294,8 +294,10 @@ summary's and the marker's `attempt`. Two cases follow from that rule. A
 workflow that another run right away would not test either is no reason for
 the retry: its models are not on the volume yet (`missing_model`), the model
 host refuses a file (`model_access_error`), or the run's deadline came before
-it could start (`not_reached`). A summary whose untested workflows are all of
-that kind is left alone, and its report says so. And a summary with `partial`
+it could start (`not_reached`). Nor is one whose model download the worker
+stopped at the job's time limit (`"reason": "timed_out"` in its cell): another
+run could cost as much again. A summary whose untested workflows are all of
+these kinds is left alone, and its report says so. And a summary with `partial`
 (a nightly or weekly run pushes one every 10 workflows) belongs to a run that
 did not finish: it counts as a marker with no summary. A run that names its
 workflows at such a commit does not merge into it: it writes a summary of its
@@ -935,7 +937,8 @@ dollars, and the lane's next run is a day or a week away. So
   that were not tested for a reason that can pass (the queue, the network, a
   worker error) are tried once more, while the deadline allows. Not tried
   again: a job that used up its whole time, because a second one can cost
-  another hour (RunPod ended it, or the runner gave up on it, and its
+  another hour (RunPod ended it, the runner gave up on it, or the worker
+  stopped its model download at the limit the runner gave it, and its
   `run.json` says `"reason": "timed_out"`). And a workflow that another job
   would not change: `missing_model`, `model_access_error`, `not_reached`,
   `bad_request`. The cell of a workflow that got its second job says
@@ -1056,8 +1059,12 @@ device"), the worker removes every fetched file the job does not need, and
 the Hugging Face cache under the rule of step 3, whatever is reported as
 free. The files whose write failed that way then get one more try. This
 happens once in a job, also when several downloads find the disk full at the
-same moment. When nothing could be removed, or the disk is full again, the
-file has failed: "disk full while writing". What was removed is counted in
+same moment. When nothing could be removed (an empty cache folder is
+nothing), or the disk is full again, the file has failed: "disk full while
+writing". The worker's list is written on the same disk. A full disk at
+that write is handled the same way: the file that was just put in place is
+removed with the rest and fetched once more, so no file stays that the list
+does not name. What was removed is counted in
 `model_fetch.evicted`, like the files of step 3. A file the job needs, a
 file it has just finished, the files git tracks and the volume are never
 removed.
@@ -1065,24 +1072,45 @@ removed.
 **A time limit for the download.** The runner tells the job how long its
 download may take: `fetch_timeout_s` in the job input, beside
 `fetch_missing`. It is the time the runner waits for the download (the
-models' bytes at 25 MB a second), and 600 seconds at the least: a small
-download is connections and waits more than it is bytes. It ends 60 seconds
-or more before the time is over that the runner gives the job for its
-download and its workflow together, so the worker's answer is there before
-the runner would stop waiting. When the time is up, the worker stops the
-downloads and answers at once. The files that were complete stay and are
-listed for the next job, the part files go, and the workflow does not run. A
-download looks for the stop between two pieces of 1 MiB, and on a connection
-that brings less than that in a second it takes what comes, so it ends with
-the next bytes. One whose piece does not come is left behind after 10
-seconds, so a connection that has gone silent cannot hold the answer back,
-and it changes no file after that. The answer is a `model_fetch_error` whose
-`failure` says `"reason": "timed_out"` and what the download reached: "the
-download was too slow: 12.4 of 56.6 GB in 600 s (20.7 MB/s), 2 of 5 files
-complete". Such a job is not tried again (see the table below). A worker
-image from before the limit ignores the key, and a job without the key has
-no limit. Both download for as long as it takes, and a download that is too
-slow then ends as the runner's own timeout, with no speed in its record.
+models' bytes at 25 MB a second) and the workflow's own `timeout_s`, less 60
+seconds. A job that is stopped in its download runs no workflow, so with
+that limit the worker's answer is still there before the runner would stop
+waiting. The download may use the workflow's time because 25 MB a second is
+a planning speed and no floor: a slower download passes whenever the job's
+start and its workflow leave it the time, as it did before there was a
+limit. For 15.8 GB and a `timeout_s` of 600 the limit is 1,172 seconds,
+which is 13.5 MB a second. A download that uses the workflow's time leaves
+the workflow what the job's start did not use of its 900 seconds.
+
+When the time is up, the worker stops the downloads and answers within 10
+seconds. The files that were complete stay and are listed for the next job,
+the part files go, and the workflow does not run. A download looks for the
+stop between two pieces of 1 MiB, and on a connection that brings less than
+that in a second it takes what comes, so it ends with the next bytes. A
+read that began on a fast connection waits for its whole piece: when a
+download is still reading 8 seconds after the stop, the worker shuts its
+connection, which ends the read. One that has no connection yet is left
+behind after the 10 seconds, ends by itself within a minute, and changes no
+file. So no host can hold the answer back, and none can keep a download and
+its part file on the worker. What arrives in those seconds counts: a
+download that has every byte is finished and not stopped, a job whose last
+file arrives in them goes on to its workflow, and a file that fails in them
+(a wrong sha256, say) is that failure and is tried again as it always is.
+The downloads that a failed file stops (step 4) end the same way, with or
+without a limit: the job answers some 10 seconds after the failure at the
+latest, also beside a download whose connection only trickles.
+
+The answer is a `model_fetch_error` whose `failure` says
+`"reason": "timed_out"` and what the download reached: "the download was too
+slow: 12.4 of 56.6 GB in 600 s (20.7 MB/s), 2 of 5 files complete". The
+seconds are those up to the stop, and sizes under a GB are said in MB. When
+the clean-up before the download used up the limit, no download begins and
+the sentence says that instead: "the download did not begin: cleaning up and
+making room took the 600 s it was given". Such a job is not tried again (see
+the table below). A limit above a day is read as none. A worker image from
+before the limit ignores the key, and a job without the key has no limit.
+Both download for as long as it takes, and a download that is too slow then
+ends as the runner's own timeout, with no speed in its record.
 
 A model entry that cannot be fetched is a failed download of that file, not a
 job that breaks: a URL that is not http or https, a name that is not a plain
@@ -1139,7 +1167,8 @@ the worker had one). `timings.model_fetch_s` is the whole step, apart from
 **Fetch s (MB/s)** and a **Model downloads** row in its facts. That is the
 standing measurement of download speed. For a download that the time limit
 stopped, `bytes` and `mb_per_s` count what the unfinished files had received
-too, so the two columns show how slow it was.
+too, and `seconds` is the time up to the stop, so the two columns show how
+slow it was.
 
 **What the lint asks** of a workflow that runs on such a lane, switched on or
 not (`scripts/tests/test_manifest_lint.py`):
@@ -1858,9 +1887,11 @@ workflow has. A reference-level image workflow's files do not change at all:
   workflow that a run did not start, because its job could still have been
   running at the run's deadline. It has `error`, a sentence, and no
   `run.json`. The `run.json` of a job that used up its whole time on a
-  nightly or weekly lane has `"reason": "timed_out"`. A cell with
-  `"tries": 2` is the result of the second job such a run gave the workflow
-  at its end.
+  nightly or weekly lane has `"reason": "timed_out"`. So has, on every lane,
+  that of a job whose model download the worker stopped at its time limit,
+  and the cell of that workflow has `reason` too, with the sentence of what
+  the download reached under `error`. A cell with `"tries": 2` is the result
+  of the second job such a run gave the workflow at its end.
 - `attempt` counts the lane's runs of the commit. A run that names its
   workflows, or that publishes nothing, is none: its summary records the
   attempts counted so far (at least 1). The report of such a run names no
