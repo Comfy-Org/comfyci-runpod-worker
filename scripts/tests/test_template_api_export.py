@@ -436,6 +436,135 @@ def test_an_unknown_node_type_is_refused():
         convert(workflow)
 
 
+# ImageCropV2, ImageCropToMask and a node with a box in the middle, as ComfyUI
+# defines the first two (tooltips left out).
+BOX_NODES = {
+    "ImageCropV2": {
+        "input": {"required": {
+            "image": ["IMAGE", {}],
+            "crop_region": ["BOUNDING_BOX", {
+                "default": {"x": 0, "y": 0, "width": 512, "height": 512},
+                "socketless": True, "component": "ImageCrop"}],
+        }},
+        "input_order": {"required": ["image", "crop_region"]},
+    },
+    "ImageCropToMask": {
+        "input": {"required": {
+            "images": ["IMAGE", {}],
+            "width": ["INT", {"default": 1024}],
+            "height": ["INT", {"default": 1024}],
+            "pad_factor": ["FLOAT", {"default": 1.1}],
+            "grow_mask": ["INT", {"default": 0}],
+            "background": ["COLOR", {"default": "#000000", "socketless": True}],
+        }},
+        "input_order": {"required": ["images", "width", "height", "pad_factor", "grow_mask",
+                                     "background"]},
+    },
+    "BoxThenText": {
+        "input": {"required": {
+            "region": ["BOUNDING_BOX", {"default": {"x": 0, "y": 0, "width": 8, "height": 8}}],
+            "label": ["STRING", {"default": ""}],
+            "boxes": ["BOUNDING_BOX", {"forceInput": True}],
+        }},
+        "input_order": {"required": ["region", "label", "boxes"]},
+        "output_node": True,
+    },
+    "SaveImage": OBJECT_INFO["SaveImage"],
+}
+
+
+def box_workflow(crop_widgets, mask_widgets):
+    return {
+        "nodes": [
+            node(1, "ImageCropV2", widgets=crop_widgets,
+                 outputs=[{"name": "IMAGE", "type": "IMAGE", "links": [1]}]),
+            node(2, "ImageCropToMask", widgets=mask_widgets,
+                 inputs=[{"name": "images", "type": "IMAGE", "link": 1}],
+                 outputs=[{"name": "IMAGE", "type": "IMAGE", "links": [2]}]),
+            save(link=2),
+        ],
+        "links": [[1, 1, 0, 2, 0, "IMAGE"], [2, 2, 0, 99, 0, "IMAGE"]],
+    }
+
+
+def test_a_colour_and_a_bounding_box_are_widgets_with_a_value():
+    """3d_pixal3d_multi_views crops four views out of one sheet. Both values
+    were dropped, and the worker filled the default: a 512 px crop at 0, 0."""
+    front = {"x": 1652, "y": 0, "width": 1492, "height": 2688}
+    prompt = Converter(BOX_NODES).convert(
+        box_workflow([front, 0, 0, 512, 512], [1024, 768, 1.1, 0, "#848484"]))
+    assert prompt["1"]["inputs"] == {"crop_region": front}
+    assert prompt["2"]["inputs"] == {
+        "width": 1024, "height": 768, "pad_factor": 1.1, "grow_mask": 0,
+        "background": "#848484", "images": ["1", 0]}
+    # A node saved before it had the widgets takes the definition's values.
+    prompt = Converter(BOX_NODES).convert(box_workflow([], [1024, 768]))
+    assert prompt["1"]["inputs"] == {"crop_region": {"x": 0, "y": 0, "width": 512, "height": 512}}
+    assert prompt["2"]["inputs"]["background"] == "#000000"
+
+
+def test_the_four_numbers_stored_after_a_box_are_not_the_next_widgets():
+    """The frontend stores x, y, width and height once more after the box."""
+    box = {"x": 4, "y": 2, "width": 64, "height": 32}
+
+    def inputs(widgets):
+        workflow = {"nodes": [node(1, "BoxThenText", widgets=widgets)], "links": []}
+        return Converter(BOX_NODES).convert(workflow)["1"]["inputs"]
+
+    assert inputs([box, 4, 2, 64, 32, "front"]) == {"region": box, "label": "front"}
+    # Stored without the four numbers, the next value is the next widget's.
+    assert inputs([box, "front"]) == {"region": box, "label": "front"}
+    # A box that only a link can fill is no widget and takes no value.
+    assert "boxes" not in inputs([box, 4, 2, 64, 32, "front"])
+    for bad in ("front", 512, None, {"x": 0, "y": 0}):
+        with pytest.raises(ConversionError, match="region holds .* not a box with x, y, width"):
+            inputs([bad, "front"])
+
+
+# Painter, as ComfyUI defines it (comfy_extras/nodes_painter.py): the width
+# and the height are hidden widgets between the mask and the colour.
+PAINTER = {
+    "Painter": {
+        "input": {
+            "required": {
+                "mask": ["STRING", {"widgetType": "PAINTER", "image_upload": True,
+                                    "default": "", "socketless": True}],
+                "width": ["INT", {"hidden": True, "default": 512, "socketless": True}],
+                "height": ["INT", {"hidden": True, "default": 512, "socketless": True}],
+                "bg_color": ["COLOR", {"default": "#000000", "socketless": True}],
+            },
+            "optional": {"image": ["IMAGE", {}]},
+        },
+        "input_order": {"required": ["mask", "width", "height", "bg_color"],
+                        "optional": ["image"]},
+    },
+    "SaveImage": OBJECT_INFO["SaveImage"],
+}
+
+
+def test_a_hidden_widget_is_stored_like_any_other():
+    """image_anima_lllite_image_inpainting stores [mask, 1024, 1024, "#000000"].
+    A hidden widget took no value, so the colour got the width: Painter then
+    calls hex_to_rgb(1024) when no image is wired, and the run ends there."""
+    def inputs(widgets):
+        workflow = {
+            "nodes": [node(1, "Painter", widgets=widgets,
+                           outputs=[{"name": "IMAGE", "type": "IMAGE", "links": [1]}]),
+                      save(link=1)],
+            "links": [[1, 1, 0, 99, 0, "IMAGE"]],
+        }
+        return Converter(PAINTER).convert(workflow)["1"]["inputs"]
+
+    assert inputs(["", 1024, 768, "#ff0000"]) == {
+        "mask": "", "width": 1024, "height": 768, "bg_color": "#ff0000"}
+    # A node that stores no value for them gets the definition's.
+    assert inputs([""]) == {"mask": "", "width": 512, "height": 512, "bg_color": "#000000"}
+    # A colour input that would get another widget's value is refused.
+    for bad in (1024, None, "black", "#12"):
+        with pytest.raises(ConversionError, match="bg_color holds .* not a colour like #000000"):
+            inputs(["", 1024, 768, bad])
+
+
 # --------------------------------------------------------------------------- #
 # subgraphs
 # --------------------------------------------------------------------------- #
@@ -582,6 +711,98 @@ def test_socket_typed_subgraph_inputs_do_not_consume_a_widget_value():
     assert prompt["7:3"]["inputs"]["height"] == 768
 
 
+def test_an_instance_stores_a_value_for_each_input_it_shows_as_a_widget():
+    """Not for each input of a widget type. utility_image_segment_sam3 has two
+    STRING inputs wired to sockets that only a link can fill: counted as
+    widgets, they moved every value after them (threshold false,
+    refine_iterations "sam3.1_multiplex_fp16.safetensors")."""
+    workflow = subgraph_workflow([1024, 768], [])
+    definition = workflow["definitions"]["subgraphs"][0]
+    definition["inputs"].insert(0, {"name": "coords", "type": "STRING"})
+    for link in definition["links"]:
+        if link["origin_id"] == -10:
+            link["origin_slot"] += 1
+    definition["nodes"].append(
+        node(4, "PreviewAny", inputs=[{"name": "source", "type": "*", "link": 23}]))
+    definition["links"].append(
+        {"id": 23, "origin_id": -10, "origin_slot": 0, "target_id": 4, "target_slot": 0})
+    prompt = convert(workflow)
+    assert (prompt["7:3"]["inputs"]["width"], prompt["7:3"]["inputs"]["height"]) == (1024, 768)
+    assert prompt["7:4"]["inputs"] == {}
+    # An input of type * that feeds a widget is one, and a null leaves the
+    # inner node's value: templates_product_scene_transformation stores
+    # [null, 720, ...] for two such inputs.
+    definition["inputs"][1]["type"] = "*"
+    workflow["nodes"][0]["widgets_values"] = [None, 768]
+    prompt = convert(workflow)
+    assert (prompt["7:3"]["inputs"]["width"], prompt["7:3"]["inputs"]["height"]) == (512, 768)
+
+
+def test_an_instance_with_proxy_widgets_stores_its_values_in_their_order():
+    """Image_capybara_v0_1_text_to_image lists width and height before the
+    model names, the subgraph lists them after: read in the order of the
+    inputs, the latent got a model name for its height."""
+    workflow = subgraph_workflow([None, 768, 1024], [])
+    workflow["nodes"][0]["properties"] = {
+        "proxyWidgets": [["3", "batch_size"], ["-1", "height"], ["-1", "width"]]}
+    inputs = convert(workflow)["7:3"]["inputs"]
+    assert inputs == {"width": 1024, "height": 768, "batch_size": 1}
+    # Without stored values the inner nodes hold them.
+    workflow["nodes"][0]["widgets_values"] = []
+    assert convert(workflow)["7:3"]["inputs"] == {"width": 512, "height": 512, "batch_size": 1}
+    # The entries at the end of the list that store nothing leave no value:
+    # image_flux2_klein_text_to_image has 6 values for 8 entries.
+    workflow["nodes"][0]["widgets_values"] = [None, 768]
+    assert convert(workflow)["7:3"]["inputs"] == {"width": 512, "height": 768, "batch_size": 1}
+    # More values than widgets: no telling which is whose.
+    workflow["nodes"][0]["widgets_values"] = [None, 768, 1024, 2]
+    with pytest.raises(ConversionError, match="instance 7 stores 4 values for 3 promoted"):
+        convert(workflow)
+    # Unless nothing has to be read from them: both inputs are wired.
+    workflow["nodes"][0]["inputs"] = [
+        {"name": "width", "type": "INT", "widget": {"name": "width"}, "link": 5},
+        {"name": "height", "type": "INT", "widget": {"name": "height"}, "link": 6}]
+    workflow["links"] += [[5, 8, 0, 7, 0, "INT"], [6, 8, 0, 7, 1, "INT"]]
+    workflow["nodes"].append(node(8, "PrimitiveInt", widgets=[640], outputs=[
+        {"name": "INT", "type": "INT", "links": [5, 6]}]))
+    assert convert(workflow)["7:3"]["inputs"]["height"] == ["8", 0]
+
+
+def test_a_socket_inside_a_subgraph_gets_the_value_of_the_widget_it_shares_an_input_with():
+    """image_ernie_image shows its width in a PreviewAny. The subgraph input
+    feeds the latent's width widget, which holds the value, and the preview's
+    socket, which got no input at all."""
+    def workflow(instance_widgets=(), inner_widgets=(640, 512, 1)):
+        made = subgraph_workflow(list(instance_widgets), [])
+        definition = made["definitions"]["subgraphs"][0]
+        definition["nodes"][0]["widgets_values"] = list(inner_widgets)
+        definition["nodes"].append(
+            node(4, "PreviewAny", inputs=[{"name": "source", "type": "*", "link": 23}]))
+        definition["links"].append(
+            {"id": 23, "origin_id": -10, "origin_slot": 0, "target_id": 4, "target_slot": 0})
+        return made
+
+    prompt = convert(workflow())
+    assert prompt["7:4"]["inputs"] == {"source": 640}
+    assert prompt["7:3"]["inputs"]["width"] == 640
+    # A value the instance stores is the value of both.
+    prompt = convert(workflow(instance_widgets=[1024, 768]))
+    assert (prompt["7:4"]["inputs"]["source"], prompt["7:3"]["inputs"]["width"]) == (1024, 1024)
+    # Wired from outside, both read the wire.
+    wired = workflow()
+    wired["nodes"][0]["inputs"] = [
+        {"name": "width", "type": "INT", "widget": {"name": "width"}, "link": 5}]
+    wired["links"].append([5, 8, 0, 7, 0, "INT"])
+    wired["nodes"].append(node(8, "PrimitiveInt", widgets=[320],
+                               outputs=[{"name": "INT", "type": "INT", "links": [5]}]))
+    prompt = convert(wired)
+    assert prompt["7:4"]["inputs"]["source"] == prompt["7:3"]["inputs"]["width"] == ["8", 0]
+    # An input that no inner widget holds gives the socket nothing.
+    alone = workflow()
+    alone["definitions"]["subgraphs"][0]["links"][0]["origin_slot"] = 1
+    assert convert(alone)["7:4"]["inputs"] == {}
+
+
 # --------------------------------------------------------------------------- #
 # collapsing
 # --------------------------------------------------------------------------- #
@@ -660,6 +881,44 @@ def test_a_bypassed_node_forwards_its_output_to_its_first_input_of_that_type():
     prompt = convert(workflow)
     assert "2" not in prompt
     assert prompt["99"]["inputs"]["images"] == ["1", 0]
+
+
+def test_a_bypassed_node_forwards_as_the_frontend_does():
+    """image_ming_image_01_design_image_edit bypasses a ResizeImageMaskNode,
+    whose input is typed IMAGE,MASK: no input had exactly the output's type,
+    and the node after it lost its picture."""
+    def forwarded(inputs, outputs, read=0):
+        workflow = {
+            "nodes": [
+                node(1, "KSampler", outputs=[{"name": "a", "type": "IMAGE", "links": [1]}]),
+                node(3, "KSampler", outputs=[{"name": "b", "type": "IMAGE", "links": [3]}]),
+                node(2, "Resize", mode=4, inputs=inputs, outputs=outputs),
+                save(link=2),
+            ],
+            # Link 1 comes from node 1 and link 3 from node 3, into the slot that names it.
+            "links": [*([s["link"], s["link"], 0, 2, at, "IMAGE"]
+                        for at, s in enumerate(inputs) if s["link"]),
+                      [2, 2, read, 99, 0, "IMAGE"]],
+        }
+        return convert(workflow)["99"]["inputs"].get("images")
+
+    def slot(name, kind, link=None):
+        return {"name": name, "type": kind, "link": link}
+
+    image = [slot("resized", "IMAGE")]
+    # An input that lists the type takes it, and so does one of any type.
+    assert forwarded([slot("input", "IMAGE,MASK", 1)], image) == ["1", 0]
+    assert forwarded([slot("mask", "MASK"), slot("any", "*", 3)], image) == ["3", 0]
+    # An input of exactly the type goes before one that only takes it.
+    assert forwarded([slot("mask", "MASK"), slot("either", "IMAGE,MASK", 1),
+                      slot("image", "IMAGE", 3)], image) == ["3", 0]
+    # The input at the output's own position goes before the first of the type.
+    two = [slot("left", "IMAGE"), slot("right", "IMAGE")]
+    pair = [slot("left", "IMAGE", 1), slot("right", "IMAGE", 3)]
+    assert forwarded(pair, two, read=0) == ["1", 0]
+    assert forwarded(pair, two, read=1) == ["3", 0]
+    # No input takes the type: nothing is forwarded.
+    assert forwarded([slot("mask", "MASK", 1)], image) is None
 
 
 def test_autogrow_sockets_are_read_off_the_node_not_the_definition():

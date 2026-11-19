@@ -1,0 +1,151 @@
+{
+  "ckpt": {
+    "class_type": "ImageOnlyCheckpointLoader",
+    "inputs": {
+      "ckpt_name": "hunyuan3d-dit-v2-mv-turbo_fp16.safetensors"
+    }
+  },
+  "img_front": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "3d_hunyuan3d_multiview_to_model_turbo_front_view.png"
+    }
+  },
+  "vision_front": {
+    "class_type": "CLIPVisionEncode",
+    "inputs": {
+      "crop": "none",
+      "clip_vision": ["ckpt", 1],
+      "image": ["img_front", 0]
+    }
+  },
+  "img_left": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "3d_hunyuan3d_multiview_to_model_turbo_left_view.png"
+    }
+  },
+  "vision_left": {
+    "class_type": "CLIPVisionEncode",
+    "inputs": {
+      "crop": "none",
+      "clip_vision": ["ckpt", 1],
+      "image": ["img_left", 0]
+    }
+  },
+  "img_back": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "3d_hunyuan3d_multiview_to_model_turbo_back_view.png"
+    }
+  },
+  "vision_back": {
+    "class_type": "CLIPVisionEncode",
+    "inputs": {
+      "crop": "none",
+      "clip_vision": ["ckpt", 1],
+      "image": ["img_back", 0]
+    }
+  },
+  "img_right": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "3d_hunyuan3d_multiview_to_model_turbo_right_view.png"
+    }
+  },
+  "vision_right": {
+    "class_type": "CLIPVisionEncode",
+    "inputs": {
+      "crop": "none",
+      "clip_vision": ["ckpt", 1],
+      "image": ["img_right", 0]
+    }
+  },
+  "cond": {
+    "class_type": "Hunyuan3Dv2ConditioningMultiView",
+    "inputs": {
+      "front": ["vision_front", 0],
+      "left": ["vision_left", 0],
+      "back": ["vision_back", 0],
+      "right": ["vision_right", 0]
+    }
+  },
+  "guidance": {
+    "class_type": "FluxGuidance",
+    "inputs": {
+      "guidance": 3.5,
+      "conditioning": ["cond", 0]
+    }
+  },
+  "shift": {
+    "class_type": "ModelSamplingAuraFlow",
+    "inputs": {
+      "shift": 1.0,
+      "sampling": "flow",
+      "model": ["ckpt", 0]
+    }
+  },
+  "latent": {
+    "class_type": "EmptyLatentHunyuan3Dv2",
+    "inputs": {
+      "resolution": 3072,
+      "batch_size": 1
+    }
+  },
+  "sampler": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 528364197559477,
+      "steps": 20,
+      "cfg": 4,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1,
+      "model": ["shift", 0],
+      "positive": ["guidance", 0],
+      "negative": ["cond", 1],
+      "latent_image": ["latent", 0]
+    }
+  },
+  "decode": {
+    "class_type": "VAEDecodeHunyuan3D",
+    "inputs": {
+      "num_chunks": 8000,
+      "octree_resolution": 128,
+      "samples": ["sampler", 0],
+      "vae": ["ckpt", 2]
+    }
+  },
+  "mesh": {
+    "class_type": "VoxelToMesh",
+    "inputs": {
+      "algorithm": "surface net",
+      "threshold": 0.6,
+      "voxel": ["decode", 0]
+    }
+  },
+  "render": {
+    "class_type": "RenderMesh",
+    "inputs": {
+      "mesh": ["mesh", 0],
+      "mode": "normal",
+      "width": 1024,
+      "height": 1024,
+      "background": "#000000"
+    }
+  },
+  "save_png": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "hunyuan3d_2_mv_turbo_mv23d",
+      "images": ["render", 0]
+    }
+  },
+  "save_glb": {
+    "class_type": "SaveGLB",
+    "inputs": {
+      "filename_prefix": "hunyuan3d_2_mv_turbo_mv23d_mesh",
+      "mesh": ["mesh", 0]
+    }
+  }
+}
