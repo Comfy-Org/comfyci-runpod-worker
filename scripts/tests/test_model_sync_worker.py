@@ -310,6 +310,24 @@ def test_a_server_error_and_a_cut_connection_are_tried_again(comfy, host):
     assert not list((comfy / "models").rglob("*.part"))
 
 
+def test_a_header_that_is_a_digit_and_no_number_is_no_number(comfy, host):
+    """A superscript 2 is a digit for `str.isdigit` and no number for `int`. A
+    host that sent one as the length of a file made the file "a bad url", and
+    one that sent it as the wait after a 429 broke the whole fetch."""
+    odd = "\u00b2"
+    a = model(host, "a.safetensors")
+    host.routes["/a.safetensors"] = [(200, {"Content-Length": odd}, body_of("a.safetensors"))]
+    report = model_sync.fetch_local([a])
+    assert report["failed"] == [] and report["files"] == ["vae/a.safetensors"]
+    b = model(host, "b.safetensors")
+    host.routes["/b.safetensors"] = [(429, {"Retry-After": odd}, b""),
+                                     (200, {}, body_of("b.safetensors"))]
+    report = model_sync.fetch_local([b])
+    assert report["failed"] == [] and report["files"] == ["vae/b.safetensors"]
+    assert host.paths().count("/b.safetensors") == 2
+    assert model_sync.rate_limit_wait_s({"Retry-After": odd}) == model_sync.RETRY_WAIT_S
+
+
 @pytest.mark.parametrize("status", [401, 403, 404])
 def test_a_refused_file_is_an_access_error_and_is_not_tried_again(comfy, host, status):
     path = "/Lightricks/LTX-2.5/resolve/main/ltx.safetensors"

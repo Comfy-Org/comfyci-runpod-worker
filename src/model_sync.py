@@ -649,7 +649,7 @@ def rate_limit_wait_s(headers) -> int:
     seconds = int(found.group(1)) if found else None
     if seconds is None:
         after = (headers.get("Retry-After") or "").strip()
-        seconds = int(after) if after.isdigit() else RETRY_WAIT_S
+        seconds = int(after) if after.isdecimal() else RETRY_WAIT_S
     return min(seconds, RATE_LIMIT_MAX_WAIT_S)
 
 
