@@ -192,10 +192,10 @@ workflow and prints a note.
 | `--server URL`, `--object-info FILE` | where the node definitions come from, and with `--server` who checks the prompt |
 | `--templates-dir DIR`, `--templates-ref REF` | where the template comes from |
 | `--cadence`, `--level` | the entry's `cadence` (required) and `level` (default `smoke`) |
-| `--set <node>.<input>=<value>` | overrides a literal input. The value is JSON: `30`, `true`, `'"euler"'`. An unknown node or input stops the command and prints the node list |
+| `--set <node>.<input>=<value>` | overrides a literal input. The value is JSON: `30`, `true`, `'"euler"'`. An unknown node or input stops the command and prints the node list. Several are applied in the order given: the one that chooses an option comes before the values of that option's inputs |
 | `--expect key=number` | fills `expect`: `width`, `height`, `frames`, `seconds`, `min_chars` |
 | `--timeout-s N` | the entry's `timeout_s`. Absent: null, the manifest default of 600 |
-| `--keep-sampling` | leaves text generation sampled, at smoke level. Refused for now, see below |
+| `--keep-sampling` | leaves text generation as the template has it, sampled, and pins its seed. Smoke level only |
 | `--dry-run` | prints, writes nothing |
 | `--print` | writes the workflow file and prints the entry. The manifest stays as it is and no lint runs |
 | `--skip-sha` | asks no model host. The entry then has no `sha256` and no `bytes`, and the lint asks for the sizes |
@@ -212,7 +212,7 @@ synced. Then:
   | `SaveImage` or `SaveImageAdvanced`, one or more | a `SaveImage` for each, prefixed with the workflow id. A `SaveImageAdvanced` that does not write 8-bit sRGB PNG is refused | image |
   | only `PreviewImage` | the last `PreviewImage` that nothing reads becomes that `SaveImage` | image |
   | `SaveAnimatedWEBP`, `SaveAnimatedPNG` | a `SaveImage` of the last frame (`ImageFromBatch`). The animated file is not written | image |
-  | `SaveVideo` | the node, with `format` `mp4`, codec `h264` and prefix `<id>_video`, and a `SaveImage` of the last frame as the main output | image |
+  | `SaveVideo` | the node, with `format` `mp4`, codec `h264` and prefix `<id>_video`, and a `SaveImage` of the last frame as the main output. At smoke level the command prints a note: the limit of the clip check was not measured on clips of a model (see [Smoke level](#smoke-level)) | image |
   | `SaveGLB` fed by a mesh | the node, with prefix `<id>_mesh`, and a `RenderMesh` (1024 px, no camera) with a `SaveImage` as the main output | image |
   | `SaveGLB` fed by a 3D file, `Save3DAdvanced` | refused: "no mesh link to render: add a SaveGLB and a RenderMesh by hand" | |
   | `SaveAudioAdvanced`, `SaveAudio`, `SaveAudioMP3`, `SaveAudioOpus` | `SaveAudioAdvanced` with `format` `flac`, prefixed with the workflow id | audio |
@@ -225,7 +225,16 @@ synced. Then:
   is any other node that only shows something (`ImageCompare`), and the
   command names it.
 - **Text generation.** Every `TextGenerate` node is set to `sampling_mode`
-  `"off"` and `mtp` `"off"`, at both levels.
+  `"off"` and `mtp` `"off"`, at both levels. With `--keep-sampling` a
+  smoke-level workflow keeps what the template has: its `sampling_mode`, the
+  `sampling_mode.<name>` values that sampling reads, and its `mtp` (the
+  node's default, `"auto"`, where the template stores none). The entry pins
+  the seed. That alone does not promise the same text on every run: ComfyUI
+  describes `mtp` `"auto"` as adapting to what the decoder measures while it
+  runs, and nobody has measured on a worker whether such a text repeats.
+  `--set <node>.mtp='"off"'` next to the flag takes that out. At reference
+  level the flag is refused: the output is compared with a reference, so its
+  text is generated without sampling.
 - **Models.** Read from `properties.models` of the loader nodes that are left
   (name, URL, folder), with the `sha256` and the size Hugging Face publishes.
   A loader that lists nothing falls back to the links in the template's
@@ -247,7 +256,10 @@ synced. Then:
   "/runpod-volume/models/input"]`.
 - **Seeds.** Every literal `seed` and `noise_seed` gets a seed override with
   the template's value. A seed that another node feeds is pinned on that
-  node: the `value` of a `PrimitiveInt`.
+  node: the `value` of a `PrimitiveInt`. The seed of a sampled text
+  generation is a sub-input of its sampling mode, and its override names it
+  whole: `"sampling_mode.seed"`. The runner writes an override over the
+  input of that name.
 
 It refuses and does not guess. What it refuses today:
 
@@ -256,20 +268,29 @@ It refuses and does not guess. What it refuses today:
   nodes). Export such a workflow by hand, see below.
 - **A template that calls a paid service** through a partner node. Such a
   node needs an account key and credits, and the worker has neither.
-- **A workflow with a literal sub-input of a dynamic combo**, like
-  `format.codec` of `SaveVideo` or `sampling_mode.temperature` of a sampled
-  text generation. A worker of an image built before the worker kept such
-  inputs drops one before it queues the prompt, and the lint refuses a
-  workflow that has one until the image of every lane keeps it. The command holds the lint's rule, and a test holds the two
-  together. Until the rule goes a template that saves a clip is refused, and
-  so is `--keep-sampling`.
 - **An input the node of this ComfyUI does not have**: the template was made
   for another version of the node, and the run would go on without the value.
+  An input named `a.b` is a sub-input of the input `a`, like `format.codec`
+  of `SaveVideo` or `sampling_mode.temperature` of a sampled text
+  generation. `/object_info` lists `a` with its options, and each option
+  with the inputs it brings. The command takes `a.b` when the option chosen
+  for `a` has `b`, or when `a` is an input that grows (`images.image0`).
+  ComfyUI reads no other `a.b`, and says nothing about one it does not read.
+  The worker goes by `a` alone: it keeps every `a.b` whose `a` the node has.
+- **A text generation that is not greedy at reference level**, whether
+  `--keep-sampling` or a `--set` asks for it. A reference-level output is
+  compared with its reference, so its text is generated without sampling and
+  with `mtp` not `"auto"`. The lint holds a workflow written by hand to the
+  same rule.
 - **A required input with neither a link nor a value.** ComfyUI refuses such
   a prompt. The converter reads the widgets whose type it knows, and the
   value another widget holds is left out: the boxes of a
   `CreateBoundingBoxes`. `--set` can give the value. A list is written the
   way the frontend sends it: `--set '25.editor_state={"__value__": [...]}'`.
+  The inputs of a chosen option are required the same way, and the worker
+  fills in none of them: `--set 7.sampling_mode='"on"'` alone leaves the
+  node without the values sampling requires. Give each one with a `--set`
+  after it, or use `--keep-sampling`.
 - **A save node no check reads** (`SaveWEBM`), and a template that saves
   nothing.
 - **A loader whose models/ folder it does not know** and that lists no file
@@ -382,16 +403,28 @@ workflows), is written by hand. The rules are the ones the command follows.
      the file that is compared. A template usually ends in `PreviewAny`, which
      writes no file: replace it. Any second output node is prefixed `<id>_`,
      and a second `SaveText` is compared too, by file name.
-   - Text generation is greedy: every `TextGenerate` node has
-     `sampling_mode` `"off"` and an `mtp` that is written out and is not
+   - At reference level text generation is greedy: every `TextGenerate` node
+     has `sampling_mode` `"off"` and an `mtp` that is written out and is not
      `"auto"` (use `"off"`). The text has to be the same on every run, because
-     it passes only on an exact match. `mtp` `"auto"` follows measured
-     timings, and a worker of an image built before the worker kept dotted
-     inputs removes the `sampling_mode.<name>` values that sampling needs.
-   - `seed_overrides` is `{}` (greedy decoding has no seed) and `thresholds`
-     is `null`. Only when an exact match is known not to hold, set
-     `"thresholds": {"min_text_similarity": 0.98}`, a number above 0 and at
-     most 1 (see [Verdicts](#verdicts)).
+     it passes only on an exact match, and `mtp` `"auto"` follows measured
+     timings. The lint asks this of every reference-level workflow, also of
+     one whose generated text is the prompt of a picture.
+   - At smoke level nothing is compared, so a text generation may sample as
+     its template does: `sampling_mode` `"on"`, with the
+     `sampling_mode.<name>` values next to it. ComfyUI 0.45.0 requires six
+     of them and refuses the prompt when one is missing ("Required input is
+     missing"): `sampling_mode.temperature`, `.top_k`, `.top_p`, `.min_p`,
+     `.repetition_penalty` and `.seed`. `TextGenerateV2` requires
+     `sampling_mode.presence_penalty` too. The worker fills in none of them.
+     The lint has no node definitions and asks for `sampling_mode.seed`
+     alone, so the prompt check of step 3 is what finds another one that is
+     missing. With `mtp` `"auto"` the text may differ from run to run
+     although its seed is pinned.
+   - `seed_overrides` is `{}` for a greedy workflow (greedy decoding has no
+     seed), and names `"sampling_mode.seed"` on the node of a sampled one.
+     `thresholds` is `null`. Only when an exact match is known not to hold,
+     set `"thresholds": {"min_text_similarity": 0.98}`, a number above 0 and
+     at most 1 (see [Verdicts](#verdicts)).
    - Input images are listed under `models` with `"directory": "input"`, as
      for any workflow.
 
@@ -446,9 +479,11 @@ workflows), is written by hand. The rules are the ones the command follows.
    every workflow it references (loaded files and `models` match both ways,
    every node feeds an output node, seed override targets, model folders,
    `SaveImage` prefix = workflow id; for a text workflow the `SaveText` rules
-   and greedy generation above). Then confirm a real server accepts the
-   prompt, which is what catches a conversion that produced a valid-looking
-   file with the wrong input names:
+   above, for every reference-level workflow greedy text generation, and for
+   a smoke-level one that samples its `sampling_mode.seed`). Then confirm a
+   real server accepts the prompt, which is what catches a conversion that
+   produced a valid-looking file with the wrong input names, and an option
+   whose required inputs are not all there:
 
    ```
    curl -sS -X POST http://127.0.0.1:8188/prompt -H 'Content-Type: application/json' \
@@ -670,7 +705,9 @@ at most 0.62 of what a frame needs, and each moving one at least 1.15. No
 clip of a model is among them, and no manifest entry has a video at smoke
 level today. Before the first video workflow gets the smoke level, measure
 real clips of its model (`bytes_per_frame_mp` in `smoke.files`, times the
-megapixels) and check the limit against them.
+megapixels) and check the limit against them. The import command takes a
+template that saves a clip at smoke level, its default, and prints a note
+that says this.
 
 - **A file that cannot be read fails.** A cut or broken file is a problem of
   that file (check `decode`), never a crash of the run.
@@ -1593,6 +1630,25 @@ The cu132 lane is the worked example.
    (its `env.image_sha` tells). Check `isStale` in the endpoint's worker list
    before generating goldens; setting the endpoint's max workers to 0 and back
    to its normal value flushes the stale workers within seconds.
+
+   The tag also decides which workflows the endpoint can run. A worker of an
+   image built before commit `9286a6fc` removes every literal input named
+   `a.b` from a prompt. ComfyUI then refuses a workflow that samples its
+   text, and a `SaveVideo` picks the codec itself, whatever the file says (see
+   [Notes](#notes)). The lint does not look at the image. So an endpoint
+   must run an image built from `9286a6fc` or later before a workflow with
+   such an input runs on its lane. `runpod_endpoints.py status` prints the
+   tag of every endpoint, and a tag ends in the commit its image was built
+   from (`git merge-base --is-ancestor 9286a6fc <commit>` exits 0 when that
+   commit has the change). An endpoint that was created from an older tag
+   keeps it until a build repoints the lane, and a merge that only writes
+   its `endpoint_id` builds nothing. Move such an endpoint by hand, then
+   flush its workers:
+
+   ```
+   RUNPOD_API_KEY=... python scripts/runpod_endpoints.py set-image \
+       --lane <lane id> --tag <image>-<sha>
+   ```
 4. Generate and bless goldens for the lane: **Golden baselines** with the
    current release tag, `workflows: all`, `lane: <lane id>`, inspect, then
    `bless_only`.
@@ -1798,7 +1854,9 @@ in order:
    `src/`, `docker/` or the pack registry, only an image whose entry is new
    or changed on main otherwise, and none when the merge only adds a lane or
    an endpoint id. A lane whose image was not built keeps the tag its
-   endpoint has.
+   endpoint has. A tag from before commit `9286a6fc` does not keep a literal
+   input named `a.b`: move the endpoint before a workflow with one runs on
+   its lane (see [Adding a lane](#adding-a-lane), step 3).
 6. Expect the cron to test master HEAD on cu132 within minutes of the
    merge, before the repoint or before the stale workers are flushed, so on
    the branch's image or a mix of old and new workers. A commit is tested
@@ -2218,10 +2276,28 @@ workflow has. A reference-level image workflow's files do not change at all:
   workflow under the limit together, or run it at smoke level.
 - An input named `a.b` in a workflow file is a sub-input of the input `a`:
   the codec of a `SaveVideo` format, the seed of a sampling mode. The worker
-  keeps a literal one when `a` is an input of the node. Before, it removed
-  every one, and ComfyUI then refused the prompt. The lint still refuses
-  them (`test_no_input_the_worker_would_strip`) until the image with that
-  change is live on every endpoint.
+  keeps a literal one when `a` is an input of the node. A worker of an image
+  built before commit `9286a6fc` removes every one. Where the chosen option
+  needs the input, ComfyUI then refuses the prompt (`prompt_rejected`,
+  "Required input is missing"): the `sampling_mode.temperature` of a sampled
+  text generation, the `resize_type.width` of a `ResizeImageMaskNode`. Where
+  it does not, the run goes on without the value the workflow file has: a
+  `SaveVideo` without its `format.codec` picks the codec itself (ComfyUI
+  0.45.0). The lint refused such a workflow until the images with that
+  change ran, and takes it now. So the image is what is left to check: an
+  endpoint runs an image built from `9286a6fc` or later before a workflow
+  with such an input runs on it (see [Adding a lane](#adding-a-lane),
+  step 3).
+- The worker goes by `a` alone, and fills in a default only for an input
+  that has no dot in its name. So it queues a prompt whose chosen option
+  lacks a required `a.b`, which ComfyUI refuses (`prompt_rejected`), and it
+  keeps an `a.b` that the chosen option does not have, which ComfyUI does
+  not read and does not name. The import command refuses both, with the
+  node definitions of the ComfyUI it is given. The lint has none: of a
+  workflow written by hand it asks only for the `sampling_mode.seed` of a
+  smoke-level text generation that samples, and the prompt check of
+  [A workflow written by hand](#a-workflow-written-by-hand), step 3, finds
+  the rest.
 - Local dry run without publishing anything:
   `python scripts/run_regression.py --commit <sha> --branch test --skip-publish`
 - Script tests (run on every PR by the *Script tests* workflow):

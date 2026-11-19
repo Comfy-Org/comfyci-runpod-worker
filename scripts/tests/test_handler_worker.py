@@ -405,8 +405,9 @@ def test_the_files_of_an_answer_fit_runpods_limit():
 def test_a_dotted_sub_input_stays_when_its_input_is_known(monkeypatch):
     """SaveVideo takes its codec as `format.codec`, sampled text generation
     its seed as `sampling_mode.seed`. /object_info lists `format` and
-    `sampling_mode` only, so the worker removed them as unknown, and ComfyUI
-    then rejected the prompt."""
+    `sampling_mode` only, so the worker removed them as unknown. ComfyUI then
+    rejected the text generation ("Required input is missing"), and a
+    SaveVideo picked its codec itself, whatever the workflow file named."""
     info = {"SaveVideo": {"input": {"required": {
                 "video": ["VIDEO"], "filename_prefix": ["STRING", {"default": "video/ComfyUI"}],
                 "format": ["COMFY_DYNAMICCOMBO_V3", {"options": []}]}}},

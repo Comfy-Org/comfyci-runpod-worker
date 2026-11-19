@@ -16,7 +16,8 @@ What it does to the template, step by step:
 
 * converts it the way the frontend's Export (API) does and picks the branch a
   constant switch selects (``template_api_export.py``)
-* sets every ``TextGenerate`` node to greedy decoding, unless ``--keep-sampling``
+* sets every ``TextGenerate`` node to greedy decoding. ``--keep-sampling``
+  leaves a smoke-level workflow as the template has it
 * names each output after the workflow id and adds the picture a video or a
   mesh is shown and compared by (``normalise_sinks``)
 * drops the preview nodes
@@ -41,11 +42,12 @@ node instance (``CustomCombo``), one that needs nodes the server does not
 have, or one that saves a file no check can read, is refused with the reason.
 
 What the manifest lint would refuse in the new entry is refused before
-anything is written, and a dry run says it too: a literal sub-input of a
-dynamic combo, a model folder the worker does not search, a file the manifest
-lists as another file, a seed nothing pins. A file the manifest already lists
-is written the way the manifest has it. A rule that adds up the whole
-manifest, like the room on the volume, is the lint's alone.
+anything is written, and a dry run says it too: a text generation that is not
+greedy at reference level, whether the flag or a ``--set`` made it so, one
+that samples without its seed, a model folder the worker does not search, a
+file the manifest lists as another file, a seed nothing pins. A file the
+manifest already lists is written the way the manifest has it. A rule that
+adds up the whole manifest, like the room on the volume, is the lint's alone.
 """
 
 from __future__ import annotations
@@ -73,6 +75,7 @@ import lanes as lanes_mod  # noqa: E402
 from template_api_export import (  # noqa: E402
     ConversionError,
     Converter,
+    DYNAMIC_COMBO,
     FlatGraph,
     OUTPUT_PREFIXES,
     PREVIEW_PREFIXES,
@@ -224,9 +227,10 @@ def fill_file_combos(object_info: dict[str, Any], template: dict[str, Any]) -> s
 def greedy_text(prompt: dict[str, dict[str, Any]], object_info: dict[str, Any]) -> None:
     """Make every text generation greedy: no sampling, no multi-token head.
 
-    A sampled text differs from run to run, and the worker strips the
-    ``sampling_mode.<name>`` values that sampling needs. An input the node of
-    this ComfyUI does not have is not added.
+    A sampled text can differ from run to run, and a reference-level output
+    is compared with its reference. The sub-inputs that only sampling reads
+    (``sampling_mode.<name>``) go with it. An input the node of this ComfyUI
+    does not have is not added.
     """
     for node in prompt.values():
         if not node["class_type"].startswith("TextGenerate"):
@@ -553,7 +557,9 @@ def apply_sets(prompt: dict[str, dict[str, Any]], object_info: dict[str, Any],
     """Apply the ``--set <node>.<input>=<value>`` overrides. Values are JSON.
 
     An input name may hold a dot of its own (``format.codec``), a node id
-    never does, so the first dot ends the id.
+    never does, so the first dot ends the id. They are applied in the order
+    given, and a node has the inputs of the options chosen so far: the one
+    that switches ``sampling_mode`` on comes before ``sampling_mode.seed``.
     """
     for text in sets:
         target, equals, raw = text.partition("=")
@@ -570,9 +576,8 @@ def apply_sets(prompt: dict[str, dict[str, Any]], object_info: dict[str, Any],
         node = prompt.get(node_id)
         if node is None:
             raise ConversionError(f"--set {text}: the workflow has no node {node_id}")
-        spec = (object_info.get(node["class_type"]) or {}).get("input") or {}
-        known = set(node["inputs"]) | set(spec.get("required") or {}) | set(
-            spec.get("optional") or {})
+        required, optional, _ = chosen_inputs(object_info, node)
+        known = set(node["inputs"]) | set(required) | set(optional)
         if name not in known:
             raise ConversionError(
                 f"--set {text}: node {node_id} ({node['class_type']}) has no input {name}")
@@ -590,33 +595,75 @@ def _node_inputs(object_info: dict[str, Any], class_type: str) -> dict[str, Any]
     return {**(spec.get("required") or {}), **(spec.get("optional") or {})}
 
 
-def dotted_literals(prompt: dict[str, dict[str, Any]]) -> list[str]:
-    """The literal ``name.sub`` inputs: the sub-inputs of a dynamic combo.
+def _kind(entry: Any) -> Any:
+    """The type the definition of an input names."""
+    return entry[0] if isinstance(entry, (list, tuple)) and entry else None
 
-    The manifest lint refuses a workflow that has one
-    (``test_no_input_the_worker_would_strip``), because the worker's image
-    drops such an input before it queues the prompt. This is the lint's own
-    rule, and a test holds the two together: the rule goes there first, on
-    the day the image that runs keeps these inputs.
+
+def chosen_inputs(object_info: dict[str, Any], node: dict[str, Any],
+                  ) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+    """The inputs a node has with the options its values choose: the required
+    ones and the optional ones by name, and the names of those that grow.
+
+    ``/object_info`` lists the inputs of a class by name. A dynamic combo
+    (the ``sampling_mode`` of a text generation, the ``format`` of a
+    ``SaveVideo``) brings the inputs of the option its value chooses, named
+    ``<combo>.<input>``, and ComfyUI reads no other sub-input of it. Nothing
+    is chosen while the combo has no value, a link, or a value that is no
+    option. A combo inside an option (``format.codec``) is asked for by
+    ComfyUI only when the prompt has it, so it is listed as optional here.
+    An input that grows (``images``) takes its values under names of its own
+    (``images.image0``), which are not listed.
     """
-    return sorted(f"{node_id}:{node['class_type']}.{name}" for node_id, node in prompt.items()
-                  for name, value in node["inputs"].items()
-                  if "." in name and not isinstance(value, list))
+    required: dict[str, Any] = {}
+    optional: dict[str, Any] = {}
+    growing: list[str] = []
+
+    def take(inputs: dict[str, Any], prefix: str) -> None:
+        for section, into in (("required", required), ("optional", optional)):
+            for name, entry in (inputs.get(section) or {}).items():
+                full = prefix + name
+                if _kind(entry) in GROWING:
+                    growing.append(full)
+                if _kind(entry) != DYNAMIC_COMBO:
+                    into[full] = entry
+                    continue
+                (optional if prefix else into)[full] = entry
+                chosen = next((option for option in _entry_opts(entry).get("options") or []
+                               if isinstance(option, dict) and full in node["inputs"]
+                               and option.get("key") == node["inputs"][full]), None)
+                if chosen:
+                    take(chosen.get("inputs") or {}, f"{full}.")
+
+    take((object_info.get(node["class_type"]) or {}).get("input") or {}, "")
+    return required, optional, growing
 
 
 def unknown_literals(prompt: dict[str, dict[str, Any]], object_info: dict[str, Any]) -> list[str]:
     """The literal inputs a node of this ComfyUI does not have.
 
-    The worker drops such an input before it queues the prompt, and ComfyUI
-    would not read it either: the run would go on without the value the
-    template has. A sub-input is known when its combo is.
+    ComfyUI does not read such an input, and says nothing: the run would go
+    on without the value the template has. An input named ``a.b`` is a
+    sub-input of the input ``a`` (the codec of a ``SaveVideo`` format, the
+    seed of a sampling mode). The node has it when the option chosen for
+    ``a`` does, or when ``a`` grows (``chosen_inputs``).
+
+    The worker's rule is wider. It drops a literal input whose name, or whose
+    part before the first dot, is no input of the class, and keeps every
+    other ``a.b``. So what the worker drops is named here, and so is a
+    sub-input it keeps and ComfyUI passes over.
     """
-    return sorted(
-        f"{node_id}:{node['class_type']}.{name}" for node_id, node in prompt.items()
-        if node["class_type"] in object_info
-        for name, value in node["inputs"].items()
-        if not isinstance(value, list)
-        and name.split(".")[0] not in _node_inputs(object_info, node["class_type"]))
+    found = []
+    for node_id, node in prompt.items():
+        if node["class_type"] not in object_info:
+            continue
+        required, optional, growing = chosen_inputs(object_info, node)
+        for name, value in node["inputs"].items():
+            if isinstance(value, list) or name in required or name in optional:
+                continue
+            if not any(name.startswith(f"{grown}.") for grown in growing):
+                found.append(f"{node_id}:{node['class_type']}.{name}")
+    return sorted(found)
 
 
 def open_required(prompt: dict[str, dict[str, Any]], object_info: dict[str, Any]) -> list[str]:
@@ -625,18 +672,40 @@ def open_required(prompt: dict[str, dict[str, Any]], object_info: dict[str, Any]
     ComfyUI refuses such a prompt: "Required input is missing". The converter
     reads the widgets whose type it knows, and the value another widget holds
     is left out without a word: the boxes of a ``CreateBoundingBoxes``, whose
-    type is ``BOUNDING_BOXES``. An input that grows is not looked at: its
-    values come under names of their own (``images.image0``).
+    type is ``BOUNDING_BOXES``. The inputs of a chosen option are required
+    like any other: a text generation switched to sampling needs its
+    ``sampling_mode.temperature``, and the worker fills in no sub-input. An
+    input that grows is not looked at: its values come under names of their
+    own (``images.image0``).
     """
     found = []
     for node_id, node in prompt.items():
-        spec = (object_info.get(node["class_type"]) or {}).get("input") or {}
-        for name, entry in (spec.get("required") or {}).items():
-            kind = entry[0] if isinstance(entry, (list, tuple)) and entry else None
+        for name, entry in chosen_inputs(object_info, node)[0].items():
+            kind = _kind(entry)
             if name not in node["inputs"] and kind not in GROWING:
                 found.append(f"{node_id}:{node['class_type']}.{name}"
                              + (f" ({kind})" if isinstance(kind, str) else ""))
     return sorted(found)
+
+
+def not_greedy(prompt: dict[str, dict[str, Any]]) -> list[str]:
+    """What keeps a text generation from writing the same text on every run.
+
+    The lint's rule for a reference-level workflow, in the lint's words:
+    sampling, and the multi-token-prediction head, whose ``auto`` mode
+    follows measured timings. ``greedy_text`` leaves neither. A ``--set``
+    can bring one back, and a node of an older ComfyUI may have no ``mtp``
+    to write out.
+    """
+    problems = []
+    for node_id, node in prompt.items():
+        if not node["class_type"].startswith("TextGenerate"):
+            continue
+        if node["inputs"].get("sampling_mode") != "off":
+            problems.append(f"{node_id}: sampling_mode must be 'off' (greedy decoding)")
+        if node["inputs"].get("mtp") in (None, "auto"):
+            problems.append(f"{node_id}: mtp must be set, and not to 'auto'")
+    return problems
 
 
 def refuse_stray_files(prompt: dict[str, dict[str, Any]], object_info: dict[str, Any]) -> None:
@@ -703,6 +772,18 @@ def finish_prompt(template: dict[str, Any], object_info: dict[str, Any], workflo
             "the template's output is audio, and nothing compares audio yet: "
             "use --level smoke"
         )
+    if level == "reference" and not_greedy(prompt):
+        raise ConversionError(
+            "a reference-level output is compared with its reference, so its text is "
+            f"generated the same on every run: {', '.join(not_greedy(prompt))}. The lint "
+            "asks this of every reference-level workflow: use --level smoke for one that "
+            "samples"
+        )
+    if level == "smoke":
+        notes += [f"note: node {nid} saves a clip, and the limit the smoke check holds a clip "
+                  "to rests on made-up clips: measure clips of this model against it before "
+                  "the workflow is merged (README, Smoke level)"
+                  for nid, node in prompt.items() if node["class_type"] == "SaveVideo"]
     partner = sorted({node["class_type"] for node in prompt.values()
                       if (object_info.get(node["class_type"]) or {}).get("api_node")})
     if partner:
@@ -716,31 +797,21 @@ def finish_prompt(template: dict[str, Any], object_info: dict[str, Any], workflo
             if not _finite(value):
                 raise ConversionError(
                     f"{node_id}.{name} is {value!r}, a number JSON cannot hold")
-    dotted = dotted_literals(prompt)
-    if dotted:
-        raise ConversionError(
-            "the worker drops these inputs before it queues the prompt, so the workflow "
-            f"cannot run as the template has it yet: {', '.join(dotted)}. They are "
-            "sub-inputs of a dynamic combo, which the worker keeps once its image is "
-            "rebuilt with the fix. The manifest lint refuses them until then"
-            + (". Without --keep-sampling the text generation is made greedy and "
-               "needs none of them" if keep_sampling else "")
-        )
     unknown = unknown_literals(prompt, object_info)
     if unknown:
         raise ConversionError(
-            "the worker drops these inputs before it queues the prompt, because the node "
-            f"of this ComfyUI does not have them: {', '.join(unknown)}. The template was "
-            "made for another version of the node"
+            "the node of this ComfyUI does not have these inputs, so a run would go on "
+            f"without the values they hold: {', '.join(unknown)}. The template was made for "
+            "another version of the node, or a --set chose an option that does not take them"
         )
     left_open = open_required(prompt, object_info)
     if left_open:
         raise ConversionError(
             "ComfyUI refuses a prompt without these required inputs, and the converter "
             f"found neither a link nor a value for them: {', '.join(left_open)}. The "
-            "template leaves the input open, or holds its value in a widget of a type the "
-            "converter does not read. Give the value with --set, or write the workflow by "
-            "hand"
+            "template leaves the input open, holds its value in a widget of a type the "
+            "converter does not read, or does not choose the option the input belongs to. "
+            "Give the value with --set, or write the workflow by hand"
         )
     return prompt, kind, filled, notes
 
@@ -1102,16 +1173,24 @@ def _seed_source(prompt: dict[str, dict[str, Any]], node_id: str, name: str) -> 
     return source_id, held[0]
 
 
+def is_seed(name: str) -> bool:
+    """Whether an input is a seed, by its name. A sub-input goes by its last
+    part: ``sampling_mode.seed`` is the seed of a sampled text generation."""
+    return name.rsplit(".", 1)[-1] in SEED_NAMES
+
+
 def seed_overrides(prompt: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """The seed inputs a run must pin, with the values the template already has.
 
     A seed that a link feeds is pinned where its number is (``_seed_source``):
-    the lint asks every workflow that has a seed input for an override.
+    the lint asks every workflow that has a seed input for an override. A
+    sub-input is named whole, as the workflow file has it: the runner writes
+    an override over the input of that name, dot or no dot.
     """
     overrides: dict[str, dict[str, Any]] = {}
     for node_id, node in prompt.items():
         for name, value in node["inputs"].items():
-            if name not in SEED_NAMES:
+            if not is_seed(name):
                 continue
             if isinstance(value, int):
                 overrides.setdefault(node_id, {})[name] = value
@@ -1634,7 +1713,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=[],
         metavar="NODE.INPUT=VALUE",
         help="Override a literal input, with a JSON value. For what a CI run makes "
-        "smaller: 30 s of audio, 25 frames. Repeatable.",
+        "smaller: 30 s of audio, 25 frames. Repeatable, applied in the order given.",
     )
     parser.add_argument(
         "--expect",
@@ -1709,8 +1788,8 @@ def early_refusal(args: argparse.Namespace, workflow_id: str, seen: str,
     if args.timeout_s is not None and not 0 < args.timeout_s < 3600:
         return "--timeout-s is above 0 and under 3600, the endpoint's limit for a job"
     if args.keep_sampling and args.level != "smoke":
-        return ("--keep-sampling is for a smoke-level workflow: a reference-level text is "
-                "compared word for word, so it is generated without sampling")
+        return ("--keep-sampling is for a smoke-level workflow: a reference-level output is "
+                "compared with its reference, so its text is generated without sampling")
     if not args.print_entry:
         problem = _layout_problem(ROOT / "manifest" / "workflows.json", seen, manifest)
         if problem:
