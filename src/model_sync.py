@@ -334,7 +334,7 @@ def _twin(response) -> socket.socket | None:
     thread that is not the reader. None when there is no way to one."""
     try:
         return socket.fromfd(response.fileno(), socket.AF_INET, socket.SOCK_STREAM)
-    except (AttributeError, OSError, ValueError):
+    except (AttributeError, OSError, TypeError, ValueError):
         return None
 
 

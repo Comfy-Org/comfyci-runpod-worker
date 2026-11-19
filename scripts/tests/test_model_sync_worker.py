@@ -1089,15 +1089,17 @@ def test_a_slow_connection_is_left_with_the_next_bytes_it_sends(comfy, host, mon
 
 
 def test_a_host_that_does_not_answer_cannot_hold_the_job_back(comfy, host, monkeypatch):
-    monkeypatch.setattr(model_sync, "FETCH_STOP_WAIT_S", 0.3)
+    monkeypatch.setattr(model_sync, "FETCH_STOP_WAIT_S", 1)
     mute = model(host, "mute.safetensors")
     host.routes["/mute.safetensors"] = [(200, {"X-Silent": "1"}, body_of("mute.safetensors"))]
     started = time.monotonic()
     report = model_sync.fetch_local([mute], timeout_s=0.6)
-    assert time.monotonic() - started < 0.6 + 0.3 + 2
+    assert time.monotonic() - started < 0.6 + 1 + 2
     (failed,) = report["failed"]
     assert (failed["received_bytes"], failed["mb_per_s"], failed["files_done"]) == (0, 0.0, 0)
     assert (report["bytes"], report["mb_per_s"], report["files"]) == (0, 0.0, [])
+    # The seconds it says are the limit's, not those and the wait after it.
+    assert 0 < failed["seconds"] <= 0.6 + 0.4 and report["seconds"] == failed["seconds"]
     assert not _parts(comfy)
     # The host answers at last, with the whole file. The job is over: the
     # download opens no part file, and nothing is put in place.
@@ -1109,18 +1111,18 @@ def test_a_host_that_does_not_answer_cannot_hold_the_job_back(comfy, host, monke
 @pytest.mark.parametrize("fast_pieces", [0, 1])
 def test_a_read_that_waits_for_its_piece_is_ended_by_the_job(comfy, host, monkeypatch,
                                                              fast_pieces):
-    """A read waits until its piece is whole. On a connection that sends a
-    byte a second, from its first byte on or after a fast first piece, that
-    is 12 days for one piece, and nothing has judged the connection slow yet.
-    Such a download held its thread, its connection and its open part file
-    long after the job had answered. Now the job shuts the connection."""
+    """A read waits until its piece is whole. On a connection that sends 20
+    bytes a second, from its first byte on or after a fast first piece, that
+    is 14 hours for one piece, and nothing has judged the connection slow
+    yet. Such a download held its thread, its connection and its open part
+    file long after the job had answered. Now the job shuts the connection."""
     monkeypatch.setattr(model_sync, "FETCH_STOP_WAIT_S", 3)
     monkeypatch.setattr(model_sync, "FETCH_CUT_AFTER_S", 0.3)
     piece = model_sync.PIECE_BYTES
     body = body_of("drip", 3 * piece)
     drip = model(host, "drip.safetensors", body)
     host.routes["/drip.safetensors"] = [
-        (200, {"X-Trickle": "1", "X-First": str(fast_pieces * piece + 500)}, body)]
+        (200, {"X-Trickle": "20", "X-First": str(fast_pieces * piece + 500)}, body)]
     started = time.monotonic()
     report = model_sync.fetch_local([drip], timeout_s=0.6)
     # The limit and the wait until the connection is shut, not the 3 s after
@@ -1235,7 +1237,7 @@ def test_a_file_that_failed_ends_the_job_beside_a_read_that_does_not_end(comfy, 
     monkeypatch.setattr(model_sync, "FETCH_LOOK_S", 0.1)
     body = body_of("drip", 2 * MIB)
     drip = model(host, "drip.safetensors", body)
-    host.routes["/drip.safetensors"] = [(200, {"X-Trickle": "1"}, body)]
+    host.routes["/drip.safetensors"] = [(200, {"X-Trickle": "20"}, body)]
     bad = {**model(host, "bad.safetensors"), "sha256": "0" * 64}
     # Should the job wait for the read after all, the test still ends.
     rescue = threading.Timer(8, host.hold.set)
