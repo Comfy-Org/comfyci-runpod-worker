@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_ts": 1795038640,
+  "generated_ts": 1795062351,
   "primary": "py313-torch2.14.1-cu130",
   "lanes": {
     "py312-torch2.11.0-cu128": {
@@ -81,11 +81,11 @@
       "branches": {
         "master": {
           "latest": {
-            "commit": "a277b5bf213e8a44fa34817b7770b54f86ef4cea",
-            "run_ts": 1795038639,
+            "commit": "2a40840b1943a1a0984d2834c31b8517b0f01070",
+            "run_ts": 1795062349,
             "overall": "pass"
           },
-          "count": 164,
+          "count": 165,
           "shards": [
             "2026-10",
             "2026-11"
@@ -154,6 +154,32 @@
       "cuda": "13.2",
       "gpu": "RTX 4090",
       "cadence": "per-commit",
+      "blocking": false,
+      "role": "lane",
+      "layout": 2,
+      "branches": {},
+      "goldens": {}
+    },
+    "py313-torch2.14.1-cu130-nightly": {
+      "label": "nightly \u00b7 py3.13 / torch 2.14.1 / cu130 / RTX 4090",
+      "python": "3.13",
+      "torch": "2.14.1",
+      "cuda": "13.0",
+      "gpu": "RTX 4090",
+      "cadence": "nightly",
+      "blocking": false,
+      "role": "lane",
+      "layout": 2,
+      "branches": {},
+      "goldens": {}
+    },
+    "py313-torch2.14.1-cu130-weekly": {
+      "label": "weekly \u00b7 py3.13 / torch 2.14.1 / cu130 / RTX 4090",
+      "python": "3.13",
+      "torch": "2.14.1",
+      "cuda": "13.0",
+      "gpu": "RTX 4090",
+      "cadence": "weekly",
       "blocking": false,
       "role": "lane",
       "layout": 2,
