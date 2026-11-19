@@ -2301,9 +2301,17 @@ NO_RETRY_WHY = {"missing_model": "Its models are not on the volume yet",
 def cron_would_retry(d: LaneData) -> bool:
     """Whether the commit has an untested workflow that another run could
     test: the cron's reason for its one retry (regression_skip.has_infra_error).
-    A workflow whose status is in regression_skip.NO_RETRY is not one."""
-    statuses = [v.cell.get("worker_status") for v in d.views if v.state == "infra"]
-    return any(not (isinstance(s, str) and s in regression_skip.NO_RETRY) for s in statuses)
+    A workflow that regression_skip.no_retry names is not one: its status is
+    in NO_RETRY, or its job used up a time limit."""
+    return any(not regression_skip.no_retry(v.cell) for v in d.views if v.state == "infra")
+
+
+def download_stopped(v: View) -> bool:
+    """A workflow whose model download the worker stopped at the time limit
+    of its job: its cell says `"reason": "timed_out"`, and so does the failure
+    in its run.json. Nothing tries such a job again."""
+    return (regression_skip.used_up_its_time(v.cell)
+            or as_dict(v.run.get("error")).get("reason") == regression_skip.TIMED_OUT)
 
 
 def second_try(v: View) -> bool:
@@ -2321,6 +2329,9 @@ def untested_on_a_long_lane(d: LaneData, v: View) -> list[str]:
     if second_try(v):
         tried = ("The run tried it once more at its end, and this is the result of that "
                  "second job.")
+    elif download_stopped(v):
+        tried = ("Its model download used up the time it was given, so the run did not try "
+                 "it again: a second download can cost as much.")
     elif v.run.get("reason") == "timed_out":  # submit_and_poll.TIMED_OUT, in its run.json
         tried = ("Its job used up its whole time, so the run did not try it again: a second "
                  "job can cost as much.")
@@ -2397,6 +2408,11 @@ def error_block(d: LaneData, v: View, limits: Limits) -> list[str]:
             # Its attempt number is that of the runs before it: nothing about a
             # retry can be read from it.
             out.append("This run is no attempt of the lane, so it changes nothing for the cron.")
+        elif (spent < regression_skip.MAX_ATTEMPTS and download_stopped(v)
+              and not cron_would_retry(d)):
+            out.append("Its model download used up the time it was given. Another run can "
+                       "cost as much, so the cron does not test the commit again. Dispatch "
+                       "**GPU regression** with this commit to test it again.")
         elif (spent < regression_skip.MAX_ATTEMPTS and isinstance(held, str)
               and held in NO_RETRY_WHY and not cron_would_retry(d)):
             out.append(f"{NO_RETRY_WHY[held]}. Another run right away would end the same way, "

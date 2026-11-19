@@ -3482,6 +3482,103 @@ def test_the_run_refuses_a_number_of_streams_the_worker_would_not_take(tmp_path,
     assert "--fetch-streams: must be at most 16" in capsys.readouterr().err
 
 
+SLOW = {"message": "the download was too slow: 12.4 of 56.6 GB in 600 s (20.7 MB/s), "
+                   "2 of 5 files complete",
+        "reason": "timed_out", "timeout_s": 2265, "received_bytes": 12_400_000_000,
+        "wanted_bytes": 56_600_000_000, "seconds": 600.2, "mb_per_s": 20.7, "files_done": 2,
+        "files_wanted": 5}
+
+
+class SlowEndpoint:
+    """Stands in for RunPod: every job is answered at once by a worker that
+    stopped its download at the limit the job named. It keeps the job inputs."""
+
+    def __init__(self):
+        self.inputs = []
+
+    def __call__(self, endpoint_id):
+        return self
+
+    def run(self, job_input):
+        self.inputs.append(job_input)
+        return f"job-{len(self.inputs)}"
+
+    def status(self, job_id):
+        return {"status": "COMPLETED", "delayTime": 10, "executionTime": 601000, "output": {
+            "status": "model_fetch_error", "failure": SLOW, "lane": "weekly",
+            "timings": {"checkout_s": 1.9, "pip_s": 0.0, "model_fetch_s": 600.3},
+            "model_fetch": {"files": 2, "bytes": 3_200_000_000, "seconds": 600.2,
+                            "mb_per_s": 20.7, "streams": 4, "token": True, "reused": 0,
+                            "reused_bytes": 0, "evicted": 0}}}
+
+    def cancel(self, job_id):
+        return True
+
+
+def test_a_download_the_worker_stopped_is_said_in_the_cell_and_not_tried_again(tmp_path,
+                                                                              monkeypatch):
+    """The whole way of such a job on the runner, with the real client code:
+    one job is submitted, by the pool and not again by the pass at the end.
+    The cell says what the download reached, and that its time was used up."""
+    import submit_and_poll
+    models = [_model("a.safetensors", 56_600_000_000)]
+    lane = _fetch_lane(tmp_path, monkeypatch, {
+        "ref": {"cadence": "weekly", "models": models},
+        "smoke": {"level": "smoke", "cadence": "weekly", "models": models}})
+    endpoint = SlowEndpoint()
+    monkeypatch.setattr(run_regression, "run_workflow_job", submit_and_poll.run_workflow_job)
+    monkeypatch.setattr(run_regression, "RunPodClient", endpoint)
+    code, summary = lane.run("c1", "weekly")
+    # A weekly run with an untested workflow is red, and each got one job.
+    assert code == 1 and sorted(sent["workflow_id"] for sent in endpoint.inputs) == [
+        "ref", "smoke"]
+    # 56.6 GB at 25 MB a second: what the runner waits, and what the worker is told.
+    assert {sent["fetch_timeout_s"] for sent in endpoint.inputs} == {2264}
+    for wf_id, level_keys in (("ref", []), ("smoke", ["level", "smoke"])):
+        cell = summary["workflows"][wf_id]
+        assert (cell["worker_status"], cell["verdict"]) == ("model_fetch_error", "infra_error")
+        assert (cell["reason"], cell["error"]) == ("timed_out", SLOW["message"])
+        assert list(cell) == CELL_KEYS + level_keys + ["reason", "error", "prior_verdict",
+                                                       "prior_commit"]
+        assert "tries" not in cell and cell["timings"]["model_fetch_s"] == 600.3
+        record = lane.json(f"regression/lanes/weekly/runs/master/c1/{wf_id}/run.json")
+        assert (record["status"], record["reason"], record["attempt"]) == (
+            "model_fetch_error", "timed_out", 1)
+        assert record["error"] == SLOW and record["model_fetch"]["mb_per_s"] == 20.7
+        # The pass at the end of the run reads the record, as for any job
+        # that used up its time.
+        assert not run_regression.worth_another_try(cell, record)
+        assert run_regression.worth_another_try(cell, {**record, "reason": None})
+    # The next run of the lane finds the commit tested: for the cron this is
+    # no reason to test it again.
+    published = lane.json("regression/lanes/weekly/runs/master/c1/summary.json")
+    run, why = run_regression.regression_skip.decide("c1", published)
+    assert not run and "2 untested workflows whose job used up its time" in why
+
+    # A per-commit lane whose jobs fetch gives a job two attempts. This one
+    # gets no second, and the cron does not test the commit again either.
+    registry = {**FETCH_LANES, "lanes": {**FETCH_LANES["lanes"], "main": {
+        **FETCH_LANES["lanes"]["main"], "model_storage": "job"}}}
+    lane = _fetch_lane(tmp_path / "per-commit", monkeypatch, {"wf": {"models": models}})
+    monkeypatch.setattr(index_builder, "load_lanes", lambda path=None: registry)
+    endpoint = SlowEndpoint()
+    monkeypatch.setattr(run_regression, "run_workflow_job", submit_and_poll.run_workflow_job)
+    monkeypatch.setattr(run_regression, "RunPodClient", endpoint)
+    code, summary = lane.run("c1", "main")
+    assert code == 0 and len(endpoint.inputs) == 1  # not red: the workflow was not tested
+    assert summary["has_infra_error"] is True and summary["workflows"]["wf"]["reason"] == (
+        "timed_out")
+    assert not run_regression.regression_skip.decide("c1", summary)[0]
+    # A job whose download failed for another reason has neither key in its
+    # cell, and is a reason for the cron as it was.
+    lane = _fetch_lane(tmp_path / "failed", monkeypatch, {"wf": {"models": models}})
+    monkeypatch.setattr(index_builder, "load_lanes", lambda path=None: registry)
+    lane.status["wf"] = "model_fetch_error"
+    code, summary = lane.run("c1", "main")
+    assert list(summary["workflows"]["wf"]) == CELL_KEYS + ["prior_verdict", "prior_commit"]
+    assert run_regression.regression_skip.decide("c1", summary)[0]
+
+
 # -- a picture that did not arrive --------------------------------------------------------
 # The worker sends output files up to a size limit, the smallest first, and
 # lists the rest as not sent (src/handler.py).

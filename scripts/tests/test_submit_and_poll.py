@@ -569,9 +569,17 @@ def test_a_job_of_a_lane_that_fetches_is_told_to(tmp_path):
 
     asked = JOB_INPUT[:-1] + ', "fetch_missing": true}'
     assert sent(fetch_missing=True) == asked
-    assert sent(fetch_missing=True, fetch_allowance_s=400) == asked  # the runner's own business
+    # How long the runner waits is its own business. What the worker hears of
+    # it is how long the download may take: here 400 s and the workflow's 10,
+    # less the 60 s the worker's answer is given.
+    limited = asked[:-1] + ', "fetch_timeout_s": 350}'
+    assert sent(fetch_missing=True, fetch_allowance_s=400) == limited
     assert sent(fetch_missing=True, fetch_streams=1) == asked[:-1] + ', "fetch_streams": 1}'
+    assert sent(fetch_missing=True, fetch_allowance_s=400, fetch_streams=1) == (
+        limited[:-1] + ', "fetch_streams": 1}')
     assert sent(fetch_missing=False, fetch_streams=1) == JOB_INPUT
+    # The limit is for a job that fetches, like the allowance it comes from.
+    assert sent(fetch_allowance_s=400) == JOB_INPUT
 
 
 def test_the_record_carries_the_fetch_report_only_when_the_worker_sent_one(tmp_path):
@@ -642,3 +650,102 @@ def test_a_failed_download_is_tried_again_and_a_refused_file_is_not(tmp_path):
     rec = _job(client, tmp_path)
     assert (client.runs, rec["status"], rec["error"]) == (1, "model_access_error", refused)
     assert rec["model_fetch"] == {"files": 0, "token": False}
+
+
+# -- a time limit for the download, on the worker -----------------------------------------
+def test_how_long_the_worker_gives_a_download():
+    """The allowance the runner waits for the download, and 600 s at the
+    least: a small download is connections and waits more than it is bytes."""
+    limit = submit_and_poll.fetch_timeout_s
+    assert (submit_and_poll.FETCH_TIMEOUT_MIN_S, submit_and_poll.FETCH_TIMEOUT_MARGIN_S) == (
+        600, 60)
+    # 60 GB at 25 MB a second, whatever the workflow's own timeout.
+    assert limit(600, 2401) == limit(2400, 2401) == 2401
+    # A small download gets the least there is, when the workflow's time allows.
+    assert limit(900, 100) == limit(900, 0) == 600
+    # It ends 60 s before the allowance and the timeout together do.
+    assert limit(600, 0) == 540 and limit(600, 30) == 570 and limit(600, 60) == 600
+    assert limit(10, 400) == 350 and limit(100, 2401) == 2401
+    # A whole number of seconds, as the job input carries it.
+    assert limit(600.0, 2400.7) == 2400 and isinstance(limit(600.0, 2400.7), int)
+    # Nothing is left of such a job's time: no limit, as before the key.
+    assert limit(10, 0) is None and limit(60, 0) is None and limit(30, 30.5) is None
+
+
+def test_the_worker_stops_a_download_before_the_runner_stops_waiting():
+    """The runner gives a job 900 s to start, the allowance for its download
+    and the workflow's timeout, and then cancels it. The worker's limit for
+    the download ends at least 60 s before that, when the start took no more
+    than its 900 s: the time the worker waits for its downloads to end, its
+    answer's way, and the pause until the runner looks again."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    import model_sync
+    import regression_skip
+    # One word, in the worker's answer, in the run record and in the cell.
+    assert model_sync.TIMED_OUT == submit_and_poll.TIMED_OUT == regression_skip.TIMED_OUT
+    start, margin = submit_and_poll.COLD_START_ALLOWANCE_S, submit_and_poll.FETCH_TIMEOUT_MARGIN_S
+    assert margin >= model_sync.FETCH_STOP_WAIT_S + submit_and_poll.POLL_INTERVAL_S + 30
+    assert submit_and_poll.FETCH_TIMEOUT_MIN_S > model_sync.RATE_LIMIT_MAX_WAIT_S
+    for timeout_s in (60, 61, 300, 600, 900, 1200, 2400, 3300):
+        for allowance in (0, 1, 12, 59, 60, 400, 600, 632, 2264, 2401):
+            limit = submit_and_poll.fetch_timeout_s(timeout_s, allowance)
+            if limit is None:
+                assert allowance + timeout_s - margin < 1
+                continue
+            gives_up = submit_and_poll.poll_deadline_s(timeout_s, 600, allowance)
+            assert gives_up - (start + limit) >= margin, (timeout_s, allowance)
+            # With the manifest's timeouts (600 s and more) the answer of a
+            # download of 15 GB or more has the workflow's whole time.
+            if timeout_s >= 600 and allowance >= 600:
+                assert limit == allowance and gives_up - (start + limit) == timeout_s
+
+
+SLOW = {"message": "the download was too slow: 12.4 of 56.6 GB in 600 s (20.7 MB/s), "
+                   "2 of 5 files complete",
+        "reason": "timed_out", "timeout_s": 600, "received_bytes": 12_400_000_000,
+        "wanted_bytes": 56_600_000_000, "seconds": 600.2, "mb_per_s": 20.7, "files_done": 2,
+        "files_wanted": 5}
+FETCHED = {"files": 2, "bytes": 3_200_000_000, "seconds": 600.2, "mb_per_s": 20.7, "streams": 4,
+           "token": True, "reused": 0, "reused_bytes": 0, "evicted": 0}
+
+
+def test_a_download_the_worker_stopped_is_not_submitted_again(tmp_path):
+    """A `model_fetch_error` is tried again at once. Not this one: the worker
+    stopped the download because its time was up, and a second job can take
+    as long and cost as much. Its record says so where the record of a job
+    that the runner gave up on says it."""
+    stopped = {"status": "COMPLETED", "delayTime": 10, "executionTime": 601000, "output": {
+        "status": "model_fetch_error", "failure": SLOW, "model_fetch": FETCHED,
+        "timings": {"checkout_s": 1.9, "model_fetch_s": 600.3}}}
+    for attempts in (2, 1):
+        client = Sent([stopped, DONE])
+        rec = submit_and_poll.run_workflow_job(
+            client, "wf", {}, comfy_commit="c" * 40, models=[], timeout_s=600, comfy_flags=[],
+            workdir=tmp_path, attempts=attempts, fetch_missing=True, fetch_allowance_s=600)
+        assert client.runs == 1 and client.inputs[0]["fetch_timeout_s"] == 600, attempts
+        assert (rec["status"], rec["reason"], rec["attempt"]) == (
+            "model_fetch_error", "timed_out", 1)
+        assert rec["error"] == SLOW and rec["model_fetch"] == FETCHED
+        assert list(rec) == (RECORD_KEYS[:14] + ["model_fetch"] + RECORD_KEYS[14:16] + ["reason"]
+                             + RECORD_KEYS[16:])
+    # What a worker image from before the limit answers to the same job, which
+    # the key in its input changes nothing about: a download that failed is
+    # tried again as it was, and a job that passed is recorded as it was.
+    plain = {"message": "model download failed: vae/x: HTTP 503 Service Unavailable"}
+    client = Sent([{"status": "COMPLETED", "output": {"status": "model_fetch_error",
+                                                      "failure": plain}}, DONE])
+    rec = submit_and_poll.run_workflow_job(
+        client, "wf", {}, comfy_commit="c" * 40, models=[], timeout_s=600, comfy_flags=[],
+        workdir=tmp_path, fetch_missing=True, fetch_allowance_s=600)
+    assert (client.runs, rec["status"], rec["attempt"]) == (2, "ok", 2)
+    assert list(rec) == RECORD_KEYS and [sent["fetch_timeout_s"] for sent in client.inputs] == [
+        600, 600]
+    # The mark is the worker's failure saying `reason`, and nothing else.
+    marked = submit_and_poll.stopped_at_its_limit
+    assert marked({"status": "model_fetch_error", "error": SLOW})
+    for other in ({}, {"error": None}, {"error": "timed_out"}, {"error": {"reason": "slow"}},
+                  {"error": {"message": "timed_out"}}, {"reason": "timed_out"},
+                  {"status": "infra_error", "error": {"message": "x"}, "reason": "timed_out"}):
+        assert not marked(other), other

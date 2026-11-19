@@ -36,6 +36,12 @@ told to download what the volume does not hold, and the runner waits longer
 for it: the bytes of the workflow's models at 25 MB a second. Its run record
 says how the download went (`model_fetch`). No other lane's job changes.
 
+A download that takes longer than the job was given is stopped by the worker
+(submit_and_poll.fetch_timeout_s). Its workflow is not tested, and the job is
+not tried again, on any lane: a second download can cost as much. Its cell
+says what the download reached (`error`) and that its time was used up
+(`reason`), which keeps the cron from testing the commit again for it.
+
 Usage (CI):
   python run_regression.py --commit $GITHUB_SHA --branch master \
       [--manifest ../manifest/workflows.json] [--workflows all] \
@@ -68,7 +74,7 @@ import regression_skip
 import smoke
 import storage
 from submit_and_poll import (INFRA_STATUSES, QUEUE_DEADLINE_S, TIMED_OUT, RunPodClient,
-                             poll_deadline_s, run_workflow_job)
+                             poll_deadline_s, run_workflow_job, stopped_at_its_limit)
 
 HERE = Path(__file__).resolve().parent
 # A run submits all its jobs at once, and the endpoint has fewer workers than a
@@ -516,6 +522,12 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
     if cmp_ is None:  # absent means reference: those cells keep their keys too
         cell["level"] = level
         cell["smoke"] = comparison["smoke"]
+    if stopped_at_its_limit(run_rec):
+        # The worker stopped the job's download at its time limit. No other
+        # cell of a job has these two keys. `reason` is what the skip rule
+        # reads (regression_skip.no_retry), `error` what a page shows.
+        cell["reason"] = TIMED_OUT
+        cell["error"] = str(run_rec["error"].get("message") or "")[:1000]
     return cell
 
 
@@ -704,7 +716,9 @@ def worth_another_try(cell: dict, record: dict) -> bool:
     again: it was not tested, and for a reason that can pass (the queue, the
     network, a worker error, a failed model download). Not when another job
     would end the same way (NO_SECOND_TRY), and not when its job used up its
-    whole time: a second one can cost another hour. `record` is its run.json."""
+    whole time: a second one can cost another hour. That is a job RunPod
+    ended or the runner gave up on, and one whose download the worker stopped
+    at its time limit. `record` is its run.json."""
     if cell.get("verdict") != "infra_error" or cell.get("worker_status") in NO_SECOND_TRY:
         return False
     return record.get("reason") != TIMED_OUT

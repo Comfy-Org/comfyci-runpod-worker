@@ -15,11 +15,19 @@ On a lane whose jobs fetch their models (`"model_storage": "job"`), the job
 input says `fetch_missing`, the runner waits `fetch_allowance_s` longer for the
 job, and the record carries the worker's `model_fetch` report. A job of any
 other lane is sent and recorded as it always was.
+
+Such a job is also told how long its download may take (`fetch_timeout_s` in
+the job input, from `fetch_timeout_s` below). The worker stops a download that
+takes longer and answers at once with what it reached, before the runner would
+stop waiting. Its answer is a `model_fetch_error` that says
+`"reason": "timed_out"`: the job used up its time, so it is not submitted
+again, and its record says the same under `reason`.
 """
 from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import time
 from pathlib import Path
@@ -42,6 +50,17 @@ TIMED_OUT = "timed_out"
 # seconds after its first signal. The run itself waits for no call past its
 # own limit for the stop (run_regression.STOP_BUDGET_S).
 STOP_CANCEL_TIMEOUT_S = 3
+# What a job's download gets on the worker at the least, whatever its size.
+# The allowance is the models' bytes at the planning speed. A small download
+# is not bytes alone: it opens connections, and a rate limit can make it wait
+# 300 s (src/model_sync.py, RATE_LIMIT_MAX_WAIT_S).
+FETCH_TIMEOUT_MIN_S = 600
+# Seconds between the worker's time limit for a download and the end of what
+# the runner allows the job for its download and its workflow together. They
+# cover the 10 s the worker waits for its downloads to end
+# (src/model_sync.py, FETCH_STOP_WAIT_S), the way of its answer and the pause
+# until the runner's next look, 10 s at the most.
+FETCH_TIMEOUT_MARGIN_S = 60
 # How long the status of a job may be out of reach before the runner gives the
 # job up: failed looks in a row, times the pause between two looks. At the
 # usual pause of 10 s that is the 30 looks it always was.
@@ -152,6 +171,31 @@ def poll_deadline_s(exec_timeout_s: float, queue_deadline_s: float = QUEUE_DEADL
             + max(0, queue_deadline_s - QUEUE_DEADLINE_S))
 
 
+def fetch_timeout_s(exec_timeout_s: float, fetch_allowance_s: float) -> int | None:
+    """Seconds the worker gives a job's download before it stops it and
+    answers with what it reached: the allowance the runner waits for the
+    download, and FETCH_TIMEOUT_MIN_S at the least.
+
+    The runner stops waiting for a job `poll_deadline_s` after it submitted
+    it: 900 s for the queue and the start, the allowance, and the workflow's
+    own timeout. A job that is stopped in its download does not use the
+    workflow's time, so the worker's answer has that long to arrive. To hold
+    that for a short timeout too, the limit ends FETCH_TIMEOUT_MARGIN_S before
+    the allowance and the timeout together do. None when nothing is left
+    then: such a job gets no limit, as before the key existed."""
+    limit = min(max(fetch_allowance_s, FETCH_TIMEOUT_MIN_S),
+                fetch_allowance_s + exec_timeout_s - FETCH_TIMEOUT_MARGIN_S)
+    return math.floor(limit) if limit >= 1 else None
+
+
+def stopped_at_its_limit(record: dict) -> bool:
+    """Whether a worker's answer says that its job used up a time limit the
+    runner gave it: `"reason": "timed_out"` in its failure. Today that is a
+    download the worker stopped at `fetch_timeout_s`."""
+    failure = record.get("error")
+    return isinstance(failure, dict) and failure.get("reason") == TIMED_OUT
+
+
 def _poll(client: RunPodClient, job_id: str, exec_timeout_s: float,
           queue_deadline_s: float = QUEUE_DEADLINE_S,
           poll_interval_s: float = POLL_INTERVAL_S, fetch_allowance_s: float = 0) -> dict:
@@ -242,8 +286,14 @@ def run_workflow_job(client: RunPodClient, workflow_id: str, workflow_json: dict
     `fetch_missing` is for a lane whose jobs fetch their models: the worker
     then downloads what the volume does not hold before it runs the workflow,
     `fetch_streams` files at once (its own default when None), and the runner
-    waits `fetch_allowance_s` longer. The job input carries the two keys only
-    then, so the input of any other job is what it always was.
+    waits `fetch_allowance_s` longer. The worker is told how long the download
+    may take (`fetch_timeout_s`). The job input carries these keys only then,
+    so the input of any other job is what it always was.
+
+    A job whose download the worker stopped at that limit is not submitted
+    again, whatever `attempts` says: a second download can cost as much as
+    the first. Its record is the worker's answer, a `model_fetch_error`, with
+    `"reason": "timed_out"` beside it.
     """
     job_input = {
         "mode": "run",
@@ -259,6 +309,9 @@ def run_workflow_job(client: RunPodClient, workflow_id: str, workflow_json: dict
     }
     if fetch_missing:
         job_input["fetch_missing"] = True
+        limit = fetch_timeout_s(timeout_s, fetch_allowance_s)
+        if limit is not None:
+            job_input["fetch_timeout_s"] = limit
         if fetch_streams is not None:
             job_input["fetch_streams"] = fetch_streams
     else:
@@ -301,6 +354,11 @@ def run_workflow_job(client: RunPodClient, workflow_id: str, workflow_json: dict
             record["model_fetch"] = out["model_fetch"]
         record["runpod_job_id"] = job_id
         record["attempt"] = attempt
+        # The worker stopped the job at a time limit: the record says so where
+        # a job that the runner gave up on says it, and nothing tries it again.
+        stopped = stopped_at_its_limit(record)
+        if stopped:
+            record["reason"] = TIMED_OUT
         delay = st.get("delayTime")  # RunPod reports milliseconds
         record["delay_ms"] = delay if isinstance(delay, (int, float)) else None
         record["delay_s"] = round(delay / 1000, 3) if isinstance(delay, (int, float)) else None
@@ -308,7 +366,7 @@ def run_workflow_job(client: RunPodClient, workflow_id: str, workflow_json: dict
         outputs_dir = workdir / "outputs"
         record["outputs"] = _write_outputs(out.get("outputs") or [], outputs_dir)
         record["outputs_dir"] = str(outputs_dir)
-        if record["status"] in RETRYABLE_STATUSES and attempt < attempts:
+        if record["status"] in RETRYABLE_STATUSES and attempt < attempts and not stopped:
             last_err = f"worker infra status {record['status']}: {json.dumps(record.get('error'))[:500]}"
             continue
         return record

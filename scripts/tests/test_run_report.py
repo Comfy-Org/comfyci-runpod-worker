@@ -4961,3 +4961,84 @@ def test_a_download_that_failed_names_the_files():
     many = [{"model": f"vae/m{i}", "error": "HTTP 503"} for i in range(12)]
     block = _unfetched("model_fetch_error", {"message": "down", "failed": many})
     assert [line for line in block if line.endswith("<code>vae/m9</code> (HTTP 503), +2 more")]
+
+
+# What the worker answers when it stopped a download at the job's time limit
+# (src/model_sync.py, too_slow and fetch_failure).
+STOPPED = {"message": "the download was too slow: 12.4 of 56.6 GB in 600 s (20.7 MB/s), "
+                      "2 of 5 files complete",
+           "reason": "timed_out", "timeout_s": 600, "received_bytes": 12_400_000_000,
+           "wanted_bytes": 56_600_000_000, "seconds": 600.2, "mb_per_s": 20.7, "files_done": 2,
+           "files_wanted": 5}
+STOPPED["failed"] = [{"error": STOPPED["message"],
+                      **{key: value for key, value in STOPPED.items() if key != "message"}}]
+ARRIVED = {"files": 2, "bytes": 12_400_000_000, "seconds": 600.2, "mb_per_s": 20.7}
+
+
+def test_a_download_that_ran_out_of_time_says_what_it_reached():
+    """The worker stopped the download at the limit the runner gave the job.
+    The page says how far it came and how fast, and that nothing tried the
+    job again: a second download can cost as much."""
+    block = _unfetched("model_fetch_error", STOPPED, **ARRIVED)
+    assert block[1].startswith(
+        "An infrastructure problem stopped this workflow. Worker status: "
+        "<code>model\\_fetch\\_error</code>. This is not a verdict on the commit. Its model "
+        "download used up the time it was given, so the run did not try it again: a second "
+        f"download can cost as much. {NEXT_RUN}")
+    assert ("- **Message:** the download was too slow: 12.4 of 56.6 GB in 600 s (20.7 MB/s), "
+            "2 of 5 files complete") in block
+    assert "- **Timeout:** the worker gave up after 600 s" in block
+    assert not [line for line in block if "Not downloaded" in line or "What to do" in line]
+    # Its row has the two numbers that were missing when a slow download ended
+    # as the runner's own timeout: what arrived, and how fast.
+    cell = {**_smoke_cell(MESH, verdict="infra_error", worker_status="model_fetch_error"),
+            "timings": {"checkout_s": 1.9, "pip_s": 0.0, "model_fetch_s": 600.3},
+            "reason": "timed_out", "error": STOPPED["message"]}
+    run = {**_run(MESH, "model_fetch_error", error=STOPPED), "reason": "timed_out",
+           "timings": cell["timings"],
+           "model_fetch": {"streams": 4, "token": True, "reused": 0, "reused_bytes": 0,
+                           "evicted": 0, **ARRIVED}}
+    out = _night_report([cell], runs={MESH: run})
+    row = next(line for line in out.split("\n") if line.startswith(f"| `{MESH}` "))
+    assert " | 12.4 | 600.3 (21) | " in row
+    assert ("| Model downloads | 12.4 GB downloaded by 1 job in 600 s of downloading, 21 MB/s "
+            "on average |") in out.split("\n")
+    # The cell alone says it too: a page made without the job's record.
+    del run["error"], run["reason"]
+    out = _night_report([cell], runs={MESH: run})
+    assert "Its model download used up the time it was given, so the run did not try" in out
+    assert f"- **Message:** {STOPPED['message']}" in out.split("\n")
+    # A job that RunPod ended or the runner gave up on keeps its own words.
+    plain = _smoke_cell(MESH, verdict="infra_error", worker_status="infra_error")
+    out = _night_report([plain], runs={MESH: _run(MESH, "infra_error", reason="timed_out")})
+    assert "Its job used up its whole time, so the run did not try it again" in out
+    assert "model download" not in out
+
+
+def test_a_download_that_ran_out_of_time_does_not_make_the_cron_test_the_commit_again():
+    stopped = {**_cell("sdxl_t2i", "infra_error", worker_status="model_fetch_error"),
+               "reason": "timed_out", "error": STOPPED["message"]}
+    runs = {"sdxl_t2i": {**_run("sdxl_t2i", "model_fetch_error", error=STOPPED),
+                         "reason": "timed_out"}}
+    said = ("An infrastructure problem stopped this workflow. Worker status: "
+            "<code>model\\_fetch\\_error</code>. This is not a verdict on the commit. Its model "
+            "download used up the time it was given. Another run can cost as much, so the cron "
+            "does not test the commit again. Dispatch **GPU regression** with this commit to "
+            "test it again.")
+    summary = _summary([_cell("flux_dev_t2i"), stopped])
+    out = _report(_tree(summary, runs=runs))
+    assert said in out and ONCE_MORE not in out and "attempt 1 of" not in out
+    assert not run_report.regression_skip.decide(SHA, summary)[0]
+    assert f"- **Message:** {STOPPED['message']}" in out.split("\n")
+    # From the cell alone, without the job's record.
+    assert said in _report(_tree(summary))
+    # Beside a workflow that another run can test, the cron tests the commit
+    # once more, and the page says so of both.
+    mixed = _summary([stopped, _cell("flux_dev_t2i", "infra_error",
+                                     worker_status="worker_error")])
+    out = _report(_tree(mixed, runs=runs))
+    assert out.count(ONCE_MORE) == 2 and said not in out
+    assert run_report.regression_skip.decide(SHA, mixed)[0]
+    # A download that failed for another reason is tried again, as it was.
+    failed = _summary([_cell("sdxl_t2i", "infra_error", worker_status="model_fetch_error")])
+    assert ONCE_MORE in _report(_tree(failed))
