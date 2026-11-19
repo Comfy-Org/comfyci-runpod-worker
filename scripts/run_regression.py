@@ -31,10 +31,22 @@ again the next minute. So such a run behaves in its own way:
 - Its summary says for each red workflow how many commits lie between the
   workflow's own last result and this commit (`ranges`).
 
+On a lane whose jobs fetch their models (`"model_storage": "job"`) each job is
+told to download what the volume does not hold, and the runner waits longer
+for it: the bytes of the workflow's models at 25 MB a second. Its run record
+says how the download went (`model_fetch`). No other lane's job changes.
+
+A download that takes longer than the job was given is stopped by the worker
+(submit_and_poll.fetch_timeout_s). Its workflow is not tested, and the job is
+not tried again, on any lane: a second download can cost as much. Its cell
+says what the download reached (`error`) and that its time was used up
+(`reason`), which keeps the cron from testing the commit again for it.
+
 Usage (CI):
   python run_regression.py --commit $GITHUB_SHA --branch master \
       [--manifest ../manifest/workflows.json] [--workflows all] \
       [--summary-out summary.json] [--max-in-flight N] [--deadline-minutes N]
+      [--fetch-streams N]
 Env: RUNPOD_API_KEY, RUNPOD_ENDPOINT_ID; GITHUB_TOKEN to push results in
 Actions (github storage) or GOOGLE_APPLICATION_CREDENTIALS (gcs storage).
 """
@@ -62,7 +74,7 @@ import regression_skip
 import smoke
 import storage
 from submit_and_poll import (INFRA_STATUSES, QUEUE_DEADLINE_S, TIMED_OUT, RunPodClient,
-                             poll_deadline_s, run_workflow_job)
+                             poll_deadline_s, run_workflow_job, stopped_at_its_limit)
 
 HERE = Path(__file__).resolve().parent
 # A run submits all its jobs at once, and the endpoint has fewer workers than a
@@ -82,6 +94,10 @@ LONG_POLL_INTERVAL_S = 3
 DEADLINE_MARGIN_MIN = lanes_mod.DEADLINE_MARGIN_MIN
 # Such a run pushes what it has after this many workflows.
 CHECKPOINT_EVERY = 10
+# The most files a job can be told to download at once (`--fetch-streams`).
+# The worker takes 1 to 16 (src/handler.py) and uses its own number for
+# anything else without a word, so a larger one is refused here.
+FETCH_STREAMS_MAX = 16
 # The worker status of a workflow that the run's deadline did not reach.
 NOT_REACHED = "not_reached"
 # What an untested workflow's status must not be for the pass at the end of a
@@ -241,6 +257,13 @@ class ImageComparator(output_kinds.Comparator):
         return {"identical": True, "mean_mse": 0.0, "mean_psnr_db": None, "min_psnr_db": None,
                 "max_abs_diff": 0, "mean_pct_pixels_changed": 0.0}
 
+    def transfer_error(self, run_rec: dict) -> str | None:
+        """A picture the worker listed and did not send. The pictures of the
+        two sides are paired by their place in name order, and the worker
+        sends the smallest files first: without one of them, the others would
+        be measured against the wrong pictures."""
+        return output_kinds.not_transferred(run_rec, (".png",))
+
 
 COMPARATORS: dict[str, output_kinds.Comparator] = {
     "image": ImageComparator(), "text": output_kinds.TextComparator()}
@@ -302,6 +325,20 @@ def check_smoke(run_rec: dict, workflow: dict, entry: dict, status: str | None,
     return found, held
 
 
+def fetch_options(entry: dict, lane: dict | None, streams: int | None = None) -> dict:
+    """What run_workflow_job is told about a workflow's models on a lane whose
+    jobs fetch them: to fetch, how long the download may take
+    (lanes.fetch_allowance_s) and, when the run says so, how many files to
+    download at once. {} on any other lane: its jobs are submitted as they
+    always were."""
+    if not lanes_mod.fetches_models(lane):
+        return {}
+    options = {"fetch_missing": True, "fetch_allowance_s": lanes_mod.fetch_allowance_s(entry)}
+    if streams is not None:
+        options["fetch_streams"] = streams
+    return options
+
+
 def queue_deadline_s(position: int) -> int:
     """Seconds the job submitted as number `position` of a run (from 0) may
     wait in RunPod's queue: 600 for the first, 60 more for each job before it."""
@@ -345,6 +382,10 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
         queue_deadline_s=queue_deadline,
         # Only a nightly or weekly run says more: one attempt, a shorter poll interval.
         **(getattr(args, "job_options", None) or {}),
+        # Only a lane whose jobs fetch their models says so. main() puts the
+        # lane's entry on `args`.
+        **fetch_options(entry, getattr(args, "lane_entry", None),
+                        getattr(args, "fetch_streams", None)),
     )
     published = {k: v for k, v in run_rec.items() if k != "outputs_dir"}  # runner-local path
     (workdir / "run.json").write_text(json.dumps(published, indent=2), encoding="utf-8")
@@ -376,7 +417,7 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
     else:
         outputs_dir = Path(run_rec["outputs_dir"])
         figures_dir = workdir / "figures"
-        # A compared file the worker listed and did not send (never so for images).
+        # A compared file the worker listed and did not send.
         lost = cmp_.transfer_error(run_rec)
 
         def against(ref_dir: Path) -> dict:
@@ -481,6 +522,12 @@ def process_workflow(wf_id: str, entry: dict, defaults: dict, args, repo_root: P
     if cmp_ is None:  # absent means reference: those cells keep their keys too
         cell["level"] = level
         cell["smoke"] = comparison["smoke"]
+    if stopped_at_its_limit(run_rec):
+        # The worker stopped the job's download at its time limit. No other
+        # cell of a job has these two keys. `reason` is what the skip rule
+        # reads (regression_skip.no_retry), `error` what a page shows.
+        cell["reason"] = TIMED_OUT
+        cell["error"] = str(run_rec["error"].get("message") or "")[:1000]
     return cell
 
 
@@ -594,6 +641,14 @@ def _count(text: str) -> int:
     return value
 
 
+def _streams(text: str) -> int:
+    """`--fetch-streams`: a whole number from 1 to FETCH_STREAMS_MAX."""
+    value = _count(text)
+    if value > FETCH_STREAMS_MAX:
+        raise argparse.ArgumentTypeError(f"must be at most {FETCH_STREAMS_MAX}")
+    return value
+
+
 def lane_count(lane: dict, key: str) -> int | None:
     """What a lane says under a key that counts something (`max_in_flight`,
     `timeout_minutes`): None when it says nothing. Anything but a whole number
@@ -619,10 +674,13 @@ def run_deadline(minutes: int | None, lane: dict, long_cadence: bool) -> float |
     return None if minutes is None else time.time() + minutes * 60
 
 
-def job_worst_case_s(entry: dict, defaults: dict, queue_deadline: float, attempts: int) -> float:
+def job_worst_case_s(entry: dict, defaults: dict, queue_deadline: float, attempts: int,
+                     fetch_allowance_s: float = 0) -> float:
     """Seconds after which the runner has given up on a workflow's job at the
-    latest: its poll deadline, once for each attempt."""
-    return attempts * poll_deadline_s(entry_value(entry, defaults, "timeout_s"), queue_deadline)
+    latest: its poll deadline, once for each attempt. `fetch_allowance_s` is
+    what the job may take to download its models first."""
+    return attempts * poll_deadline_s(entry_value(entry, defaults, "timeout_s"), queue_deadline,
+                                      fetch_allowance_s)
 
 
 def not_started(left_s: float, need_s: float, were: bool = False) -> str:
@@ -658,7 +716,9 @@ def worth_another_try(cell: dict, record: dict) -> bool:
     again: it was not tested, and for a reason that can pass (the queue, the
     network, a worker error, a failed model download). Not when another job
     would end the same way (NO_SECOND_TRY), and not when its job used up its
-    whole time: a second one can cost another hour. `record` is its run.json."""
+    whole time: a second one can cost another hour. That is a job RunPod
+    ended or the runner gave up on, and one whose download the worker stopped
+    at its time limit. `record` is its run.json."""
     if cell.get("verdict") != "infra_error" or cell.get("worker_status") in NO_SECOND_TRY:
         return False
     return record.get("reason") != TIMED_OUT
@@ -801,6 +861,10 @@ def main():
                     help="minutes from now after which no job is submitted that could still "
                          "be running then (default on a nightly or weekly lane: its "
                          "timeout_minutes minus 25; on a per-commit lane: none)")
+    ap.add_argument("--fetch-streams", type=_streams, default=None,
+                    help="files a job downloads at once, on a lane whose jobs fetch their "
+                         f"models: 1 to {FETCH_STREAMS_MAX} (default: the worker's own, 4). "
+                         "For measuring download speed")
     storage.add_storage_args(ap)
     args = ap.parse_args()
 
@@ -842,6 +906,7 @@ def main():
     # The index lists an open failing chain only for a workflow the lane runs
     # today: enabled, not kept to other lanes, and of the lane's cadence.
     lane = lanes["lanes"][lane_id]
+    args.lane_entry = lane  # process_workflow reads from it whether jobs fetch their models
     try:
         active = lanes_mod.workflows_for_lane(manifest, lane_id, lane=lane)
     except ValueError as e:
@@ -960,7 +1025,8 @@ def main():
             raise RuntimeError("the run is being stopped")
         if deadline is not None:
             left = deadline - time.time()
-            need = job_worst_case_s(entry, defaults, queue_wait(wf_id), tries)
+            fetch_s = fetch_options(entry, lane).get("fetch_allowance_s", 0)
+            need = job_worst_case_s(entry, defaults, queue_wait(wf_id), tries, fetch_s)
             if need > left:
                 print(f"[{wf_id}] {not_started(left, need)}")
                 return None if again else not_reached_cell(wf_id, entry, left, need)

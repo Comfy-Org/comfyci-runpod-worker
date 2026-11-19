@@ -29,7 +29,9 @@ finish. It counts as a start marker without a result: one more attempt.
 An untested workflow is a reason for the retry only when another run could
 test it. One whose models are not on the volume, whose model host refuses a
 file, or that the run's deadline did not reach (NO_RETRY) would end the same
-way, so a summary with only such workflows untested is left alone.
+way, so a summary with only such workflows untested is left alone. So is one
+whose job used up a time limit (`"reason": "timed_out"` in its cell: the
+worker stopped its model download): another run could take as long again.
 
   python regression_skip.py --commit SHA [--explicit] [--summary FILE]
                             [--attempt FILE] [--latest FILE]
@@ -53,6 +55,9 @@ MAX_ATTEMPTS = 2
 # not change: its models are not on the volume, the model host refuses a file,
 # or the run's deadline came before the workflow could start.
 NO_RETRY = frozenset({"missing_model", "model_access_error", "not_reached"})
+# `reason` in the cell of an untested workflow whose job used up a time limit
+# the runner gave it (submit_and_poll.TIMED_OUT: this module imports nothing).
+TIMED_OUT = "timed_out"
 
 
 def _count(record: dict | None) -> int:
@@ -99,14 +104,32 @@ def untested(summary: dict) -> list[str]:
             if (wr or {}).get("verdict") == "infra_error"]
 
 
+def used_up_its_time(cell: dict | None) -> bool:
+    """Whether the cell of an untested workflow says that its job used up a
+    time limit (`reason`). Another run could test it, and could take as long."""
+    return (cell or {}).get("reason") == TIMED_OUT
+
+
+def no_retry(cell: dict | None) -> bool:
+    """Whether an untested workflow is no reason to run its commit again:
+    its status is in NO_RETRY, or its job used up a time limit."""
+    status = (cell or {}).get("worker_status")
+    return (isinstance(status, str) and status in NO_RETRY) or used_up_its_time(cell)
+
+
+def _untested_cells(summary: dict) -> list[dict]:
+    return [wr or {} for wr in (summary.get("workflows") or {}).values()
+            if (wr or {}).get("verdict") == "infra_error"]
+
+
 def has_infra_error(summary: dict) -> bool:
     """Whether a summary has an untested workflow that another run could
-    test: the reason for the cron's retry. A workflow whose status is in
-    NO_RETRY is not one. A summary that says it has infra errors and shows no
-    such cell is taken at its word."""
-    statuses = untested(summary)
-    if statuses:
-        return any(not (isinstance(status, str) and status in NO_RETRY) for status in statuses)
+    test: the reason for the cron's retry. A workflow that `no_retry` names
+    is not one. A summary that says it has infra errors and shows no such
+    cell is taken at its word."""
+    cells = _untested_cells(summary)
+    if cells:
+        return any(not no_retry(cell) for cell in cells)
     return bool(summary.get("has_infra_error"))
 
 
@@ -135,10 +158,17 @@ def decide(commit: str, summary: dict | None = None, latest: dict | None = None,
     if summary:
         verdict = f"overall {summary.get('overall')}"
         if not has_infra_error(summary):
-            held = sorted({s for s in untested(summary) if isinstance(s, str)})
+            cells = _untested_cells(summary)
+            held = sorted({cell.get("worker_status") for cell in cells
+                           if isinstance(cell.get("worker_status"), str)
+                           and not used_up_its_time(cell)})
             if held:
                 verdict += (f", untested workflows that another run would not test either: "
                             f"{', '.join(held)}")
+            spent = sum(used_up_its_time(cell) for cell in cells)
+            if spent:
+                verdict += (f", {spent} untested workflow{'' if spent == 1 else 's'} whose job "
+                            "used up its time: another run can cost as much")
             return False, f"{short} already published on this lane ({verdict}); {again}"
         if n < MAX_ATTEMPTS:
             return True, (f"{short} attempt {n} had infra errors; retrying "

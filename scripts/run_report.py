@@ -18,6 +18,12 @@ write usable files: its results read "smoke pass" and "smoke check failed",
 and the report shows what the checks of smoke.py measured. A page without a
 smoke-level result reads exactly as it did before that level existed.
 
+A job that downloaded its models itself (a lane with `"model_storage": "job"`)
+says so in its run record (`model_fetch`). Its lane's table then has two more
+columns, Models GB and Fetch s (MB/s), and the facts say how much the run
+downloaded and whether a worker had no token. A page without such a job has
+neither.
+
 The data is the results branch, read at one pinned commit. By default the
 script fetches the branch into --results-dir (the workflow's own checkout) and
 reads files with `git cat-file`; nothing is checked out. --summary and
@@ -86,6 +92,22 @@ SLOW_FACTOR = 1.5     # a time this many times the top of the range is marked sl
 EXEC_NOTE = ("Exec s is how long the workflow ran. The usual range is what 8 in 10 of the lane's "
              f"last {USUAL_RUNS} passing runs took, and a time more than {SLOW_FACTOR:g} times its "
              "top is marked slow. Times differ between workers and are not part of the result.")
+FETCH_NOTE = ("Models GB is what the job downloaded to its worker before the workflow ran, and "
+              "Fetch s how long its models took it, with the download speed in MB/s. A file the "
+              "worker still had from an earlier job is not downloaded again. Neither is part of "
+              "Exec s.")
+# The one host a worker sends its Hugging Face token to (src/model_sync.py).
+TOKEN_HOST = "huggingface.co"
+# What a person does about a file the model host refused, by the host's answer.
+ACCESS_HINTS = {
+    401: "{host} wants a token it accepts for {repo}: check `HF_TOKEN` on the lane's "
+         "endpoint, and that its account may read the repository.",
+    403: "accept the licence of {repo} on {host} with the account behind `HF_TOKEN`, or "
+         "correct the URL in the manifest.",
+    404: "the file is not at {repo} on {host}: correct the URL in the manifest."}
+# The same for any other host. The worker has no token for it.
+NO_TOKEN_HINT = ("{host} refuses the file of {repo}, and the worker has no token for that "
+                 "host: `HF_TOKEN` goes to " + TOKEN_HOST + " only. Use a URL that needs none.")
 
 SHA_RE = re.compile(r"[0-9a-f]{7,40}")
 FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -1676,6 +1698,65 @@ def environment_text(summary: dict) -> str:
     return " · ".join(out)
 
 
+def model_fetch_of(v: View) -> dict:
+    """What a workflow's job says about the models it downloaded for itself
+    (`model_fetch` in its run.json). {} for a job that fetched none."""
+    return as_dict(v.run.get("model_fetch"))
+
+
+def gb_text(n) -> str:
+    """Bytes as GB, a GB being 10^9 bytes: "0.26", "17.3"."""
+    return f"{n / 1e9:.2f}" if n < 10**10 else f"{n / 1e9:.1f}"
+
+
+def models_cell(v: View) -> str:
+    """GB of models a job downloaded, and what it found on its worker."""
+    fetch = model_fetch_of(v)
+    got, found = fetch.get("bytes"), fetch.get("reused_bytes")
+    if not is_num(got) or got < 0:
+        return ""
+    if is_num(found) and found > 0:
+        return f"{gb_text(got)} (+{gb_text(found)} found on the worker)"
+    return gb_text(got)
+
+
+def fetch_cell(v: View) -> str:
+    """Seconds a job spent on its models, with the download speed in brackets."""
+    secs = as_dict(v.cell.get("timings")).get("model_fetch_s")
+    if not is_num(secs):
+        secs = as_dict(v.run.get("timings")).get("model_fetch_s")
+    if not is_num(secs):
+        return ""
+    speed = model_fetch_of(v).get("mb_per_s")
+    return f"{secs:.1f}" + (f" ({speed:.0f})" if is_num(speed) and speed > 0 else "")
+
+
+def fetch_facts(views: list[View]) -> str:
+    """One sentence about the models the run's jobs downloaded: how much, how
+    fast, and whether a worker had no token for it. '' when no job fetched."""
+    fetched = [(v, model_fetch_of(v)) for v in views if model_fetch_of(v)]
+    if not fetched:
+        return ""
+    size = sum(f["bytes"] for _, f in fetched if is_num(f.get("bytes")) and f["bytes"] > 0)
+    secs = sum(f["seconds"] for _, f in fetched
+               if is_num(f.get("seconds")) and f["seconds"] > 0)
+    found = sum(f["reused_bytes"] for _, f in fetched
+                if is_num(f.get("reused_bytes")) and f["reused_bytes"] > 0)
+    text = f"{gb_text(size)} GB downloaded by {plural(len(fetched), 'job')}"
+    if size and secs:
+        text += f" in {secs:,.0f} s of downloading, {size / 1e6 / secs:.0f} MB/s on average"
+    if found:
+        text += f". {gb_text(found)} GB more were still on a worker from an earlier job"
+    bare = [v.name for v, f in fetched if f.get("token") is False]
+    if bare:
+        text += (f". {WARN} No Hugging Face token was there for {', '.join(bare[:10])}"
+                 + (f" and {len(bare) - 10} more" if len(bare) > 10 else "")
+                 + ": public files still download, on a limit shared with every user of the "
+                 "worker's address, and a gated file is refused. Check `HF_TOKEN` on the "
+                 "lane's endpoint")
+    return text
+
+
 def facts_block(d: LaneData) -> list[str]:
     summary = as_dict(d.summary)
     meta = commit_meta(d)
@@ -1764,6 +1845,10 @@ def facts_block(d: LaneData) -> list[str]:
     added = as_int(summary.get("published_new_bytes"))
     if added is not None and added >= 0:
         rows.append(["New smoke-level output the lane's run published", size_text(added)])
+    # Only a lane whose jobs fetch their models has this row.
+    fetched = fetch_facts(d.views)
+    if fetched:
+        rows.append(["Model downloads", fetched])
     return table(["", ""], rows)
 
 
@@ -2113,6 +2198,21 @@ def failure_detail(d: LaneData, v: View, limits: Limits) -> list[str]:
     bullets: list[str] = []
     if err.get("message"):
         bullets.append(f"**Message:** {md(err['message'], 2000)}")
+    # A model the job was to download for itself: what the host said, and to whom.
+    answer = as_int(err.get("http_status"))
+    hint = ACCESS_HINTS.get(answer)
+    if hint and answer != 404 and err.get("host") != TOKEN_HOST:
+        hint = NO_TOKEN_HINT
+    if hint:
+        bullets.append("**What to do:** " + hint.format(
+            host=code(err.get("host"), 120) or "the model host",
+            repo=code(err.get("repo"), 200) or "the file's repository"))
+    lost = [f for f in map(as_dict, as_list(err.get("failed"))) if f.get("model")]
+    if lost:
+        more = f", +{len(lost) - 10} more" if len(lost) > 10 else ""
+        bullets.append("**Not downloaded:** " + ", ".join(
+            f"{code(f['model'], 200)} ({md(f.get('error'), 200) or 'no reason recorded'})"
+            for f in lost[:10]) + more)
     if err.get("node_type") or err.get("node_id"):
         bullets.append(f"**Node:** type {code(err.get('node_type'), 120) or 'unknown'}, "
                        f"id {code(err.get('node_id'), 40) or 'unknown'}")
@@ -2201,9 +2301,17 @@ NO_RETRY_WHY = {"missing_model": "Its models are not on the volume yet",
 def cron_would_retry(d: LaneData) -> bool:
     """Whether the commit has an untested workflow that another run could
     test: the cron's reason for its one retry (regression_skip.has_infra_error).
-    A workflow whose status is in regression_skip.NO_RETRY is not one."""
-    statuses = [v.cell.get("worker_status") for v in d.views if v.state == "infra"]
-    return any(not (isinstance(s, str) and s in regression_skip.NO_RETRY) for s in statuses)
+    A workflow that regression_skip.no_retry names is not one: its status is
+    in NO_RETRY, or its job used up a time limit."""
+    return any(not regression_skip.no_retry(v.cell) for v in d.views if v.state == "infra")
+
+
+def download_stopped(v: View) -> bool:
+    """A workflow whose model download the worker stopped at the time limit
+    of its job: its cell says `"reason": "timed_out"`, and so does the failure
+    in its run.json. Nothing tries such a job again."""
+    return (regression_skip.used_up_its_time(v.cell)
+            or as_dict(v.run.get("error")).get("reason") == regression_skip.TIMED_OUT)
 
 
 def second_try(v: View) -> bool:
@@ -2221,6 +2329,9 @@ def untested_on_a_long_lane(d: LaneData, v: View) -> list[str]:
     if second_try(v):
         tried = ("The run tried it once more at its end, and this is the result of that "
                  "second job.")
+    elif download_stopped(v):
+        tried = ("Its model download used up the time it was given, so the run did not try "
+                 "it again: a second download can cost as much.")
     elif v.run.get("reason") == "timed_out":  # submit_and_poll.TIMED_OUT, in its run.json
         tried = ("Its job used up its whole time, so the run did not try it again: a second "
                  "job can cost as much.")
@@ -2297,6 +2408,11 @@ def error_block(d: LaneData, v: View, limits: Limits) -> list[str]:
             # Its attempt number is that of the runs before it: nothing about a
             # retry can be read from it.
             out.append("This run is no attempt of the lane, so it changes nothing for the cron.")
+        elif (spent < regression_skip.MAX_ATTEMPTS and download_stopped(v)
+              and not cron_would_retry(d)):
+            out.append("Its model download used up the time it was given. Another run can "
+                       "cost as much, so the cron does not test the commit again. Dispatch "
+                       "**GPU regression** with this commit to test it again.")
         elif (spent < regression_skip.MAX_ATTEMPTS and isinstance(held, str)
               and held in NO_RETRY_WHY and not cron_would_retry(d)):
             out.append(f"{NO_RETRY_WHY[held]}. Another run right away would end the same way, "
@@ -2919,6 +3035,9 @@ def workflows_block(d: LaneData, limits: Limits) -> list[str]:
     # and a lane without a smoke row has no Checked column.
     checked = has_smoke(d.views)
     compared = not checked or any(v.level != "smoke" for v in d.views)
+    # A job that downloaded its models itself adds two columns: how much, and
+    # how long it took. A lane whose models are on the volume has neither.
+    fetched = any(model_fetch_of(v) for v in d.views)
     # A row whose workflow a later run tested again says so: its result is
     # that run's, not the one of the run the facts table names.
     again = retests_of(d.summary)
@@ -2936,6 +3055,7 @@ def workflows_block(d: LaneData, limits: Limits) -> list[str]:
         rows.append([v.name, result, output_cell(d, v), *against,
                      *([checked_cell(v)] if checked else []), exec_cell(d, v),
                      start_cell(timings),
+                     *([models_cell(v), fetch_cell(v)] if fetched else []),
                      fmt(cell.get("vram_peak_mb") / 1024, ".1f")
                      if is_num(cell.get("vram_peak_mb")) else "",
                      fmt(cell.get("rss_peak_mb") / 1024, ".1f")
@@ -2947,9 +3067,10 @@ def workflows_block(d: LaneData, limits: Limits) -> list[str]:
            *table(["Workflow", "Result", "Output",
                    *(["vs reference", "vs previous", "Reference"] if compared else []),
                    *(["Checked"] if checked else []),
-                   "Exec s (usual range)", "Server start s (checkout s)", "Peak VRAM GB",
+                   "Exec s (usual range)", "Server start s (checkout s)",
+                   *(["Models GB", "Fetch s (MB/s)"] if fetched else []), "Peak VRAM GB",
                    "Peak RSS GB", "Output sha256"], rows),
-           "", EXEC_NOTE]
+           "", EXEC_NOTE, *(["", FETCH_NOTE] if fetched else [])]
 
     file_rows, total = [], 0
     for v in d.views:

@@ -248,6 +248,51 @@ def test_a_workflow_that_another_run_would_not_test_either_is_no_reason_for_a_re
     assert "another run" not in regression_skip.decide(SHA, _summary("pass"))[1]
 
 
+def test_a_job_that_used_up_its_time_is_no_reason_for_a_retry():
+    """A download that the worker stopped at its time limit: the cell says
+    `"reason": "timed_out"`. Another run could test the workflow, and could
+    download as long and cost as much, so the cron leaves the commit alone."""
+    def stopped(status="model_fetch_error", **over):
+        return {"verdict": "infra_error", "worker_status": status, "reason": "timed_out",
+                "error": "the download was too slow: 12.4 of 56.6 GB in 600 s (20.7 MB/s)",
+                **over}
+
+    summary = _untested()
+    summary["workflows"]["slow"] = stopped()
+    assert not regression_skip.has_infra_error(summary)
+    run, why = regression_skip.decide(SHA, summary)
+    assert not run and "already published" in why and "commit=" in why
+    assert ("(overall pass, 1 untested workflow whose job used up its time: another run can "
+            "cost as much)") in why
+    # Beside workflows that another run would not test either, each is named
+    # in its own words.
+    summary = _untested("missing_model")
+    summary["workflows"].update(slow=stopped(), slower=stopped())
+    run, why = regression_skip.decide(SHA, summary)
+    assert not run and ("another run would not test either: missing_model, 2 untested "
+                        "workflows whose job used up its time: another run can cost as much"
+                        ) in why
+    # One workflow that another run can test is reason enough, as ever.
+    summary["workflows"]["flaky"] = {"verdict": "infra_error", "worker_status": "worker_error"}
+    assert decide(summary=summary) and not decide(summary={**summary, "attempt": 2})
+    # A download that failed for another reason is tried again, as it was.
+    assert decide(summary=_untested("model_fetch_error"))
+    for other in ("slow", None, True, ["timed_out"]):
+        summary = _untested()
+        summary["workflows"]["wf"] = stopped(reason=other)
+        assert decide(summary=summary), other
+    # The mark alone decides, whatever the status beside it. Only a cell of an
+    # untested workflow is read.
+    assert regression_skip.no_retry(stopped("infra_error"))
+    assert regression_skip.no_retry({"worker_status": "missing_model"})
+    assert not regression_skip.no_retry({"worker_status": "model_fetch_error"})
+    assert not regression_skip.no_retry(None) and not regression_skip.used_up_its_time(None)
+    assert regression_skip.TIMED_OUT == "timed_out"
+    summary = _untested("worker_error")
+    summary["workflows"]["sdxl_t2i"]["reason"] = "timed_out"
+    assert decide(summary=summary)
+
+
 def test_cli_prints_the_step_output(tmp_path, capsys):
     summary, latest, empty = tmp_path / "s.json", tmp_path / "l.json", tmp_path / "e.json"
     summary.write_text(json.dumps(_summary("fail", z="execution_error")), encoding="utf-8")

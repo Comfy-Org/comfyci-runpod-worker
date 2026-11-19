@@ -17,8 +17,6 @@ ARG PYTHON_VERSION=3.13
 ARG CUDA_VERSION=13.0
 ARG TORCH_INDEX=https://download.pytorch.org/whl/cu130
 ARG TORCH_SPEC="torch==2.14.1 torchvision==0.29.1"
-# Git sha of this repository the image was built from; recorded in every run.
-ARG IMAGE_SHA=dev
 
 COPY --from=ghcr.io/astral-sh/uv:0.13.1 /uv /usr/local/bin/uv
 
@@ -87,6 +85,14 @@ COPY src/custom_nodes.py /comfy-config/bake_custom_nodes.py
 RUN pip install setuptools wheel \
     && python /comfy-config/bake_custom_nodes.py bake --manifest /comfy-config/custom_nodes.json \
     && sha256sum /comfy-config/custom_nodes.json | cut -d' ' -f1 > /comfy-config/custom_nodes.sha256
+
+# Git sha of this repository the image was built from; recorded in every run.
+# Declared here, after every install: a build argument that changed counts as
+# a change to each RUN below its ARG line. Up at the top it made every rebuild
+# install torch and ComfyUI's requirements afresh, and an unpinned package
+# could come out newer. Here a rebuild that only changes src/ reuses those
+# layers from the registry cache.
+ARG IMAGE_SHA=dev
 
 # What this image is, echoed into every run record as its `env` block.
 RUN printf '{"image": "%s", "image_sha": "%s", "python": "%s", "cuda": "%s", "torch_spec": "%s", "torch_index": "%s", "custom_nodes_sha256": "%s"}\n' \

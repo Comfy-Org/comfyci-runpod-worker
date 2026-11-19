@@ -516,3 +516,245 @@ def test_an_output_whose_name_leaves_the_outputs_folder_is_written_nowhere(tmp_p
                        "run/wf/outputs/wf_00001_.png", "run/wf/outputs/wf_00003_.png"]
     # 10 s after its first signal GitHub kills the step: connect and answer fit in that.
     assert 2 * submit_and_poll.STOP_CANCEL_TIMEOUT_S < 7.5
+
+
+# -- a job that fetches its models ----------------------------------------------------------
+class Sent(FakeClient):
+    """Keeps the input of each job it is given."""
+
+    def __init__(self, bodies):
+        super().__init__(bodies)
+        self.inputs = []
+
+    def run(self, job_input):
+        self.inputs.append(job_input)
+        return super().run(job_input)
+
+
+DONE = {"status": "COMPLETED", "output": {"status": "ok", "outputs": []}}
+# What a job of a lane with its models on the volume is sent, and what its
+# record holds: every key, in this order. Neither may gain one.
+JOB_INPUT = ('{"mode": "run", "comfy_commit": "cccccccccccccccccccccccccccccccccccccccc", '
+             '"comfy_repo": null, "workflow_id": "wf", "workflow": {}, "models": [], '
+             '"timeout_s": 10, "comfy_flags": [], "lane": null, "custom_nodes": []}')
+RECORD_KEYS = ["status", "error", "comfy_version", "torch_version", "python_version", "gpu_name",
+               "vram_peak_mb", "rss_peak_mb", "validation", "timings", "commit_checked_out",
+               "env", "lane", "custom_nodes", "runpod_job_id", "attempt", "delay_ms", "delay_s",
+               "execution_ms", "outputs", "outputs_dir"]
+
+
+def test_the_input_and_the_record_of_a_job_that_fetches_nothing_are_unchanged(tmp_path):
+    """This test passes on the code from before jobs could fetch models too:
+    it pins what that code sent and recorded."""
+    client = Sent([DONE])
+    rec = _job(client, tmp_path)
+    assert json.dumps(client.inputs[0]) == JOB_INPUT
+    assert list(rec) == RECORD_KEYS
+
+
+def test_only_fetch_missing_asks_for_a_fetch(tmp_path):
+    client = Sent([DONE, DONE])
+    for kw in ({"fetch_allowance_s": 400}, {"fetch_streams": 1}):
+        submit_and_poll.run_workflow_job(client, "wf", {}, comfy_commit="c" * 40, models=[],
+                                         timeout_s=10, comfy_flags=[], workdir=tmp_path, **kw)
+    assert [json.dumps(sent) for sent in client.inputs] == [JOB_INPUT] * 2
+
+
+def test_a_job_of_a_lane_that_fetches_is_told_to(tmp_path):
+    def sent(**kw):
+        client = Sent([DONE])
+        submit_and_poll.run_workflow_job(client, "wf", {}, comfy_commit="c" * 40, models=[],
+                                         timeout_s=10, comfy_flags=[], workdir=tmp_path, **kw)
+        return json.dumps(client.inputs[0])
+
+    asked = JOB_INPUT[:-1] + ', "fetch_missing": true}'
+    assert sent(fetch_missing=True) == asked
+    # How long the runner waits is its own business. What the worker hears of
+    # it is how long the download may take: here 400 s and the workflow's 10,
+    # less the 60 s the worker's answer is given.
+    limited = asked[:-1] + ', "fetch_timeout_s": 350}'
+    assert sent(fetch_missing=True, fetch_allowance_s=400) == limited
+    assert sent(fetch_missing=True, fetch_streams=1) == asked[:-1] + ', "fetch_streams": 1}'
+    assert sent(fetch_missing=True, fetch_allowance_s=400, fetch_streams=1) == (
+        limited[:-1] + ', "fetch_streams": 1}')
+    assert sent(fetch_missing=False, fetch_streams=1) == JOB_INPUT
+    # The limit is for a job that fetches, like the allowance it comes from.
+    assert sent(fetch_allowance_s=400) == JOB_INPUT
+
+
+def test_the_record_carries_the_fetch_report_only_when_the_worker_sent_one(tmp_path):
+    report = {"files": 2, "bytes": 800, "seconds": 4.0, "mb_per_s": 0.0, "streams": 4,
+              "token": True, "reused": 0, "reused_bytes": 0, "evicted": 0}
+    client = Sent([{"status": "COMPLETED", "output": {
+        "status": "ok", "timings": {"model_fetch_s": 4.2, "prompt_exec_s": 3.0},
+        "model_fetch": report, "outputs": []}}])
+    rec = submit_and_poll.run_workflow_job(client, "wf", {}, comfy_commit="c" * 40, models=[],
+                                           timeout_s=10, comfy_flags=[], workdir=tmp_path,
+                                           fetch_missing=True)
+    assert rec["model_fetch"] == report and rec["timings"]["model_fetch_s"] == 4.2
+    assert list(rec) == RECORD_KEYS[:14] + ["model_fetch"] + RECORD_KEYS[14:]
+    # A worker image from before the fetch sends none, also when it is asked.
+    rec = submit_and_poll.run_workflow_job(Sent([DONE]), "wf", {}, comfy_commit="c" * 40,
+                                           models=[], timeout_s=10, comfy_flags=[],
+                                           workdir=tmp_path, fetch_missing=True)
+    assert list(rec) == RECORD_KEYS
+
+
+def test_the_runner_waits_longer_for_a_job_that_downloads_its_models(tmp_path, monkeypatch):
+    """The runner gives up on a job after its timeout plus 900 s. A download
+    of 60 GB at the planning speed takes 2,400 s more."""
+    deadline = submit_and_poll.poll_deadline_s
+    assert deadline(10, 600, 2400) == 3310 and deadline(10, 1800, 2400) == 4510
+    # Without a fetch the limit is the whole number it was, as its message prints it.
+    assert deadline(10) == 910 and isinstance(deadline(10), int)
+    clock = Clock()
+    monkeypatch.setattr(submit_and_poll, "time", clock)
+
+    def job(run_s, **kw):
+        client = QueuedClient(clock, queue_s=0, run_s=run_s)
+        rec = submit_and_poll.run_workflow_job(
+            client, "wf", {}, comfy_commit="c" * 40, models=[], timeout_s=10, comfy_flags=[],
+            workdir=tmp_path, attempts=1, **kw)
+        return client, rec
+
+    # 3,000 s of work: past 910 s, inside 910 + 2,400.
+    client, rec = job(3000, fetch_missing=True, fetch_allowance_s=2400)
+    assert (client.cancelled, rec["status"]) == ([], "ok")
+    client, rec = job(3400, fetch_missing=True, fetch_allowance_s=2400)
+    assert client.cancelled == ["job-1"]
+    assert rec == {"status": "infra_error", "attempt": 1, "reason": "timed_out",
+                   "error": {"message": "job job-1 exceeded deadline (3310s)"}}
+    # The time is for a fetch: a job that is not told to fetch does not get it.
+    client, rec = job(3000, fetch_allowance_s=2400)
+    assert rec["error"] == {"message": "job job-1 exceeded deadline (910s)"}
+
+
+def test_a_failed_download_is_tried_again_and_a_refused_file_is_not(tmp_path):
+    assert {"model_fetch_error", "model_access_error"} <= submit_and_poll.INFRA_STATUSES
+    assert "model_fetch_error" in submit_and_poll.RETRYABLE_STATUSES
+    assert submit_and_poll.INFRA_STATUSES - submit_and_poll.RETRYABLE_STATUSES == {
+        "bad_request", "model_access_error"}
+    failed = {"message": "model download failed: vae/x: HTTP 503 Service Unavailable"}
+    client = FakeClient([
+        {"status": "COMPLETED", "output": {"status": "model_fetch_error", "failure": failed}},
+        DONE])
+    rec = _job(client, tmp_path)
+    assert (client.runs, rec["status"], rec["attempt"]) == (2, "ok", 2)
+    # The host said no: a person has to act, and a second job would hear the same.
+    refused = {"message": "the model host answered 403 for Lightricks/LTX-2.5",
+               "host": "huggingface.co", "repo": "Lightricks/LTX-2.5", "http_status": 403}
+    client = FakeClient([
+        {"status": "COMPLETED", "output": {"status": "model_access_error", "failure": refused,
+                                           "model_fetch": {"files": 0, "token": False}}},
+        DONE])
+    rec = _job(client, tmp_path)
+    assert (client.runs, rec["status"], rec["error"]) == (1, "model_access_error", refused)
+    assert rec["model_fetch"] == {"files": 0, "token": False}
+
+
+# -- a time limit for the download, on the worker -----------------------------------------
+def test_how_long_the_worker_gives_a_download():
+    """The time the runner waits for the download and the workflow's own
+    timeout, less the 60 s for the worker's answer. With the allowance alone
+    as the limit, the planning speed of 25 MB a second was the slowest
+    download that passed. Before there was a limit, 15.8 GB passed at 6 MB a
+    second in a job that started and ran as jobs mostly do."""
+    limit = submit_and_poll.fetch_timeout_s
+    assert submit_and_poll.FETCH_TIMEOUT_MARGIN_S == 60
+    # 15.8 GB at 25 MB a second are 632 s. With a workflow of 600 s the
+    # download may take 1,172 s, which is 13.5 MB a second.
+    assert limit(600, 632) == 1172 and 15.8e9 / 1e6 / limit(600, 632) < 13.5
+    # 56.6 GB, the largest family: 2,264 s and 900 s, so 18.3 MB a second.
+    assert limit(900, 2264) == 3104 and 56.6e9 / 1e6 / limit(900, 2264) < 18.3
+    # A small download is connections and a rate limit's wait of up to 300 s
+    # more than it is bytes. It has the workflow's time for them.
+    assert limit(600, 12) == 552 and limit(900, 40) == 880 and limit(900, 0) == 840
+    assert limit(10, 400) == 350
+    # A whole number of seconds, as the job input carries it.
+    assert limit(600.0, 2400.7) == 2940 and isinstance(limit(600.0, 2400.7), int)
+    # Nothing is left of such a job's time: no limit, as before the key.
+    assert limit(10, 0) is None and limit(60, 0) is None and limit(30, 30.5) is None
+
+
+def test_the_worker_stops_a_download_before_the_runner_stops_waiting():
+    """The runner gives a job 900 s to start, the allowance for its download
+    and the workflow's timeout, and then cancels it. The worker's limit for
+    the download ends 60 s before that, when the start took no more than its
+    900 s: the time the worker waits for its downloads to end, its answer's
+    way, and the pause until the runner looks again."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    import model_sync
+    import regression_skip
+    # One word, in the worker's answer, in the run record and in the cell.
+    assert model_sync.TIMED_OUT == submit_and_poll.TIMED_OUT == regression_skip.TIMED_OUT
+    start, margin = submit_and_poll.COLD_START_ALLOWANCE_S, submit_and_poll.FETCH_TIMEOUT_MARGIN_S
+    assert margin >= model_sync.FETCH_STOP_WAIT_S + submit_and_poll.POLL_INTERVAL_S + 30
+    # The time in which the worker shuts connections is inside its wait.
+    assert 0 < model_sync.FETCH_CUT_AFTER_S < model_sync.FETCH_STOP_WAIT_S
+    for timeout_s in (60, 61, 300, 600, 900, 1200, 2400, 3300):
+        for allowance in (0, 1, 12, 59, 60, 400, 600, 632, 2264, 2401):
+            limit = submit_and_poll.fetch_timeout_s(timeout_s, allowance)
+            if limit is None:
+                assert allowance + timeout_s - margin < 1
+                continue
+            gives_up = submit_and_poll.poll_deadline_s(timeout_s, 600, allowance)
+            # The answer has its 60 s, and the download every second but those.
+            assert gives_up - (start + limit) == margin, (timeout_s, allowance)
+            # RunPod ends a job 3,600 s after a worker took it. The lint asks
+            # of a job that fetches that its timeout, its allowance and 300 s
+            # fit in there (test_manifest_lint.py). The worker's answer to a
+            # download it stopped then comes before RunPod's end as well, and
+            # the checkout before it has those 300 s.
+            if timeout_s + allowance + 300 <= 3600:
+                assert 300 + limit + model_sync.FETCH_STOP_WAIT_S <= 3600
+
+
+SLOW = {"message": "the download was too slow: 12.4 of 56.6 GB in 600 s (20.7 MB/s), "
+                   "2 of 5 files complete",
+        "reason": "timed_out", "timeout_s": 600, "received_bytes": 12_400_000_000,
+        "wanted_bytes": 56_600_000_000, "seconds": 600.2, "mb_per_s": 20.7, "files_done": 2,
+        "files_wanted": 5}
+FETCHED = {"files": 2, "bytes": 3_200_000_000, "seconds": 600.2, "mb_per_s": 20.7, "streams": 4,
+           "token": True, "reused": 0, "reused_bytes": 0, "evicted": 0}
+
+
+def test_a_download_the_worker_stopped_is_not_submitted_again(tmp_path):
+    """A `model_fetch_error` is tried again at once. Not this one: the worker
+    stopped the download because its time was up, and a second job can take
+    as long and cost as much. Its record says so where the record of a job
+    that the runner gave up on says it."""
+    stopped = {"status": "COMPLETED", "delayTime": 10, "executionTime": 601000, "output": {
+        "status": "model_fetch_error", "failure": SLOW, "model_fetch": FETCHED,
+        "timings": {"checkout_s": 1.9, "model_fetch_s": 600.3}}}
+    for attempts in (2, 1):
+        client = Sent([stopped, DONE])
+        rec = submit_and_poll.run_workflow_job(
+            client, "wf", {}, comfy_commit="c" * 40, models=[], timeout_s=600, comfy_flags=[],
+            workdir=tmp_path, attempts=attempts, fetch_missing=True, fetch_allowance_s=600)
+        assert client.runs == 1 and client.inputs[0]["fetch_timeout_s"] == 1140, attempts
+        assert (rec["status"], rec["reason"], rec["attempt"]) == (
+            "model_fetch_error", "timed_out", 1)
+        assert rec["error"] == SLOW and rec["model_fetch"] == FETCHED
+        assert list(rec) == (RECORD_KEYS[:14] + ["model_fetch"] + RECORD_KEYS[14:16] + ["reason"]
+                             + RECORD_KEYS[16:])
+    # What a worker image from before the limit answers to the same job, which
+    # the key in its input changes nothing about: a download that failed is
+    # tried again as it was, and a job that passed is recorded as it was.
+    plain = {"message": "model download failed: vae/x: HTTP 503 Service Unavailable"}
+    client = Sent([{"status": "COMPLETED", "output": {"status": "model_fetch_error",
+                                                      "failure": plain}}, DONE])
+    rec = submit_and_poll.run_workflow_job(
+        client, "wf", {}, comfy_commit="c" * 40, models=[], timeout_s=600, comfy_flags=[],
+        workdir=tmp_path, fetch_missing=True, fetch_allowance_s=600)
+    assert (client.runs, rec["status"], rec["attempt"]) == (2, "ok", 2)
+    assert list(rec) == RECORD_KEYS and [sent["fetch_timeout_s"] for sent in client.inputs] == [
+        1140, 1140]
+    # The mark is the worker's failure saying `reason`, and nothing else.
+    marked = submit_and_poll.stopped_at_its_limit
+    assert marked({"status": "model_fetch_error", "error": SLOW})
+    for other in ({}, {"error": None}, {"error": "timed_out"}, {"error": {"reason": "slow"}},
+                  {"error": {"message": "timed_out"}}, {"reason": "timed_out"},
+                  {"status": "infra_error", "error": {"message": "x"}, "reason": "timed_out"}):
+        assert not marked(other), other

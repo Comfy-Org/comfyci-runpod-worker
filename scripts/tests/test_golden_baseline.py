@@ -825,3 +825,49 @@ def test_from_run_refuses_a_smoke_run_that_held_a_file_back(tmp_path, capsys):
     assert _run_main(other, remote, root, *flags) == 0
     current = _clone(other, remote) / "regression/golden/llm/current.json"
     assert json.loads(current.read_text())["tag"] == COMMIT[:12]
+
+
+# -- a lane whose jobs fetch their models ---------------------------------------------------
+def test_both_golden_runs_fetch_on_a_lane_whose_jobs_fetch_their_models(tmp_path, monkeypatch):
+    """A golden is generated with two paid runs. On a lane with
+    `"model_storage": "job"` each of them has to be told to download its
+    models, or both end as missing_model."""
+    models = [{"directory": "text_encoders", "name": "llm.safetensors", "bytes": 50 * 10**9,
+               "sha256": "ab" * 32, "url": "https://huggingface.co/o/r/resolve/main/llm"},
+              {"directory": "input", "name": "cat.png", "bytes": 10**9, "url": "https://x/cat"}]
+    sent = []
+
+    def job(client, wf_id, workflow, workdir=None, **kw):
+        sent.append(kw)
+        out = workdir / "outputs"
+        out.mkdir(parents=True)
+        data = SAID.encode("utf-8")
+        (out / f"{wf_id}_00001.txt").write_bytes(data)
+        return {"status": "ok", "outputs_dir": str(out), "outputs": [
+            {"filename": f"{wf_id}_00001.txt", "bytes": len(data),
+             "sha256": hashlib.sha256(data).hexdigest()}]}
+
+    monkeypatch.setattr(golden_baseline, "run_workflow_job", job)
+    monkeypatch.setattr(golden_baseline, "RunPodClient", lambda endpoint_id: None)
+
+    def generate(folder, **lane):
+        folder.mkdir()
+        remote, root = _text_remote(folder), _text_manifest(folder, models=models)
+        registry = {**TEXT_LANES, "lanes": {"legacy": {**TEXT_LANES["lanes"]["legacy"], **lane}}}
+        (root / "manifest" / "lanes.json").write_text(json.dumps(registry))
+        sent.clear()
+        assert _run_main(folder, remote, root, "--ref", TEXT_COMMIT, "--workflows", "llm") == 0
+        return [dict(kw) for kw in sent]
+
+    fetched = generate(tmp_path / "job", model_storage="job")
+    assert len(fetched) == 2
+    for kw in fetched:
+        # 50 GB at 25 MB a second. The input file is read from the volume.
+        assert (kw["fetch_missing"], kw["fetch_allowance_s"]) == (True, 2000)
+    # A lane with its models on the volume: the two runs are submitted as before.
+    for name, lane in (("volume", {}), ("named", {"model_storage": "volume"})):
+        plain = generate(tmp_path / name, **lane)
+        assert len(plain) == 2
+        assert not [kw for kw in plain if "fetch_missing" in kw or "fetch_allowance_s" in kw]
+        assert [set(kw) for kw in plain] == [set(kw) - {"fetch_missing", "fetch_allowance_s"}
+                                             for kw in fetched]

@@ -9,10 +9,13 @@ only the fallback for a registry whose primary has no endpoint. One endpoint
 writes the volume at a time: the workflow serialises syncs, and the sync state
 file is only updated after a completed download.
 
-Only the models of workflows that a lane reads from the volume are synced, the
-same workflows whose sizes the manifest lint adds up (lanes.volume_workflows).
-A workflow that runs only on lanes with `"model_storage": "job"`, or on lanes
-without a volume, is left out.
+Only what a lane reads from the volume is synced, the same files whose sizes
+the manifest lint adds up (lanes.volume_models). That is every model of a
+workflow that runs on a lane which keeps its models on the volume. A workflow
+that runs only on lanes with `"model_storage": "job"` has its models fetched
+by each job, so only its input files (`"directory": "input"`) are synced:
+ComfyUI reads those from the volume on every lane. A workflow that no lane
+with a volume runs is left out.
 
 Run automatically by .github/workflows/sync-models.yml whenever manifest/**
 changes; safe to run manually any time (idempotent).
@@ -65,31 +68,34 @@ def main():
         lanes = index_builder.load_lanes()
     except (OSError, ValueError):
         lanes = None
-    # The volume holds the models of the workflows that a lane reads from it,
-    # and no other: the manifest lint adds up the sizes of the same workflows
-    # (lanes.volume_workflows), so what it lets through is what arrives here.
-    # A workflow that runs only on lanes whose models are fetched for each
-    # job, or that have no volume, is left out. Without a registry: every one.
+    # The volume holds what a lane reads from it, and nothing else: the
+    # manifest lint adds up the sizes of the same files (lanes.volume_models),
+    # so what it lets through is what arrives here. Of a workflow whose jobs
+    # fetch their models that is its input files. A workflow that no lane with
+    # a volume runs is left out. Without a registry: every model.
     try:
-        on_volume = None if lanes is None else set(lanes_mod.volume_workflows(manifest, lanes))
+        on_volume = None if lanes is None else lanes_mod.volume_models(manifest, lanes)
     except ValueError as e:
         raise SystemExit(f"{e}; see manifest/workflows.json")
-    models, seen, left_out = [], set(), []
+    models, seen, left_out, inputs_only = [], set(), [], []
     for wf_id, entry in manifest["workflows"].items():
         if args.workflows != "all" and wf_id not in args.workflows.split(","):
             continue
-        if on_volume is not None and wf_id not in on_volume:
-            if entry.get("models"):
-                left_out.append(wf_id)
-            continue
         # Sync disabled workflows too: the volume should be ready before enabling.
-        for m in entry.get("models", []):
+        wanted = entry.get("models", [])
+        if on_volume is not None and len(on_volume.get(wf_id, [])) < len(wanted):
+            (inputs_only if wf_id in on_volume else left_out).append(wf_id)
+            wanted = on_volume.get(wf_id, [])
+        for m in wanted:
             key = f"{m['directory']}/{m['name']}"
             if key not in seen:
                 seen.add(key)
                 models.append(m)
     if left_out:
         print(f"not synced, no lane reads their models from the volume: {', '.join(left_out)}")
+    if inputs_only:
+        print("only the input files are synced, each job fetches the models: "
+              f"{', '.join(inputs_only)}")
 
     if not models:
         print("no models in manifest selection")

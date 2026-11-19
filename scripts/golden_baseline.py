@@ -39,7 +39,7 @@ import output_kinds
 import packs
 import storage
 from run_regression import (COMPARATORS, apply_seed_overrides, comparator_for, entry_value,
-                            load_manifest)
+                            fetch_options, load_manifest)
 from submit_and_poll import RunPodClient, run_workflow_job
 
 HERE = Path(__file__).resolve().parent
@@ -405,7 +405,9 @@ def main():
                 timeout_s=entry_value(entry, defaults, "timeout_s"),
                 comfy_flags=entry_value(entry, defaults, "comfy_flags"),
                 workdir=wf_dir / f"r{r}", comfy_repo=args.repo_url, lane=lane,
-                custom_nodes=packs.records_for(entry, repo_root))
+                custom_nodes=packs.records_for(entry, repo_root),
+                # On a lane whose jobs fetch their models, both runs are told to.
+                **fetch_options(entry, lanes["lanes"][lane]))
             runs[r] = rec
             if rec.get("status") != "ok":
                 print(f"::error::[{wf_id}] golden r{r} failed: {rec.get('status')} "
