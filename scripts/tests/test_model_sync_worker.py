@@ -982,11 +982,11 @@ def test_a_download_that_takes_too_long_is_stopped_and_says_what_it_reached(comf
     folder = comfy / "models" / "vae"
     assert (folder / "fast.safetensors").read_bytes() == body_of("fast.safetensors")
     assert sorted(state_of(comfy)) == ["vae/fast.safetensors"]
-    # No part file is left when the job answers. (Only Linux, which the worker
-    # is, removes a file that is still open, and ends a read on a connection
-    # that is silent. Elsewhere that read ends with the connection's next
-    # byte or after its 60 s.)
-    assert not _parts(comfy) or os.name == "nt"
+    # No part file is left when the job answers: a download that is still
+    # there has lost its own. (Only Linux, which the worker is, ends a read on
+    # a connection that is silent. Elsewhere that read ends with the
+    # connection's next byte or after its 60 s.)
+    assert not _parts(comfy)
     # The host goes on. A download that was still there wakes, and the job
     # is over: it puts nothing in place and lists nothing.
     host.hold.set()
@@ -1351,13 +1351,39 @@ def test_a_fetch_that_breaks_leaves_no_download_running(comfy, host, monkeypatch
     host.routes["/slow.safetensors"] = [(200, {"X-Slow": "3000"}, body)]
     with pytest.raises(OverflowError):
         model_sync.fetch_local([slow])
-    # No part file is left. (Only Linux removes a file that is still open.)
-    assert not _parts(comfy) or os.name == "nt"
+    # No part file is left: the downloads have lost theirs.
+    assert not _parts(comfy)
     # The host sends the rest. The download ends, and puts nothing in place.
     host.hold.set()
     assert _gone()
     assert not (comfy / "models" / "vae" / "slow.safetensors").exists()
     assert state_of(comfy) == {}
+
+
+def test_a_download_that_was_left_writes_nothing_more(comfy, host, monkeypatch):
+    """A job goes on without a download that does not end, here one whose
+    connection cannot be shut. That download had its part file open, and the
+    file took what came later: a piece that was on its way, and the bytes
+    Python had held back of the last writes. Where a file that is open cannot
+    be removed, that was the part file the worker's next job was writing,
+    and a run of 30 jobs showed files that were not what the list said."""
+    monkeypatch.setattr(model_sync, "FETCH_STOP_WAIT_S", 0.3)
+    monkeypatch.setattr(model_sync, "PIECE_BYTES", 4096)
+    monkeypatch.setattr(model_sync._Fetch, "sever", lambda self: None, raising=False)
+    body = body_of("slow", 40_000)
+    slow = model(host, "slow.safetensors", body)
+    host.routes["/slow.safetensors"] = [(200, {"X-Slow": "9000"}, body)]
+    report = model_sync.fetch_local([slow], timeout_s=0.6)
+    assert report["failed"][0]["reason"] == "timed_out" and len(_left_behind()) == 1
+    # The job has taken the part file from it: closed, and gone on every system.
+    part = comfy / "models" / "vae" / "slow.safetensors.part"
+    assert not part.exists()
+    # The next job writes one of that name. Then the host sends the rest.
+    part.write_bytes(b"what the next job has of it")
+    host.hold.set()
+    assert _gone()
+    assert part.read_bytes() == b"what the next job has of it"
+    assert not (comfy / "models" / "vae" / "slow.safetensors").exists()
 
 
 def test_a_download_the_job_has_left_changes_no_file(comfy, host, monkeypatch):

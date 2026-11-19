@@ -1086,19 +1086,20 @@ When the time is up, the worker stops the downloads and answers within 10
 seconds. The files that were complete stay and are listed for the next job,
 the part files go, and the workflow does not run. A download looks for the
 stop between two pieces of 1 MiB, and on a connection that brings less than
-that in a second it takes what comes, so it ends with the next bytes. A
-read that began on a fast connection waits for its whole piece: when a
-download is still reading 8 seconds after the stop, the worker shuts its
-connection, which ends the read. One that has no connection yet is left
-behind after the 10 seconds, ends by itself within a minute, and changes no
-file. So no host can hold the answer back, and none can keep a download and
-its part file on the worker. What arrives in those seconds counts: a
-download that has every byte is finished and not stopped, a job whose last
-file arrives in them goes on to its workflow, and a file that fails in them
-(a wrong sha256, say) is that failure and is tried again as it always is.
-The downloads that a failed file stops (step 4) end the same way, with or
-without a limit: the job answers within 10 seconds of the failure, also
-beside a download whose connection only trickles.
+that in a second it takes what comes, so it ends with the next bytes. A read
+that began on a fast connection waits for its whole piece: when a download
+is still reading 8 seconds after the stop, the worker shuts its connection,
+which ends the read. A download that is still there after the 10 seconds is
+left behind: mostly one that has no connection yet, which ends by itself
+within a minute. The job takes its part file from it, closed and removed, so
+it writes nothing more and holds no room on the disk. So no host can hold
+the answer back, and none can keep a part file on the worker. What arrives
+in those seconds counts: a download that has every byte is finished and not
+stopped, a job whose last file arrives in them goes on to its workflow, and
+a file that fails in them (a wrong sha256, say) is that failure and is tried
+again as it always is. The downloads that a failed file stops (step 4) end
+the same way, with or without a limit: the job answers within 10 seconds of
+the failure, also beside a download whose connection only trickles.
 
 The answer is a `model_fetch_error` whose `failure` says
 `"reason": "timed_out"` and what the download reached: "the download was too

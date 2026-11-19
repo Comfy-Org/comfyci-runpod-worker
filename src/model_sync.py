@@ -238,6 +238,8 @@ def _stream(url: str, dest: Path, hf_token: str | None,
                     if size != total and getattr(stop, "severed", False):
                         raise _Stopped()  # the end the job made, not the file's
                     break
+                if getattr(stop, "over", False):
+                    raise _Stopped()  # the job has gone on, and has closed the file
                 f.write(piece)
                 h.update(piece)
                 size += len(piece)
@@ -369,7 +371,15 @@ class _Fetch(threading.Event):
     (`over`). Such a download can wake later, when the next job of the worker
     is writing a part file of the same name: from then on it removes nothing
     and puts nothing in place. `lock` makes that one step with what the job
-    itself does."""
+    itself does.
+
+    It writes nothing either. The job closes the part file of a download it
+    goes on without (`close`) and removes it. An open file would still take
+    a piece that was on its way, and the bytes Python holds back of the last
+    writes until the file is closed. On Linux they would go into a file that
+    is removed and keeps its room on the disk until then. Where a file that
+    is open cannot be removed, they would go into the part file the next job
+    writes under the same name."""
 
     def __init__(self):
         super().__init__()
@@ -379,7 +389,9 @@ class _Fetch(threading.Event):
         # None until the job has made room after a full disk, then whether
         # that removed anything.
         self.emptied: bool | None = None
-        # Per part file, the job's handle on the connection it is read from.
+        # Per part file, the file it is written through, and the job's handle
+        # on the connection it is read from.
+        self.files: dict = {}
         self.lines: dict[Path, socket.socket] = {}
         self.severed = False
         self.cutting = threading.Lock()
@@ -420,7 +432,16 @@ class _Fetch(threading.Event):
         with self.lock:
             if self.over or self.is_set():
                 raise _Stopped()
-            return open(part, "wb")
+            self.files[part] = opened = open(part, "wb")
+            return opened
+
+    def close(self, part: Path) -> None:
+        """Close a part file for the download that writes it: what the job
+        does to one it goes on without. Nothing more is written through it."""
+        opened = self.files.get(part)
+        if opened is not None:
+            with contextlib.suppress(OSError, ValueError):
+                opened.close()
 
     def drop(self, part: Path) -> None:
         """Remove a part file, unless the job has gone on without its download."""
@@ -886,11 +907,13 @@ def fetch_local(models: list[dict], hf_token: str | None = None,
             raise
 
     def without(items) -> None:
-        """Remove the part files of downloads the job goes on without. They
-        touch no file any more themselves."""
+        """Take the part files from downloads the job goes on without: they
+        are closed, so that nothing more goes into them, and removed."""
         for _key, _m, path in items:
+            part = path.with_name(path.name + PART)
+            stop.close(part)
             try:
-                path.with_name(path.name + PART).unlink(missing_ok=True)
+                part.unlink(missing_ok=True)
             except OSError:
                 pass  # the next job's clean-up removes it
 
@@ -938,7 +961,7 @@ def fetch_local(models: list[dict], hf_token: str | None = None,
         stop.over = True
         ended = time.monotonic()
         received = sum(list(stop.received.values()))
-    # A download that is still there is left behind, and its part file goes.
+    # A download that is still there is left behind, without its part file.
     without(jobs[job] for job in running)
     for job in jobs:
         if job.done() and not job.cancelled():
