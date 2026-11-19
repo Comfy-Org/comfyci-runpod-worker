@@ -8,6 +8,7 @@ import http.server
 import itertools
 import json
 import os
+import ssl
 import subprocess
 import sys
 import threading
@@ -35,7 +36,7 @@ class Host:
     Three headers of an answer make it slow, until the test lets go (`hold`).
     X-Slow: the first so many bytes, then nothing. X-Silent: nothing at all,
     not even the status line. X-Trickle: so many bytes a second, by the
-    clock."""
+    clock, after the X-First bytes it sends at once."""
 
     def __init__(self):
         self.routes: dict[str, list] = {}
@@ -93,8 +94,9 @@ class Host:
                 body = body[half:]
             if headers.get("X-Trickle"):
                 rate, began, sent = int(headers["X-Trickle"]), time.monotonic(), 0
+                first = int(headers.get("X-First", 0))
                 while sent < len(body) and not self.hold.is_set():
-                    due = min(len(body), int((time.monotonic() - began) * rate))
+                    due = min(len(body), first + int((time.monotonic() - began) * rate))
                     request.wfile.write(body[sent:due])
                     request.wfile.flush()
                     sent = due
@@ -913,11 +915,20 @@ def test_what_a_download_that_ran_out_of_time_says():
     # A file that did not say its size: there is no total to name.
     assert model_sync.too_slow(12_400_000_000, None, 600.2, 2, 5, 600)["error"] == (
         "the download was too slow: 12.4 GB in 600 s (20.7 MB/s), 2 of 5 files complete")
-    # The time was up before the download began: no speed.
+    # Files of less than a GB are said in MB: "0.0 of 0.3 GB" says nothing.
+    assert model_sync.too_slow(12_400_000, 334_600_000, 600.2, 0, 1, 600)["error"] == (
+        "the download was too slow: 12.4 of 334.6 MB in 600 s (0.0 MB/s), 0 of 1 files complete")
+    assert model_sync.too_slow(40_000_000, None, 80, 0, 1, 600)["error"] == (
+        "the download was too slow: 40.0 MB in 80 s (0.5 MB/s), 0 of 1 files complete")
+    # The time was up before the download began. It was not the download
+    # that was slow, and there is no speed.
     nothing = model_sync.too_slow(0, 56_600_000_000, 0.0, 0, 5, 600)
-    assert nothing["error"] == ("the download was too slow: 0.0 of 56.6 GB in 0 s, "
-                                "0 of 5 files complete")
-    assert nothing["mb_per_s"] is None
+    assert nothing["error"] == ("the download did not begin: cleaning up and making room took "
+                                "the 600 s it was given")
+    assert {key: value for key, value in nothing.items() if key != "error"} == {
+        "reason": "timed_out", "timeout_s": 600, "received_bytes": 0,
+        "wanted_bytes": 56_600_000_000, "seconds": 0.0, "mb_per_s": None, "files_done": 0,
+        "files_wanted": 5}
     # The mark is the word the runner has for a job that used up its time.
     import submit_and_poll
     assert said["reason"] == model_sync.TIMED_OUT == submit_and_poll.TIMED_OUT == "timed_out"
@@ -929,7 +940,7 @@ def test_a_download_that_takes_too_long_is_stopped_and_says_what_it_reached(comf
     downloading then ended as the runner's plain timeout: no speed in its
     record, and nothing that said why. Now the worker stops and answers, also
     when a connection has gone silent in the middle of a file."""
-    monkeypatch.setattr(model_sync, "FETCH_STOP_WAIT_S", 0.4)
+    monkeypatch.setattr(model_sync, "FETCH_STOP_WAIT_S", 1.5)
     piece = model_sync.PIECE_BYTES
     fast = model(host, "fast.safetensors")
     body = body_of("slow", 3 * piece)
@@ -939,22 +950,28 @@ def test_a_download_that_takes_too_long_is_stopped_and_says_what_it_reached(comf
     started = time.monotonic()
     report = model_sync.fetch_local([fast, slow], timeout_s=0.6)
     took = time.monotonic() - started
-    # The limit, the wait for the downloads to end, and no longer: the one
-    # that waits for its host is left behind.
-    assert 0.6 <= took < 0.6 + 0.4 + 2
+    # The limit, the wait for the downloads to end, and no longer.
+    assert 0.6 <= took < 0.6 + 1.5 + 2
     assert report["files"] == ["vae/fast.safetensors"]
     (failed,) = report["failed"]
-    assert failed["error"].startswith("the download was too slow: 0.0 of 0.0 GB in ")
+    assert failed["error"].startswith("the download was too slow: 2.1 of 3.1 MB in ")
     assert failed["error"].endswith(", 1 of 2 files complete")
-    # What the unfinished file had received counts, in whole pieces: the bytes
-    # of a piece that is still on its way are not seen.
+    # What the unfinished file had received counts, in whole pieces. The
+    # start of the piece that was on its way can be among them, when the
+    # read that waited for it has ended by then.
+    received = failed["received_bytes"]
+    assert 2000 + 2 * piece <= received <= 2000 + 2 * piece + 1000
     assert {key: failed[key] for key in failed if key not in ("error", "seconds", "mb_per_s")} == {
-        "reason": "timed_out", "timeout_s": 0.6, "received_bytes": 2000 + 2 * piece,
+        "reason": "timed_out", "timeout_s": 0.6, "received_bytes": received,
         "wanted_bytes": 2000 + 3 * piece, "files_done": 1, "files_wanted": 2}
+    # The seconds are those the downloads had, up to the stop: the wait after
+    # it is no time in which anything was downloaded. The sentence then
+    # agrees with the limit that a page prints beside it.
+    assert 0 < failed["seconds"] <= 0.6 + 0.6
     # The report of this download is its speed: bytes and seconds are all
     # that arrived, in the time it took.
     assert (report["bytes"], report["seconds"], report["mb_per_s"]) == (
-        2000 + 2 * piece, failed["seconds"], failed["mb_per_s"])
+        received, failed["seconds"], failed["mb_per_s"])
     status, failure = model_sync.fetch_failure(report)
     assert status == "model_fetch_error"
     assert failure == {"message": failed["error"],
@@ -966,9 +983,11 @@ def test_a_download_that_takes_too_long_is_stopped_and_says_what_it_reached(comf
     assert (folder / "fast.safetensors").read_bytes() == body_of("fast.safetensors")
     assert sorted(state_of(comfy)) == ["vae/fast.safetensors"]
     # No part file is left when the job answers. (Only Linux, which the worker
-    # is, removes a file that is still open.)
+    # is, removes a file that is still open, and ends a read on a connection
+    # that is silent. Elsewhere that read ends with the connection's next
+    # byte or after its 60 s.)
     assert not _parts(comfy) or os.name == "nt"
-    # The host goes on, and the download that was left behind wakes. The job
+    # The host goes on. A download that was still there wakes, and the job
     # is over: it puts nothing in place and lists nothing.
     host.hold.set()
     assert _gone()
@@ -1056,7 +1075,9 @@ def test_a_slow_connection_is_left_with_the_next_bytes_it_sends(comfy, host, mon
     started = time.monotonic()
     report = model_sync.fetch_local([drip], timeout_s=1.9)
     took = time.monotonic() - started
-    assert model_sync.FETCH_STOP_WAIT_S == 10 and 1.9 <= took < 1.9 + 1.5
+    # A wait can end one tick of the system's clock early: 16 ms on Windows.
+    assert 1.9 - 0.05 <= took < 1.9 + 1.5
+    assert (model_sync.FETCH_STOP_WAIT_S, model_sync.FETCH_CUT_AFTER_S) == (10, 8)
     (failed,) = report["failed"]
     # More than the first piece and less than two: it was read as it came.
     # The first piece is whole 1.3 s after the start, and a read of a whole
@@ -1072,8 +1093,8 @@ def test_a_host_that_does_not_answer_cannot_hold_the_job_back(comfy, host, monke
     mute = model(host, "mute.safetensors")
     host.routes["/mute.safetensors"] = [(200, {"X-Silent": "1"}, body_of("mute.safetensors"))]
     started = time.monotonic()
-    report = model_sync.fetch_local([mute], timeout_s=0.3)
-    assert time.monotonic() - started < 0.3 + 0.3 + 2
+    report = model_sync.fetch_local([mute], timeout_s=0.6)
+    assert time.monotonic() - started < 0.6 + 0.3 + 2
     (failed,) = report["failed"]
     assert (failed["received_bytes"], failed["mb_per_s"], failed["files_done"]) == (0, 0.0, 0)
     assert (report["bytes"], report["mb_per_s"], report["files"]) == (0, 0.0, [])
@@ -1083,6 +1104,251 @@ def test_a_host_that_does_not_answer_cannot_hold_the_job_back(comfy, host, monke
     host.hold.set()
     assert _gone()
     assert not list((comfy / "models").rglob("mute*")) and state_of(comfy) == {}
+
+
+@pytest.mark.parametrize("fast_pieces", [0, 1])
+def test_a_read_that_waits_for_its_piece_is_ended_by_the_job(comfy, host, monkeypatch,
+                                                             fast_pieces):
+    """A read waits until its piece is whole. On a connection that sends a
+    byte a second, from its first byte on or after a fast first piece, that
+    is 12 days for one piece, and nothing has judged the connection slow yet.
+    Such a download held its thread, its connection and its open part file
+    long after the job had answered. Now the job shuts the connection."""
+    monkeypatch.setattr(model_sync, "FETCH_STOP_WAIT_S", 3)
+    monkeypatch.setattr(model_sync, "FETCH_CUT_AFTER_S", 0.3)
+    piece = model_sync.PIECE_BYTES
+    body = body_of("drip", 3 * piece)
+    drip = model(host, "drip.safetensors", body)
+    host.routes["/drip.safetensors"] = [
+        (200, {"X-Trickle": "1", "X-First": str(fast_pieces * piece + 500)}, body)]
+    started = time.monotonic()
+    report = model_sync.fetch_local([drip], timeout_s=0.6)
+    # The limit and the wait until the connection is shut, not the 3 s after
+    # which the job would go on without the download.
+    assert time.monotonic() - started < 0.6 + 0.3 + 1.5
+    (failed,) = report["failed"]
+    assert (failed["reason"], failed["files_done"]) == ("timed_out", 0)
+    # It was stopped, not failed: what it had received counts.
+    assert fast_pieces * piece <= failed["received_bytes"] < fast_pieces * piece + 1000
+    # The download is gone and so is its part file, while its host still sends.
+    assert _gone(2) and not _parts(comfy) and not host.hold.is_set()
+    assert report["files"] == [] and state_of(comfy) == {}
+
+
+class Held:
+    """Stands in for a response whose second read waits until its connection
+    is shut, and for the job's handle on that connection. `ends` is what the
+    read does then: the bytes it returns, or the error it raises. After that
+    the connection has nothing more."""
+
+    def __init__(self, ends):
+        self.ends, self.headers = ends, {"Content-Length": str(10 * MIB)}
+        self.pieces, self.closed = [b"x" * MIB], False
+        self.reading, self.shut = threading.Event(), threading.Event()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, want):
+        if self.pieces:
+            return self.pieces.pop()
+        self.reading.set()
+        assert self.shut.wait(10)
+        ends, self.ends = self.ends, b""
+        if isinstance(ends, Exception):
+            raise ends
+        return ends
+
+    def shutdown(self, how):
+        self.shut.set()
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.mark.parametrize("ends", [
+    b"x" * 700, b"", ConnectionAbortedError(10053, "aborted by the software in your host"),
+    ssl.SSLEOFError(8, "EOF occurred in violation of protocol"),
+    http.client.IncompleteRead(b"x" * 700, MIB - 700)],
+    ids=["the bytes it has", "nothing", "an error", "an error of tls", "half a piece"])
+def test_a_read_that_the_job_ended_is_a_stop_whatever_it_says(tmp_path, monkeypatch, ends):
+    """What a read does when its connection is shut depends on the system
+    and on the connection: it returns what it has, or nothing, or it raises.
+    None of them is a failed try, a short file or a wrong sha256: the
+    download was stopped, and what it had received still counts."""
+    held = Held(ends)
+    monkeypatch.setattr(model_sync, "_open", lambda url, hf_token, timeout=60: held)
+    monkeypatch.setattr(model_sync, "_twin", lambda response: response)
+    stop, part, raised = model_sync._Fetch(), tmp_path / "x.part", []
+
+    def download():
+        try:
+            model_sync._stream("https://example.org/x", part, None, stop)
+        except BaseException as e:  # noqa: BLE001
+            raised.append(e)
+
+    thread = threading.Thread(target=download)
+    thread.start()
+    assert held.reading.wait(10) and list(stop.lines) == [part]
+    stop.set()
+    stop.sever()
+    thread.join(10)
+    assert not thread.is_alive() and [type(e) for e in raised] == [model_sync._Stopped]
+    assert MIB <= stop.received[part] <= MIB + 700
+    # The job's handle is given back when the download ends.
+    assert stop.lines == {} and held.closed
+    # Without the job's doing, each of these is what it was: the end of a
+    # connection before its file was whole, or the error itself.
+    held, stop = Held(ends), model_sync._Fetch()
+    held.shut.set()
+    with pytest.raises((ConnectionError, OSError, http.client.HTTPException)) as broken:
+        model_sync._stream("https://example.org/x", part, None, stop)
+    assert not isinstance(broken.value, model_sync._Stopped) and stop.received[part] == 0
+
+
+def test_the_jobs_handle_on_a_connection_is_closed_with_the_download(comfy, host):
+    """To shut a connection the job keeps a handle of its own on it, for as
+    long as the download reads. One that stayed open would be a connection
+    the worker never gives back."""
+    stop, seen = model_sync._Fetch(), []
+    count = stop.count
+    stop.count = lambda part, size: seen.append(dict(stop.lines)) or count(part, size)
+    a = model(host, "a.safetensors")
+    part = comfy / "models" / "a.part"
+    assert model_sync._stream(a["url"], part, None, stop)[0] == 2000
+    assert seen[0] == {} and list(seen[-1]) == [part]
+    assert seen[-1][part].fileno() == -1 and stop.lines == {}
+    # A response that has no connection to name is read as before.
+    assert model_sync._twin(object()) is None
+
+
+def test_a_file_that_failed_ends_the_job_beside_a_read_that_does_not_end(comfy, host,
+                                                                        monkeypatch):
+    """The first file that fails for good stops the others. One of them can
+    be in a read that waits for its piece. A job without a time limit waited
+    for that read, billed, for as long as the connection liked."""
+    monkeypatch.setattr(model_sync, "FETCH_STOP_WAIT_S", 3)
+    monkeypatch.setattr(model_sync, "FETCH_CUT_AFTER_S", 0.3)
+    monkeypatch.setattr(model_sync, "FETCH_LOOK_S", 0.1)
+    body = body_of("drip", 2 * MIB)
+    drip = model(host, "drip.safetensors", body)
+    host.routes["/drip.safetensors"] = [(200, {"X-Trickle": "1"}, body)]
+    bad = {**model(host, "bad.safetensors"), "sha256": "0" * 64}
+    # Should the job wait for the read after all, the test still ends.
+    rescue = threading.Timer(8, host.hold.set)
+    rescue.start()
+    started = time.monotonic()
+    report = model_sync.fetch_local([drip, bad], streams=2)
+    took = time.monotonic() - started
+    rescue.cancel()
+    assert took < 0.1 + 0.3 + 2.5
+    (failed,) = report["failed"]
+    assert failed["model"] == "vae/bad.safetensors" and "reason" not in failed
+    assert failed["error"].startswith("sha256 mismatch: got ")
+    assert _gone(2) and not _parts(comfy) and state_of(comfy) == {}
+
+
+def test_what_arrives_while_the_downloads_are_stopped_counts(comfy, host, monkeypatch):
+    """The time can be up between a file's last byte and its rename. That
+    file is put in place and listed. So when it was the last one, the job has
+    all its models: it was answered as a download that was too slow, with
+    "1 of 1 files complete", and nothing tried it again."""
+    real = model_sync._mismatch
+
+    def late(entry, size, digest):
+        time.sleep(1.0)  # the last byte is there, the rename is not done yet
+        return real(entry, size, digest)
+
+    monkeypatch.setattr(model_sync, "_mismatch", late)
+    only = model(host, "only.safetensors")
+    report = model_sync.fetch_local([only], timeout_s=0.6)
+    assert report["failed"] == [] and report["files"] == ["vae/only.safetensors"]
+    assert model_sync.fetch_failure(report) is None
+    assert (report["bytes"], report["seconds"] >= 0.9) == (2000, True)
+    assert sorted(state_of(comfy)) == ["vae/only.safetensors"]
+    # A file that turns out wrong in those seconds is that failure, without
+    # the mark of a job that used up its time: the runner tries it again.
+    bad = {**model(host, "bad.safetensors"), "sha256": "0" * 64}
+    report = model_sync.fetch_local([bad], timeout_s=0.6)
+    (failed,) = report["failed"]
+    assert failed["error"].startswith("sha256 mismatch: got ") and "reason" not in failed
+    status, failure = model_sync.fetch_failure(report)
+    assert status == "model_fetch_error" and "reason" not in failure
+
+
+def test_a_download_that_has_every_byte_is_not_stopped(comfy, host):
+    """The stop comes while the read of the last piece waits, and the piece
+    then arrives whole. Every byte of the file is there: the download was
+    thrown away, at "2097152 of 2097152 bytes"."""
+    piece = model_sync.PIECE_BYTES
+    body = body_of("two", 2 * piece)
+    two = model(host, "two.safetensors", body)
+    host.routes["/two.safetensors"] = [(200, {"X-Slow": str(piece)}, body)]
+    threading.Timer(1.2, host.hold.set).start()
+    started = time.monotonic()
+    report = model_sync.fetch_local([two], timeout_s=0.6)
+    assert time.monotonic() - started < 1.2 + 2
+    assert report["failed"] == [] and report["files"] == ["vae/two.safetensors"]
+    assert (comfy / "models" / "vae" / "two.safetensors").read_bytes() == body
+    assert _gone(2) and not _parts(comfy)
+
+
+def test_a_time_limit_that_is_up_before_the_download_begins(comfy, host, monkeypatch):
+    """The limit counts from the call, so the clean-up is inside it. When
+    that used it up, no request is made, and the answer does not blame a
+    download: it said "too slow: 0.0 of 0.0 GB in 0 s"."""
+    tracked = model_sync._tracked
+
+    def slow_git():
+        time.sleep(0.3)
+        return tracked()
+
+    monkeypatch.setattr(model_sync, "_tracked", slow_git)
+    a = model(host, "a.safetensors")
+    report = model_sync.fetch_local([a], timeout_s=0.1)
+    (failed,) = report["failed"]
+    assert failed == {
+        "error": ("the download did not begin: cleaning up and making room took the 0.1 s "
+                  "it was given"),
+        "reason": "timed_out", "timeout_s": 0.1, "received_bytes": 0, "wanted_bytes": 2000,
+        "seconds": 0.0, "mb_per_s": None, "files_done": 0, "files_wanted": 1}
+    assert host.requests == [] and not _left_behind() and not _parts(comfy)
+    # It is a job that used up its time, like any other the limit stopped.
+    status, failure = model_sync.fetch_failure(report)
+    assert (status, failure["reason"], failure["message"]) == (
+        "model_fetch_error", "timed_out", failed["error"])
+
+
+def test_a_time_limit_no_clock_can_count_to_is_no_limit(comfy, host):
+    """A wait takes no more than some weeks of seconds. A larger limit broke
+    the fetch after its downloads had begun, and they ran on behind the
+    job's answer."""
+    a = model(host, "a.safetensors")
+    report = model_sync.fetch_local([a], timeout_s=1e12)
+    assert report["files"] == ["vae/a.safetensors"] and report["failed"] == []
+    assert threading.TIMEOUT_MAX < 1e12 and _gone(2)
+
+
+def test_a_fetch_that_breaks_leaves_no_download_running(comfy, host, monkeypatch):
+    """Whatever breaks the fetch while its downloads are going: they do not
+    run on behind the answer of the job. One did, into the models folder and
+    the list, when the wait for it would not take its number."""
+    monkeypatch.setattr(model_sync, "FETCH_LOOK_S", 1e12)  # no wait takes that
+    body = body_of("slow", 6000)
+    slow = model(host, "slow.safetensors", body)
+    host.routes["/slow.safetensors"] = [(200, {"X-Slow": "3000"}, body)]
+    with pytest.raises(OverflowError):
+        model_sync.fetch_local([slow])
+    # No part file is left. (Only Linux removes a file that is still open.)
+    assert not _parts(comfy) or os.name == "nt"
+    # The host sends the rest. The download ends, and puts nothing in place.
+    host.hold.set()
+    assert _gone()
+    assert not (comfy / "models" / "vae" / "slow.safetensors").exists()
+    assert state_of(comfy) == {}
 
 
 def test_a_download_the_job_has_left_changes_no_file(comfy, host, monkeypatch):
@@ -1356,3 +1622,94 @@ def test_a_download_that_began_after_room_was_made_gets_no_second_try(comfy, hos
     assert report["evicted"] == ["vae/spare.safetensors"]
     assert report["failed"] == [{"model": "vae/b.safetensors",
                                  "error": "disk full while writing"}]
+
+
+def test_a_full_disk_at_the_write_of_the_list_makes_room_too(comfy, host, monkeypatch):
+    """The list of what the worker fetched is written on the disk the models
+    are on, right after a file is put in place. A disk that is full at that
+    moment broke the whole fetch (`worker_error`), no room was made, and the
+    finished file was in no list."""
+    model_sync.fetch_local([model(host, "old.safetensors")])
+    save, refused = model_sync._save_local_state, []
+
+    def full(state):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def full_once(state):
+        if "vae/a.safetensors" in state and not refused:
+            refused.append(sorted(state))
+            full(state)
+        return save(state)
+
+    monkeypatch.setattr(model_sync, "_save_local_state", full_once)
+    a = model(host, "a.safetensors")
+    report = model_sync.fetch_local([a])
+    # Room was made, and the file was fetched once more and listed.
+    assert refused == [["vae/a.safetensors", "vae/old.safetensors"]]
+    assert report["failed"] == [] and report["files"] == ["vae/a.safetensors"]
+    assert report["evicted"] == ["vae/old.safetensors"]
+    assert host.paths().count("/a.safetensors") == 2
+    assert sorted(state_of(comfy)) == ["vae/a.safetensors"]
+    assert (comfy / "models" / "vae" / "a.safetensors").read_bytes() == body_of("a.safetensors")
+
+    # Nothing to remove: the file has failed like any that found the disk
+    # full, and it is not left under its name without a line in the list.
+    b = model(host, "b.safetensors")
+    monkeypatch.setattr(model_sync, "_save_local_state", lambda state: (
+        full(state) if "vae/b.safetensors" in state else save(state)))
+    report = model_sync.fetch_local([a, b])
+    assert report["failed"] == [{"model": "vae/b.safetensors",
+                                 "error": "disk full while writing"}]
+    assert report["reused"] == ["vae/a.safetensors"] and report["evicted"] == []
+    assert not (comfy / "models" / "vae" / "b.safetensors").exists() and not _parts(comfy)
+    assert sorted(state_of(comfy)) == ["vae/a.safetensors"]
+    # Any other error of that write is a fetch that broke, as it was.
+
+    def refuse(state):
+        if "vae/b.safetensors" in state:
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return save(state)
+
+    monkeypatch.setattr(model_sync, "_save_local_state", refuse)
+    with pytest.raises(PermissionError):
+        model_sync.fetch_local([a, b])
+
+
+def test_a_disk_too_full_for_the_list_before_the_download_is_a_full_disk(comfy, host,
+                                                                        monkeypatch):
+    """The list is written once before anything is downloaded. No room for
+    it then is no reason to break: the steps after it make room, or say that
+    the disk is full."""
+    save, calls = model_sync._save_local_state, []
+
+    def full_at_first(state):
+        calls.append(sorted(state))
+        if len(calls) == 1:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return save(state)
+
+    monkeypatch.setattr(model_sync, "_save_local_state", full_at_first)
+    a = model(host, "a.safetensors")
+    report = model_sync.fetch_local([a])
+    assert calls == [[], ["vae/a.safetensors"]]
+    assert report["failed"] == [] and report["files"] == ["vae/a.safetensors"]
+    assert sorted(state_of(comfy)) == ["vae/a.safetensors"]
+
+
+def test_an_empty_cache_folder_is_no_room_that_was_made(comfy, host, tmp_path, monkeypatch):
+    """A second try after a full disk is for a disk that has more room now.
+    A cache folder with nothing in it gave none, and the file was downloaded
+    once more up to the point where the disk was full again."""
+    (tmp_path / "hf-cache" / "hub" / "models--x").mkdir(parents=True)
+    tries = _small_disk(monkeypatch, comfy, tmp_path, 4000)
+    big = model(host, "big.safetensors", body_of("big", 5000))
+    report = model_sync.fetch_local([big])
+    assert len(tries) == 1 and host.paths() == ["/big.safetensors"]
+    assert report["failed"] == [{"model": "vae/big.safetensors",
+                                 "error": "disk full while writing"}]
+    # One file in it is room: the cache goes, and the file has its second try.
+    (tmp_path / "hf-cache" / "hub" / "models--x").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "hf-cache" / "hub" / "models--x" / "blob.safetensors").write_bytes(b"c" * 3000)
+    del tries[:]
+    model_sync.fetch_local([big])
+    assert len(tries) == 2 and not (tmp_path / "hf-cache").exists()

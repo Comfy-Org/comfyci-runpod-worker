@@ -13,9 +13,11 @@ bonus: every job checks what is there against its own list.
 
 A job can say how long its download may take (`timeout_s`). When that time is
 up the download is stopped and the job answers with what it reached, so a slow
-download does not run on until the runner stops waiting for it. A write that
-finds the disk full makes room once, from what the job does not need, and is
-tried once more: what a worker's disk reports as free is not relied on.
+download does not run on until the runner stops waiting for it. A download
+that does not end when it is stopped has its connection shut, so none stays
+behind on a connection that only trickles. A write that finds the disk full
+makes room once, from what the job does not need, and is tried once more:
+what a worker's disk reports as free is not relied on.
 
 The Hugging Face token goes to https://huggingface.co and to no other host,
 also not to the storage host a download is redirected to. It is in no message
@@ -24,6 +26,7 @@ either: what a download says when it fails is published with the run.
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import errno
 import hashlib
 import http.client
@@ -32,6 +35,7 @@ import math
 import os
 import re
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -78,12 +82,20 @@ NO_RETRY_HTTP = (401, 403, 404)
 # stopped it. It is the word a run record has for a job that used up its time
 # (scripts/submit_and_poll.py), and the runner tries neither again.
 TIMED_OUT = "timed_out"
-# Seconds a job waits for its downloads to end once its time is up. A download
-# sees the stop between two pieces (`_stream`). One whose piece does not come
-# is left behind after this long, so the job answers this soon whatever a
-# connection does. It ends by itself, with its piece or when its connection
-# has been silent for 60 s (`_open`), and changes no file (`_Fetch`).
+# Seconds a job waits for its downloads to end once they are stopped: its time
+# is up, or a file has failed. A download sees the stop between two pieces
+# (`_stream`). One that is still reading after FETCH_CUT_AFTER_S of them waits
+# for a piece that does not come: the job shuts its connection, which ends
+# the read (`_Fetch.sever`). One that is still there at the end is still
+# opening its connection. The job answers without it, so it answers this soon
+# whatever a host does. Such a download ends by itself within the 60 s of
+# `_open`, and changes no file (`_Fetch`).
 FETCH_STOP_WAIT_S = 10
+FETCH_CUT_AFTER_S = 8
+# Seconds between two looks of a job at its downloads while it waits for
+# them: a file that has failed ends the wait, also beside a download that is
+# held up in a read.
+FETCH_LOOK_S = 1
 # How the threads of a job's downloads are named, for whoever looks for one
 # that was left behind.
 FETCH_THREADS = "model-fetch"
@@ -193,29 +205,37 @@ def _stream(url: str, dest: Path, hf_token: str | None,
     `stop` before each piece. A read waits until its piece is whole. So when
     a connection has brought less than a piece a second, the download takes
     what is there as it comes, until the connection is that fast again: it is
-    then left with the next bytes the connection sends, however few. The
-    `stop` of a job (`_Fetch`) is told what has arrived, piece by piece, and
-    opens the file itself: it does not for a download that has been stopped."""
+    then left with the next bytes the connection sends, however few. A read
+    that began on a fast connection still waits for its whole piece, so the
+    job can end it (`_Fetch.sever`): that is a stop too, not a failed try.
+    The `stop` of a job (`_Fetch`) is told what has arrived, piece by piece,
+    and opens the file itself: it does not for a download that has been
+    stopped. A download that has every byte the host announced is not
+    stopped: the one read it has left only finds the end."""
     h = hashlib.sha256()
     size = 0
     count = getattr(stop, "count", None)
     create = getattr(stop, "create", None) or (lambda path: open(path, "wb"))
+    line = getattr(stop, "line", None) or (lambda path, response: contextlib.nullcontext())
     want = CHUNK_BYTES if stop is None else PIECE_BYTES
     if stop is not None and stop.is_set():
         raise _Stopped()
     if count:
         count(dest, 0)
     try:
-        with _open(url, hf_token) as r, create(dest) as f:
+        with _open(url, hf_token) as r, create(dest) as f, line(dest, r):
             announced = r.headers.get("Content-Length")
+            total = int(announced) if announced and announced.isdecimal() else None
             # Whether the connection is a slow one, by what the last second
             # or more of it brought.
             slow, since, brought = False, time.monotonic(), 0
             while True:
-                if stop is not None and stop.is_set():
+                if stop is not None and stop.is_set() and size != total:
                     raise _Stopped()
                 piece = r.read1(want) if slow else r.read(want)
                 if not piece:
+                    if size != total and getattr(stop, "severed", False):
+                        raise _Stopped()  # the end the job made, not the file's
                     break
                 f.write(piece)
                 h.update(piece)
@@ -228,11 +248,15 @@ def _stream(url: str, dest: Path, hf_token: str | None,
                     if passed >= 1:
                         slow = brought < passed * want
                         since, brought = since + passed, 0
-        if announced and announced.isdigit() and size != int(announced):
+        if total is not None and size != total:
             raise ConnectionError(f"the connection ended after {size} of {announced} bytes")
     except _Stopped:
         raise  # what an unfinished file had received is part of what the job reached
-    except BaseException:
+    except BaseException as e:
+        if (getattr(stop, "severed", False)
+                and isinstance(e, (OSError, http.client.HTTPException))):
+            # What a read says whose connection the job has shut.
+            raise _Stopped() from None
         if count:
             count(dest, 0)  # this try is over, and its part file goes
         raise
@@ -305,6 +329,25 @@ class _DiskFull(FetchError):
         super().__init__("disk full while writing")
 
 
+def _twin(response) -> socket.socket | None:
+    """A second handle on the connection `response` is read from, for a
+    thread that is not the reader. None when there is no way to one."""
+    try:
+        return socket.fromfd(response.fileno(), socket.AF_INET, socket.SOCK_STREAM)
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def _shut(twin: socket.socket) -> None:
+    """End a connection for whoever reads from it. On Linux, which the worker
+    is, a read that waits for bytes comes back at once. On Windows it comes
+    back with the next byte the connection brings, or after its 60 s."""
+    try:
+        twin.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass  # it has ended by itself
+
+
 class _Fetch(threading.Event):
     """What the downloads of one job share.
 
@@ -312,12 +355,20 @@ class _Fetch(threading.Event):
     job's time is up. It counts what each download has received (`received`,
     per part file), so a job that is stopped can say how far it came.
 
-    And it is their one way to the files. A job whose time is up waits
-    FETCH_STOP_WAIT_S for its downloads and then goes on without those that
-    are still there (`over`). Such a download can wake much later, when the
-    next job of the worker is writing a part file of the same name: from then
-    on it removes nothing and puts nothing in place. `lock` makes that one
-    step with what the job itself does."""
+    It can end a read. A download looks at the stop between two pieces, and a
+    piece can take as long as its connection likes. So a job that has waited
+    FETCH_CUT_AFTER_S for its downloads shuts the connections that are still
+    read from (`sever`). The handle for that is the job's own, made by the
+    download before its first read (`line`): the response closes its own when
+    the last byte is read, and that number can be another connection's by
+    the time the job would look it up.
+
+    And it is their one way to the files. A job waits FETCH_STOP_WAIT_S for
+    its downloads and then goes on without those that are still there
+    (`over`). Such a download can wake later, when the next job of the worker
+    is writing a part file of the same name: from then on it removes nothing
+    and puts nothing in place. `lock` makes that one step with what the job
+    itself does."""
 
     def __init__(self):
         super().__init__()
@@ -327,9 +378,39 @@ class _Fetch(threading.Event):
         # None until the job has made room after a full disk, then whether
         # that removed anything.
         self.emptied: bool | None = None
+        # Per part file, the job's handle on the connection it is read from.
+        self.lines: dict[Path, socket.socket] = {}
+        self.severed = False
+        self.cutting = threading.Lock()
 
     def count(self, part: Path, size: int) -> None:
         self.received[part] = size
+
+    @contextlib.contextmanager
+    def line(self, part: Path, response):
+        """For as long as a download reads `response`: the job can end that
+        read (`sever`)."""
+        twin = _twin(response)
+        if twin is not None:
+            with self.cutting:
+                self.lines[part] = twin
+                if self.severed:
+                    _shut(twin)
+        try:
+            yield
+        finally:
+            if twin is not None:
+                with self.cutting, contextlib.suppress(OSError):
+                    self.lines.pop(part, None)
+                    twin.close()
+
+    def sever(self) -> None:
+        """Shut the connection of every download that is still reading. Its
+        read ends, and the download with it: stopped, not failed."""
+        with self.cutting:
+            self.severed = True
+            for twin in self.lines.values():
+                _shut(twin)
 
     def create(self, part: Path):
         """Open a part file for writing. Not for a download that has been
@@ -499,14 +580,20 @@ def _make_room(state: dict, keep: set[str], need: int, evicted: list[str]) -> in
     return free
 
 
+def _holds_a_file(folder: Path) -> bool:
+    return any(names for _folder, _dirs, names in os.walk(folder))
+
+
 def _empty(state: dict, keep: set[str], evicted: list[str]) -> bool:
     """Remove everything `_make_room` can remove, whatever the disk says is
-    free, and say whether anything went. For a write that found the disk
-    full: the free space the system reports may be that of another disk than
-    the one the worker is held to, and then `_make_room` removed nothing."""
+    free, and say whether anything went: a fetched file, or a file of the
+    cache. For a write that found the disk full: the free space the system
+    reports may be that of another disk than the one the worker is held to,
+    and then `_make_room` removed nothing."""
     before, cache = len(evicted), _spare_cache()
+    cached = cache is not None and _holds_a_file(cache)
     _make_room(state, keep, math.inf, evicted)
-    return len(evicted) > before or cache is not None
+    return len(evicted) > before or cached
 
 
 def too_slow(received: int, wanted: int | None, seconds: float, files_done: int,
@@ -514,12 +601,19 @@ def too_slow(received: int, wanted: int | None, seconds: float, files_done: int,
     """The failure of a download that its job's time limit stopped: what it
     reached, as a sentence under `error` and as the numbers it is made of.
     `received` counts the unfinished files too. `wanted` is None when a file
-    did not say its size."""
+    did not say its size. `seconds` is how long the downloads had: 0 when the
+    time was up before the first of them began. The sizes are in GB, and in
+    MB when they are under one."""
     speed = round(received / 1e6 / seconds, 1) if seconds > 0 else None
-    said = (f"the download was too slow: {received / 1e9:.1f}"
-            + (f" of {wanted / 1e9:.1f}" if wanted else "") + f" GB in {seconds:.0f} s"
-            + (f" ({speed:.1f} MB/s)" if speed is not None else "")
-            + f", {files_done} of {files_wanted} files complete")
+    unit, name = (1e9, "GB") if max(received, wanted or 0) >= 1e9 else (1e6, "MB")
+    if seconds > 0:
+        said = (f"the download was too slow: {received / unit:.1f}"
+                + (f" of {wanted / unit:.1f}" if wanted else "")
+                + f" {name} in {seconds:.0f} s ({speed:.1f} MB/s), "
+                + f"{files_done} of {files_wanted} files complete")
+    else:
+        said = ("the download did not begin: cleaning up and making room took the "
+                f"{timeout_s:g} s it was given")
     return {"error": said, "reason": TIMED_OUT, "timeout_s": timeout_s,
             "received_bytes": received, "wanted_bytes": wanted, "seconds": round(seconds, 1),
             "mb_per_s": speed, "files_done": files_done, "files_wanted": files_wanted}
@@ -572,8 +666,10 @@ def _fetch_one(model: dict, path: Path, hf_token: str | None, stop: _Fetch, note
     host that a redirect led to is tried again like any failure: no person
     can act on it, and the model's host signs a new link for each try. A file
     without a sha256 must have the size its entry says. FetchError when the
-    file is not there in the end (`_DiskFull` when a write found no room),
-    and no part file is left. _Stopped when `stop` ended it."""
+    file is not there in the end, and no part file is left. `_DiskFull` when
+    a write found no room, also the write of the list (`note`): a file that
+    no list names would be removed by the next job, so it is removed here.
+    _Stopped when `stop` ended it."""
     part = path.with_name(path.name + PART)
     own_host = repo_of(model["url"])[0]
     try:
@@ -619,7 +715,13 @@ def _fetch_one(model: dict, path: Path, hf_token: str | None, stop: _Fetch, note
                     except OSError as e:
                         wrong = f"{type(e).__name__}: {e}"
                     else:
-                        note(size, digest)
+                        try:
+                            note(size, digest)
+                        except OSError as e:
+                            if e.errno not in DISK_FULL_ERRNOS:
+                                raise
+                            path.unlink(missing_ok=True)
+                            raise _DiskFull() from None
                         return
             stop.drop(part)
             raise FetchError(wrong)
@@ -654,9 +756,11 @@ def fetch_local(models: list[dict], hf_token: str | None = None,
 
     `timeout_s` is how long all of this may take, counted from the call (None:
     as long as it takes). When the time is up the downloads are stopped, and
-    FETCH_STOP_WAIT_S later the report is made, with or without them. The
-    files that were complete stay and are in the state, and no part file is
-    left.
+    FETCH_STOP_WAIT_S later at the most the report is made, with or without
+    them. The files that were complete stay and are in the state, and no part
+    file is left. A file that is whole in those last seconds counts: when
+    every file is, nothing was too slow and the job goes on. A file that
+    fails for good in them is the failure, as it is at any other time.
 
     Returns `files` (downloaded), `reused` and `evicted` as lists of
     directory/name, `bytes` and `seconds` of the downloads with `mb_per_s`,
@@ -666,7 +770,8 @@ def fetch_local(models: list[dict], hf_token: str | None = None,
     `host` and `repo`. A full disk before any download is one object without
     `model`. So is a download that its time limit stopped (`too_slow`):
     `bytes` and `mb_per_s` then count what the unfinished files had received
-    too. No `error` holds the token."""
+    too, and `seconds` is the time up to the stop. No `error` holds the
+    token."""
     deadline = None if timeout_s is None else time.monotonic() + timeout_s
     hf_token = clean_token(hf_token) or clean_token(os.environ.get("HF_TOKEN"))
     streams = max(1, int(streams))
@@ -701,7 +806,13 @@ def fetch_local(models: list[dict], hf_token: str | None = None,
         if state.pop(key, None) is not None:
             path.unlink(missing_ok=True)
         wanted.append((key, m, path))
-    _save_local_state(state)
+    try:
+        _save_local_state(state)
+    except OSError as e:
+        if e.errno not in DISK_FULL_ERRNOS:
+            raise
+        # No room for the list itself. What follows makes room or says "disk
+        # full", and a list that is behind is put right by the next clean-up.
     if report["failed"] or not wanted:
         return report
 
@@ -712,6 +823,13 @@ def fetch_local(models: list[dict], hf_token: str | None = None,
                                           f"{need / 1e9:.1f} GB needed"})
         return report
 
+    sizes = [m.get("bytes") for _key, m, _path in wanted]
+    total = sum(sizes) if all(_is_number(size) and size > 0 for size in sizes) else None
+    if deadline is not None and time.monotonic() >= deadline:
+        # The steps above used up the time: no download begins.
+        report["failed"].append(too_slow(0, total, 0.0, 0, len(wanted), timeout_s))
+        return report
+
     stop = _Fetch()
     done: dict[str, int] = {}
 
@@ -719,7 +837,11 @@ def fetch_local(models: list[dict], hf_token: str | None = None,
         def note(size: int, digest: str) -> None:  # called with `stop.lock` held
             state[key] = {"url": m["url"], "sha256": digest, "bytes": size,
                           "used_at": int(time.time())}
-            _save_local_state(state)
+            try:
+                _save_local_state(state)
+            except OSError:
+                del state[key]  # the list on the disk does not have it
+                raise
             done[key] = size
         return note
 
@@ -762,43 +884,76 @@ def fetch_local(models: list[dict], hf_token: str | None = None,
             stop.set()
             raise
 
+    def without(items) -> None:
+        """Remove the part files of downloads the job goes on without. They
+        touch no file any more themselves."""
+        for _key, _m, path in items:
+            try:
+                path.with_name(path.name + PART).unlink(missing_ok=True)
+            except OSError:
+                pass  # the next job's clean-up removes it
+
     t0 = time.monotonic()
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=min(streams, len(wanted)),
                                                  thread_name_prefix=FETCH_THREADS)
-    jobs = {pool.submit(one, item): item for item in wanted}
-    left = None if deadline is None else max(deadline - t0, 0)
-    running = concurrent.futures.wait(jobs, timeout=left).not_done
-    # The time is up while a download is still going, and no failed file has
-    # ended the job before: the downloads are stopped, and this is why.
-    slow = bool(running) and not stop.is_set()
-    if running:
+    jobs: dict = {}
+    try:
+        for item in wanted:
+            jobs[pool.submit(one, item)] = item
+        # Until every download has ended, a file has failed, or the time is up.
+        running = set(jobs)
+        while running and not stop.is_set():
+            look = FETCH_LOOK_S
+            if deadline is not None:
+                look = min(look, deadline - time.monotonic())
+            if look <= 0:
+                break
+            running = concurrent.futures.wait(running, timeout=look).not_done
+        # The time is up while a download is still going, and no failed file
+        # has ended the job before: the downloads are stopped, and this is why.
+        slow = bool(running) and not stop.is_set()
+        stopped = time.monotonic()
+        if running:
+            stop.set()
+            running = concurrent.futures.wait(
+                running, timeout=min(FETCH_CUT_AFTER_S, FETCH_STOP_WAIT_S)).not_done
+        if running:
+            stop.sever()
+            running = concurrent.futures.wait(
+                running, timeout=max(FETCH_STOP_WAIT_S - FETCH_CUT_AFTER_S, 0)).not_done
+    except BaseException:
+        # The fetch itself broke. Its downloads do not run on behind the
+        # answer of the job: they are ended here, and change no file.
         stop.set()
-        running = concurrent.futures.wait(running, timeout=FETCH_STOP_WAIT_S).not_done
+        stop.sever()
+        with stop.lock:
+            stop.over = True
+        pool.shutdown(wait=False, cancel_futures=True)
+        without(wanted)
+        raise
     pool.shutdown(wait=False, cancel_futures=True)
     with stop.lock:
         stop.over = True
-        seconds = time.monotonic() - t0
+        ended = time.monotonic()
         received = sum(list(stop.received.values()))
-    # A download that is still there is left behind. Its part file goes now:
-    # the download itself touches no file any more.
-    for job in running:
-        try:
-            jobs[job][2].with_name(jobs[job][2].name + PART).unlink(missing_ok=True)
-        except OSError:
-            pass  # the next job's clean-up removes it
+    # A download that is still there is left behind, and its part file goes.
+    without(jobs[job] for job in running)
     for job in jobs:
         if job.done() and not job.cancelled():
             job.result()  # what broke in a download breaks the fetch, as before
+    # What the seconds after the stop brought decides too. A file that failed
+    # for good in them is the failure, and the runner tries the job again as
+    # it does after any such failure. When every file arrived in them, the
+    # download is whole and the job goes on.
+    slow = slow and len(done) < len(wanted) and not report["failed"]
+    seconds = (stopped if slow else ended) - t0
     report["files"] = [key for key, _m, _path in wanted if key in done]
     report["bytes"] = sum(done.values())
     report["seconds"] = round(seconds, 1)
     if report["bytes"] and seconds > 0:
         report["mb_per_s"] = round(report["bytes"] / 1e6 / seconds, 1)
     if slow:
-        sizes = [m.get("bytes") for _key, m, _path in wanted]
-        known = all(_is_number(size) and size > 0 for size in sizes)
-        reached = too_slow(received, sum(sizes) if known else None, seconds, len(done),
-                           len(wanted), timeout_s)
+        reached = too_slow(received, total, seconds, len(done), len(wanted), timeout_s)
         report["failed"].append(reached)
         # The record of this download is its speed: all that arrived counts.
         report["bytes"], report["mb_per_s"] = received, reached["mb_per_s"]

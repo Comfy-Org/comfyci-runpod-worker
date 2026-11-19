@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import base64
 import json
-import math
 import os
 import time
 import traceback
@@ -52,6 +51,10 @@ import model_sync
 # RunPod's limit for the answer of a /run job is 10 MB. 7 MiB of files are
 # 9.8 MB as base64, which leaves room for the rest of the answer.
 MAX_INLINE_BYTES = 7 * 1024 * 1024
+# The longest time limit a job can name for its download: a day. RunPod ends
+# a job long before that, so a larger number is no limit. One that no wait
+# can take would break the fetch after its downloads have begun.
+FETCH_TIMEOUT_MAX_S = 86400
 # Written at image build time (see Dockerfile): image id, build sha, python, cuda, torch spec.
 IMAGE_INFO = Path(os.environ.get("IMAGE_INFO_FILE", "/comfy-config/image.json"))
 
@@ -80,11 +83,12 @@ def fetch_streams(job_input: dict) -> int:
 
 def fetch_timeout_s(job_input: dict) -> float | None:
     """How many seconds a job's download may take: input.fetch_timeout_s, a
-    number above 0. None for anything else, and for a job that names none:
-    its download takes as long as it takes, as before the key existed."""
+    number above 0 and no more than FETCH_TIMEOUT_MAX_S. None for anything
+    else, and for a job that names none: its download takes as long as it
+    takes, as before the key existed."""
     asked = job_input.get("fetch_timeout_s")
     if (isinstance(asked, (int, float)) and not isinstance(asked, bool)
-            and math.isfinite(asked) and asked > 0):
+            and 0 < asked <= FETCH_TIMEOUT_MAX_S):
         return asked
     return None
 

@@ -289,6 +289,14 @@ def test_a_job_that_names_a_time_limit_hands_it_to_the_fetch(tmp_path, monkeypat
     # Anything but a number above 0 is no limit either.
     for junk in (0, -5, "600", True, None, [600], float("inf"), float("nan")):
         assert told({**asked, "fetch_timeout_s": junk}) == {}, junk
+    # Nor is a number beyond a day. RunPod ends a job after an hour, and a
+    # wait takes no number that large: the fetch broke on it after its
+    # downloads had begun, and a whole number too large for a float broke
+    # the handler itself.
+    assert told({**asked, "fetch_timeout_s": 86400}) == {"timeout_s": 86400}
+    for junk in (86400.5, 86401, 1e12, 1e308, 10**30, 10**400):
+        assert told({**asked, "fetch_timeout_s": junk}) == {}, junk
+    assert handler.FETCH_TIMEOUT_MAX_S == 86400
     # The limit is for a job that fetches: without `fetch_missing` nothing reads it.
     worker = Timed(tmp_path, monkeypatch, missing=missing, report=fetched())
     answer = handler.handler({"input": {**JOB, "fetch_timeout_s": 600}})
