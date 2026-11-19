@@ -176,6 +176,22 @@ def test_what_a_smoke_entry_expects_of_its_output():
             lanes_mod.expect_of({"level": "smoke", "expect": {"width": value}})
 
 
+def test_a_number_a_smoke_entry_expects_is_finite():
+    """Python's json reads Infinity and NaN from a file as numbers, and a
+    number too large for a float as Infinity. A typed Infinity passed as "a
+    number above 0", and no output can meet it."""
+    for typed, said in (("Infinity", "Infinity"), ("1e999", "Infinity"),
+                        ("-Infinity", "-Infinity"), ("NaN", "NaN")):
+        entry = json.loads('{"level": "smoke", "expect": {"width": 64, "frames": %s}}' % typed)
+        with pytest.raises(ValueError) as refused:
+            lanes_mod.expect_of(entry)
+        assert str(refused.value) == (f"expect.frames must be a number above 0, not {said}: "
+                                      "it has to be finite"), typed
+    # A large number that is one is a number like any other.
+    large = {"frames": 1e300, "min_chars": 10**400}
+    assert lanes_mod.expect_of({"level": "smoke", "expect": large}) == large
+
+
 def test_a_nightly_or_weekly_lane_is_a_long_cadence_lane():
     assert lanes_mod.LONG_CADENCES == ("nightly", "weekly")
     assert set(lanes_mod.LONG_CADENCES) < set(lanes_mod.CADENCES)

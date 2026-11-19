@@ -241,9 +241,9 @@ def cadence_of(entry: dict | None) -> str:
 
 def expect_of(entry: dict | None) -> dict:
     """What a smoke-level entry says its output must be: `expect`, an object
-    with keys from EXPECT_KEYS and numbers above 0 ({} when absent or null).
-    ValueError for anything else, and for an entry that is not smoke level:
-    there the output is held to its reference."""
+    with keys from EXPECT_KEYS and finite numbers above 0 ({} when absent or
+    null). ValueError for anything else, and for an entry that is not smoke
+    level: there the output is held to its reference."""
     expect = (entry or {}).get("expect")
     if expect is None:
         return {}
@@ -254,6 +254,12 @@ def expect_of(entry: dict | None) -> dict:
     for key, value in expect.items():
         if key not in EXPECT_KEYS:
             raise ValueError(f"unknown expect key {key!r} (known: {', '.join(EXPECT_KEYS)})")
+        if isinstance(value, float) and not math.isfinite(value):
+            # Python reads Infinity and NaN from a JSON file as numbers, and a
+            # number too large for a float (1e999) as Infinity. No output can
+            # meet such an expectation.
+            raise ValueError(f"expect.{key} must be a number above 0, not {json.dumps(value)}: "
+                             "it has to be finite")
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
             raise ValueError(f"expect.{key} must be a number above 0, not {value!r}")
     return expect

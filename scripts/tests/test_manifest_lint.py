@@ -1016,6 +1016,16 @@ def test_level_cadence_and_expect_of_an_entry():
     assert _level_problems({**smoke_level, "golden_tag": "v1"}) == [said]
 
 
+def test_an_expectation_typed_as_infinity_or_nan_is_refused():
+    """The manifest is read with Python's json, which takes both for numbers."""
+    typed = ('{"thresholds": null, "golden_tag": null, "level": "smoke", '
+             '"expect": {"seconds": %s}}')
+    for number, said in (("Infinity", "Infinity"), ("NaN", "NaN"), ("-Infinity", "-Infinity")):
+        assert _level_problems(json.loads(typed % number)) == [
+            f"expect.seconds must be a number above 0, not {said}: it has to be finite"]
+    assert _level_problems(json.loads(typed % "30.5")) == []
+
+
 def test_moving_a_workflow_to_smoke_level_is_one_edit():
     """Nothing here asks a smoke entry for a reference: with `"level": "smoke"`
     (and a cadence) added, an entry of today still passes its own rules."""
