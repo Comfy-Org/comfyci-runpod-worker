@@ -265,6 +265,11 @@ It refuses and does not guess. What it refuses today:
   so is `--keep-sampling`.
 - **An input the node of this ComfyUI does not have**: the template was made
   for another version of the node, and the run would go on without the value.
+- **A required input with neither a link nor a value.** ComfyUI refuses such
+  a prompt. The converter reads the widgets whose type it knows, and the
+  value another widget holds is left out: the boxes of a
+  `CreateBoundingBoxes`. `--set` can give the value. A list is written the
+  way the frontend sends it: `--set '25.editor_state={"__value__": [...]}'`.
 - **A save node no check reads** (`SaveWEBM`), and a template that saves
   nothing.
 - **A loader whose models/ folder it does not know** and that lists no file

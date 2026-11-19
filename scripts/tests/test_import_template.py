@@ -1853,6 +1853,56 @@ def test_a_file_input_the_entry_cannot_list_is_refused(repo, capsys):
     assert sorted(set(repo.files()) - set(files)) == ["manifest/workflows/small_i2i_api.json"]
 
 
+def test_a_required_input_with_neither_a_link_nor_a_value_is_refused(repo, capsys):
+    """image_moss_image_t2i_bboxes draws its boxes on a CreateBoundingBoxes.
+    The widget that holds them has the type BOUNDING_BOXES, which the
+    converter does not read, so the boxes were left out without a word. A
+    server refused the prompt: "Required input is missing: editor_state".
+    With a saved /object_info the command wrote the file and ended with 0."""
+    boxes = spec({"width": ["INT", {"default": 1024}],
+                  "editor_state": ["BOUNDING_BOXES", {"default": [], "socketless": False}]},
+                 {"last_incoming": ["BOUNDING_BOXES", {"default": [], "socketless": True}]},
+                 output=["IMAGE"])
+    info = {**SERVER_INFO, "Boxes": boxes, "Batch": spec(
+        {"images": ["COMFY_AUTOGROW_V3", {}], "mode": [["a", "b"], {}]}, output=["IMAGE"])}
+    prompt = {"1": n("Boxes", width=512), "2": n("Batch", **{"images.image0": ["1", 0]}),
+              "3": n("Sampler", seed=7, model=["4", 0]), "8": n("Unknown")}
+    before = copy.deepcopy(prompt)
+    # An optional input is not asked for, and neither is one that grows: its
+    # values have names of their own. A class nobody knows is the converter's.
+    assert import_template.open_required(prompt, info) == [
+        "1:Boxes.editor_state (BOUNDING_BOXES)", "2:Batch.mode",
+        "3:Sampler.image (IMAGE)", "3:Sampler.steps (INT)"]
+    assert prompt == before
+    # A link fills an input, and so does a value: a list goes the way the frontend sends it.
+    whole = {"1": n("Boxes", width=512, editor_state={"__value__": []}),
+             "2": n("Batch", mode="a"), "3": n("Sampler", seed=7, steps=4, model=["4", 0],
+                                                image=["1", 0])}
+    assert import_template.open_required(whole, info) == []
+    # The command says it before it writes, and with no server to ask.
+    template = small_template()
+    template["nodes"][1] = ui(10, "Boxes", [512, [{"x": 0, "y": 8}], []], [2])
+    write_template(repo, template)
+    (repo.root / "object_info.json").write_text(json.dumps(info), encoding="utf-8")
+    files = repo.files()
+    for more in ([], ["--dry-run"], ["--print"], ["--dry-run", "--skip-sha"]):
+        assert import_template.main([*repo.base, *repo.offline, *more]) == 1
+        printed = capsys.readouterr()
+        assert printed.out == "" and printed.err.startswith(
+            "error: ComfyUI refuses a prompt without these required inputs, and the converter "
+            "found neither a link nor a value for them: 10:Boxes.editor_state "
+            "(BOUNDING_BOXES). The template leaves the input open, or holds its value in a "
+            "widget of a type the converter does not read. Give the value with --set, or "
+            "write the workflow by hand\nnodes (4):\n")
+    assert repo.files() == files and repo.lint == []
+    # --set gives the value the template holds.
+    given = '10.editor_state={"__value__": [{"x": 0, "y": 8}]}'
+    assert import_template.main([*repo.base, *repo.offline, "--set", given]) == 0
+    written = repo.root / "manifest" / "workflows" / "small_i2i_api.json"
+    assert json.loads(written.read_text(encoding="utf-8"))["10"] == n(
+        "Boxes", width=512, editor_state={"__value__": [{"x": 0, "y": 8}]})
+
+
 # --------------------------------------------------------------------------- #
 # files and answers that are not what they should be
 # --------------------------------------------------------------------------- #

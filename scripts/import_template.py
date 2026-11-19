@@ -110,6 +110,8 @@ SEED_NAMES = ("seed", "noise_seed")
 NET_ERRORS = (OSError, http.client.HTTPException)
 # A file name with the folder ComfyUI is told to read it from.
 ANNOTATED = re.compile(r" \[(input|output|temp)\]$")
+# Input kinds whose values come under names of their own (``images.image0``).
+GROWING = ("COMFY_AUTOGROW_V3", "COMFY_DYNAMICGROUP_V3")
 
 # ComfyUI's models/ subdirectory for each loader input, for a loader node that
 # does not list its files in `properties.models`. Keyed by loader *and* input
@@ -617,6 +619,26 @@ def unknown_literals(prompt: dict[str, dict[str, Any]], object_info: dict[str, A
         and name.split(".")[0] not in _node_inputs(object_info, node["class_type"]))
 
 
+def open_required(prompt: dict[str, dict[str, Any]], object_info: dict[str, Any]) -> list[str]:
+    """The required inputs a node has neither a link nor a value for.
+
+    ComfyUI refuses such a prompt: "Required input is missing". The converter
+    reads the widgets whose type it knows, and the value another widget holds
+    is left out without a word: the boxes of a ``CreateBoundingBoxes``, whose
+    type is ``BOUNDING_BOXES``. An input that grows is not looked at: its
+    values come under names of their own (``images.image0``).
+    """
+    found = []
+    for node_id, node in prompt.items():
+        spec = (object_info.get(node["class_type"]) or {}).get("input") or {}
+        for name, entry in (spec.get("required") or {}).items():
+            kind = entry[0] if isinstance(entry, (list, tuple)) and entry else None
+            if name not in node["inputs"] and kind not in GROWING:
+                found.append(f"{node_id}:{node['class_type']}.{name}"
+                             + (f" ({kind})" if isinstance(kind, str) else ""))
+    return sorted(found)
+
+
 def refuse_stray_files(prompt: dict[str, dict[str, Any]], object_info: dict[str, Any]) -> None:
     """Stop on a file input the entry cannot list.
 
@@ -710,6 +732,15 @@ def finish_prompt(template: dict[str, Any], object_info: dict[str, Any], workflo
             "the worker drops these inputs before it queues the prompt, because the node "
             f"of this ComfyUI does not have them: {', '.join(unknown)}. The template was "
             "made for another version of the node"
+        )
+    left_open = open_required(prompt, object_info)
+    if left_open:
+        raise ConversionError(
+            "ComfyUI refuses a prompt without these required inputs, and the converter "
+            f"found neither a link nor a value for them: {', '.join(left_open)}. The "
+            "template leaves the input open, or holds its value in a widget of a type the "
+            "converter does not read. Give the value with --set, or write the workflow by "
+            "hand"
         )
     return prompt, kind, filled, notes
 
