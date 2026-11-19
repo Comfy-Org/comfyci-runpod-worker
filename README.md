@@ -1097,8 +1097,8 @@ download that has every byte is finished and not stopped, a job whose last
 file arrives in them goes on to its workflow, and a file that fails in them
 (a wrong sha256, say) is that failure and is tried again as it always is.
 The downloads that a failed file stops (step 4) end the same way, with or
-without a limit: the job answers some 10 seconds after the failure at the
-latest, also beside a download whose connection only trickles.
+without a limit: the job answers within 10 seconds of the failure, also
+beside a download whose connection only trickles.
 
 The answer is a `model_fetch_error` whose `failure` says
 `"reason": "timed_out"` and what the download reached: "the download was too

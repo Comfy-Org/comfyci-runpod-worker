@@ -1234,11 +1234,17 @@ def test_a_file_that_failed_ends_the_job_beside_a_read_that_does_not_end(comfy, 
     for that read, billed, for as long as the connection liked."""
     monkeypatch.setattr(model_sync, "FETCH_STOP_WAIT_S", 3)
     monkeypatch.setattr(model_sync, "FETCH_CUT_AFTER_S", 0.3)
-    monkeypatch.setattr(model_sync, "FETCH_LOOK_S", 0.1)
     body = body_of("drip", 2 * MIB)
     drip = model(host, "drip.safetensors", body)
     host.routes["/drip.safetensors"] = [(200, {"X-Trickle": "20"}, body)]
     bad = {**model(host, "bad.safetensors"), "sha256": "0" * 64}
+    real = model_sync._mismatch
+
+    def late(entry, size, digest):
+        time.sleep(0.5)  # the other download is in its read when this one fails
+        return real(entry, size, digest)
+
+    monkeypatch.setattr(model_sync, "_mismatch", late)
     # Should the job wait for the read after all, the test still ends.
     rescue = threading.Timer(8, host.hold.set)
     rescue.start()
@@ -1246,7 +1252,8 @@ def test_a_file_that_failed_ends_the_job_beside_a_read_that_does_not_end(comfy, 
     report = model_sync.fetch_local([drip, bad], streams=2)
     took = time.monotonic() - started
     rescue.cancel()
-    assert took < 0.1 + 0.3 + 2.5
+    # The failure is seen when it comes, and the read is ended 0.3 s later.
+    assert 0.5 <= took < 0.5 + 0.3 + 2
     (failed,) = report["failed"]
     assert failed["model"] == "vae/bad.safetensors" and "reason" not in failed
     assert failed["error"].startswith("sha256 mismatch: got ")

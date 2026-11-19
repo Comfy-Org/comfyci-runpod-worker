@@ -92,9 +92,10 @@ TIMED_OUT = "timed_out"
 # `_open`, and changes no file (`_Fetch`).
 FETCH_STOP_WAIT_S = 10
 FETCH_CUT_AFTER_S = 8
-# Seconds between two looks of a job at its downloads while it waits for
-# them: a file that has failed ends the wait, also beside a download that is
-# held up in a read.
+# The longest a job waits for its downloads in one go. A download that ends
+# wakes the job, so a file that has failed is seen at once, also beside a
+# download that is held up in a read. The waits are this short so that none
+# is asked to take a number it cannot: a time limit can be any number.
 FETCH_LOOK_S = 1
 # How the threads of a job's downloads are named, for whoever looks for one
 # that was left behind.
@@ -908,7 +909,8 @@ def fetch_local(models: list[dict], hf_token: str | None = None,
                 look = min(look, deadline - time.monotonic())
             if look <= 0:
                 break
-            running = concurrent.futures.wait(running, timeout=look).not_done
+            running = concurrent.futures.wait(
+                running, timeout=look, return_when=concurrent.futures.FIRST_COMPLETED).not_done
         # The time is up while a download is still going, and no failed file
         # has ended the job before: the downloads are stopped, and this is why.
         slow = bool(running) and not stop.is_set()
