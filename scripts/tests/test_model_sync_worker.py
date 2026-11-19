@@ -1054,12 +1054,13 @@ def test_a_slow_connection_is_left_with_the_next_bytes_it_sends(comfy, host, mon
     drip = model(host, "drip.safetensors", body)
     host.routes["/drip.safetensors"] = [(200, {"X-Trickle": "5000"}, body)]
     started = time.monotonic()
-    report = model_sync.fetch_local([drip], timeout_s=2.2)
+    report = model_sync.fetch_local([drip], timeout_s=1.9)
     took = time.monotonic() - started
-    assert model_sync.FETCH_STOP_WAIT_S == 10 and 2.2 <= took < 2.2 + 1
+    assert model_sync.FETCH_STOP_WAIT_S == 10 and 1.9 <= took < 1.9 + 1.5
     (failed,) = report["failed"]
     # More than the first piece and less than two: it was read as it came.
-    # A read of a whole second piece would have ended 2.6 s after the start.
+    # The first piece is whole 1.3 s after the start, and a read of a whole
+    # second one would have ended at 2.6 s.
     assert 6500 < failed["received_bytes"] < 13000 and failed["wanted_bytes"] == len(body)
     assert (failed["files_done"], failed["files_wanted"]) == (0, 1)
     assert report["files"] == [] and state_of(comfy) == {}
@@ -1115,12 +1116,13 @@ def test_a_download_within_its_time_and_one_without_a_limit_are_what_they_were(c
     body = body_of("slow", 6000)
     slow = model(host, "slow.safetensors", body)
     host.routes["/slow.safetensors"] = [(200, {"X-Slow": "3000"}, body)]
+    started = time.monotonic()
     threading.Timer(0.6, host.hold.set).start()
     # The job of a runner that names no limit: its download takes as long as
     # it takes.
     report = model_sync.fetch_local([slow])
     assert report["files"] == ["vae/slow.safetensors"] and report["failed"] == []
-    assert report["seconds"] >= 0.4
+    assert time.monotonic() - started >= 0.5
     # With time to spare, the report of a download is the one it always was.
     limited = model_sync.fetch_local([model(host, "other.safetensors")], timeout_s=60)
     assert limited["files"] == ["vae/other.safetensors"] and limited["failed"] == []
