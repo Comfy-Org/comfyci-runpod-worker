@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_ts": 1795163814,
+  "generated_ts": 1795191855,
   "primary": "py313-torch2.14.1-cu130",
   "lanes": {
     "py312-torch2.11.0-cu128": {
@@ -81,11 +81,11 @@
       "branches": {
         "master": {
           "latest": {
-            "commit": "a20552b5efd844ddf4da9dce4f55e313333a9ef9",
-            "run_ts": 1795163813,
+            "commit": "4806189defb09ecbfd13b70aab72efe8d6ed4d78",
+            "run_ts": 1795191855,
             "overall": "pass"
           },
-          "count": 177,
+          "count": 178,
           "shards": [
             "2026-10",
             "2026-11"
